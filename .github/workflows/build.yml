@@ -171,11 +171,26 @@ jobs:
             echo "===== kext"
             ls -l "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU" 2>/dev/null || echo "no NMXGPU binary"
           } > ci/last-run.txt
+          # The same text on the run page, so the numbers survive a failed push.
+          { echo '```'; cat ci/last-run.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           git config user.name "ci"
           git config user.email "ci@users.noreply.github.com"
           git add ci/last-run.txt
-          git commit -m "ci: build log $GITHUB_RUN_ID" || true
-          git push || true
+          if git diff --cached --quiet; then
+            echo "no log change"
+            exit 0
+          fi
+          git commit -m "ci: build log $GITHUB_RUN_ID"
+          for i in 1 2 3; do
+            if out=$(git push origin HEAD:main 2>&1); then
+              echo "pushed the log"
+              exit 0
+            fi
+            echo "::warning title=log push $i failed::$out"
+            git pull --rebase --autostash origin main >/dev/null 2>&1 || true
+            sleep 5
+          done
+          echo "::warning title=log not published::the build log stays in ci/last-run.txt on the runner and in the nmxgpu-build artifact"
 
       # Every build step above is deliberately tolerant so that all the logs get collected.
       # Without this gate a dropped translation unit disappears silently: the sources that
@@ -186,6 +201,7 @@ jobs:
         run: |
           set -uo pipefail
           total=0
+          detail=""
           for f in /tmp/all.log /tmp/i915.log /tmp/rt.log; do
             n=$(sed -n 's/.*failed: *\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null | head -1)
             if [ -z "${n:-}" ]; then
@@ -193,8 +209,12 @@ jobs:
               exit 1
             fi
             echo "$(basename "$f"): $n failed"
+            detail="$detail $(basename "$f" .log)=$n"
             total=$((total + n))
           done
+          ksize=$(stat -f %z "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU" 2>/dev/null || echo 0)
+          sha=$(git -C /Volumes/MiniData/build/gpu-src/kpi/freebsd-src rev-parse --short HEAD 2>/dev/null || echo unknown)
+          echo "::notice title=NMXGPU build result::failed=$total$detail freebsd-src=$sha kext=${ksize}B"
           echo "total failed sources: $total"
           if [ "$total" -ne 0 ]; then
             echo "::error::$total source(s) failed to compile; see ci/last-run.txt and the nmxgpu-build artifact"
