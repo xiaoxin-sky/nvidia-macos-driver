@@ -51,12 +51,40 @@ jobs:
           curl -fsSL -o /tmp/drm.tgz https://codeload.github.com/freebsd/drm-kmod/tar.gz/c16de0f9fa84f70b9551f69fde837a7f3a73c0e9
           tar -xzf /tmp/drm.tgz -C "$S/kpi"
           mv "$S/kpi"/drm-kmod-c16de0f9fa84f70b9551f69fde837a7f3a73c0e9 "$S/kpi/drm-kmod"
-          echo "== FreeBSD LinuxKPI + CK =="
-          git clone --filter=blob:none --no-checkout --depth 1 https://github.com/freebsd/freebsd-src "$S/kpi/freebsd-src"
+          echo "== the port's linux_pci.c against today's linux/pci.h =="
+          python3 - "$X" <<'PY'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1], 'override/src/linux_pci.c')
+          s = p.read_text()
+          anchor = '#include "pcib_if.h"\n'
+          shim = '''
+          #include <linux/list.h>
+          #include <linux/spinlock.h>
+
+          /* freebsd-src 2026 made these static inside linux_pci.c (and renamed them to
+           * lkpi_pci_*) after this file was forked. The fork replaces that translation
+           * unit and override/src/linux_compat.c still defines all three, so declare them. */
+          extern struct list_head pci_drivers;
+          extern struct list_head pci_devices;
+          extern spinlock_t pci_lock;
+          '''
+          assert s.count(anchor) == 1, s.count(anchor)
+          if 'extern spinlock_t pci_lock;' not in s:
+              p.write_text(s.replace(anchor, anchor + shim, 1))
+              print('linux_pci.c: declared pci_drivers/pci_devices/pci_lock')
+          PY
+          grep -n 'extern spinlock_t pci_lock' "$X/override/src/linux_pci.c"
+          echo "== FreeBSD LinuxKPI + CK + ACPICA (pinned) =="
+          FBSD_SHA=7668705cb9837d4c3a6db9b3434b3a522220c8ea
+          git init -q "$S/kpi/freebsd-src"
           cd "$S/kpi/freebsd-src"
+          git remote add origin https://github.com/freebsd/freebsd-src
+          git fetch -q --depth 1 --filter=blob:none origin "$FBSD_SHA"
           git sparse-checkout init --cone
-          git sparse-checkout set sys/compat/linuxkpi sys/contrib/ck
-          git checkout
+          git sparse-checkout set sys/compat/linuxkpi sys/contrib/ck sys/contrib/dev/acpica
+          git checkout -q FETCH_HEAD
+          echo "freebsd-src $(git rev-parse HEAD)"
+          test -f sys/contrib/dev/acpica/include/acpi.h
           du -sh "$S/kpi/drm-kmod" "$S/kpi/freebsd-src" "$X"
 
       - name: Build the kernel extension
@@ -127,6 +155,7 @@ jobs:
           {
             echo "run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
             echo "commit $GITHUB_SHA"
+            echo "freebsd-src $(git -C "$S/kpi/freebsd-src" rev-parse HEAD 2>/dev/null || echo unknown)"
             echo
             for f in /tmp/genflags.log /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log; do
               [ -f "$f" ] && { echo "===== $f"; tail -100 "$f"; echo; }
@@ -136,7 +165,7 @@ jobs:
               [ -d "$X/$d" ] || continue
               grep -l 'error:' "$X/$d"/*.log 2>/dev/null | head -12 | while read -r l; do
                 echo "--- $l"
-                grep -m4 'error:' "$l" 2>/dev/null
+                grep -m20 'error:' "$l" 2>/dev/null
               done
             done
             echo "===== kext"
@@ -147,3 +176,30 @@ jobs:
           git add ci/last-run.txt
           git commit -m "ci: build log $GITHUB_RUN_ID" || true
           git push || true
+
+      # Every build step above is deliberately tolerant so that all the logs get collected.
+      # Without this gate a dropped translation unit disappears silently: the sources that
+      # fail are the only ones that reference ACPI, so the kext still links with no ACPI at
+      # all. This step turns that into a red run.
+      - name: Fail if any source was dropped
+        if: always()
+        run: |
+          set -uo pipefail
+          total=0
+          for f in /tmp/all.log /tmp/i915.log /tmp/rt.log; do
+            n=$(sed -n 's/.*failed: *\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null | head -1)
+            if [ -z "${n:-}" ]; then
+              echo "::error::$f is missing or has no summary line"
+              exit 1
+            fi
+            echo "$(basename "$f"): $n failed"
+            total=$((total + n))
+          done
+          echo "total failed sources: $total"
+          if [ "$total" -ne 0 ]; then
+            echo "::error::$total source(s) failed to compile; see ci/last-run.txt and the nmxgpu-build artifact"
+            exit 1
+          fi
+          test -x "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU" \
+            || { echo "::error::NMXGPU was not linked; see ci/last-run.txt"; exit 1; }
+
