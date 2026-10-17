@@ -1,0 +1,51 @@
+run 39040328752 attempt 1
+commit 840b5f58eb53d11b1d2236142d531bc7600f3d1b
+
+===== /tmp/genflags.log
+41 CONFIG defines, 56 include dirs -> amd.flags
+
+===== /tmp/all.log
+sources: 900  compiled: 895  failed: 5
+   5 fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+
+===== /tmp/i915.log
+sources: 274  compiled: 270  failed: 4
+   4 fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+
+===== /tmp/rt.log
+LK FAIL linux_acpi
+LK FAIL linux_pci
+SRC FAIL nmx_acpica
+runtime sources: 76  failed: 3
+
+===== /tmp/link.log
+NMXGPU ff325c95 13411768 B
+
+===== first failing sources
+--- /Volumes/MiniData/build/gpu-src/xkpi/logs/amdgpu_acpi.log
+/Volumes/MiniData/build/gpu-src/kpi/freebsd-src/sys/compat/linuxkpi/common/include/acpi/acpi.h:57:10: fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+--- /Volumes/MiniData/build/gpu-src/xkpi/logs/amdgpu_bios.log
+/Volumes/MiniData/build/gpu-src/kpi/freebsd-src/sys/compat/linuxkpi/common/include/acpi/acpi.h:57:10: fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+--- /Volumes/MiniData/build/gpu-src/xkpi/logs/amdgpu_dm_helpers.log
+/Volumes/MiniData/build/gpu-src/kpi/freebsd-src/sys/compat/linuxkpi/common/include/acpi/acpi.h:57:10: fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+--- /Volumes/MiniData/build/gpu-src/xkpi/logs/amdgpu_dm_pp_smu.log
+/Volumes/MiniData/build/gpu-src/kpi/freebsd-src/sys/compat/linuxkpi/common/include/acpi/acpi.h:57:10: fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+--- /Volumes/MiniData/build/gpu-src/xkpi/logs/amdgpu_dm_services.log
+/Volumes/MiniData/build/gpu-src/kpi/freebsd-src/sys/compat/linuxkpi/common/include/acpi/acpi.h:57:10: fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+--- /Volumes/MiniData/build/gpu-src/xkpi/logs-i915/i915_driver.log
+/Volumes/MiniData/build/gpu-src/kpi/freebsd-src/sys/compat/linuxkpi/common/include/acpi/acpi.h:57:10: fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+--- /Volumes/MiniData/build/gpu-src/xkpi/logs-i915/intel_freebsd.log
+/Volumes/MiniData/build/gpu-src/kpi/freebsd-src/sys/compat/linuxkpi/common/include/acpi/acpi.h:57:10: fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+--- /Volumes/MiniData/build/gpu-src/xkpi/logs-i915/intel_lvds.log
+/Volumes/MiniData/build/gpu-src/kpi/freebsd-src/sys/compat/linuxkpi/common/include/acpi/acpi.h:57:10: fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+--- /Volumes/MiniData/build/gpu-src/xkpi/logs-i915/intel_opregion.log
+/Volumes/MiniData/build/gpu-src/kpi/freebsd-src/sys/compat/linuxkpi/common/include/acpi/acpi.h:57:10: fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+--- /Volumes/MiniData/build/gpu-src/xkpi/lklogs/linux_acpi.log
+/Volumes/MiniData/build/gpu-src/kpi/freebsd-src/sys/compat/linuxkpi/common/src/linux_acpi.c:38:10: fatal error: 'contrib/dev/acpica/include/acpi.h' file not found
+--- /Volumes/MiniData/build/gpu-src/xkpi/lklogs/linux_pci.log
+override/src/linux_pci.c:304:13: error: use of undeclared identifier 'pci_lock'; did you mean 'dev_lock'?
+override/src/linux_pci.c:305:29: error: use of undeclared identifier 'pci_drivers'
+override/src/linux_pci.c:305:29: error: use of undeclared identifier 'pci_drivers'
+override/src/linux_pci.c:312:18: error: use of undeclared identifier 'pci_lock'; did you mean 'dev_lock'?
+===== kext
+-rwxr-xr-x  1 runner  staff  13411768 Oct 17 14:31 /Users/runner/work/nvidia-macos-driver/nvidia-macos-driver/out/NMXGPU.kext/Contents/MacOS/NMXGPU
