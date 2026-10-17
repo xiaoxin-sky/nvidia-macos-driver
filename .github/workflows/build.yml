@@ -51,6 +51,7 @@ jobs:
           X=$S/xkpi
           cd "$X"
           mkdir -p obj obj-i915 obj-xe lkobj srcobj xnuobj lklogs logs logs-i915
+          sed -i '' 's|-I[$]KF|-I$K/freebsd-src/sys -I$KF|' cc.sh cc-i915.sh cclk.sh ccsrc.sh
           python3 gen_flags.py "$S/kpi/drm-kmod" amd.flags | tee /tmp/genflags.log
           echo "== DRM / TTM / amdgpu =="
           bash all.sh 30 | tee /tmp/all.log || true
