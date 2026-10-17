@@ -1,0 +1,97 @@
+name: build NMXGPU (Intel, UHD 770)
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build.yml'
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 240
+    steps:
+      - name: Check out this fork (full history, for the GPU source at 7222618)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Stage the sources
+        run: |
+          set -euo pipefail
+          S=/Volumes/MiniData/build/gpu-src
+          X=$S/xkpi
+          echo "== toolchain =="
+          sw_vers
+          xcodebuild -version || true
+          xcrun --sdk macosx --show-sdk-path
+          sudo mkdir -p "$S" /opt/homebrew/bin
+          sudo chown -R "$(id -u):$(id -g)" /Volumes/MiniData
+          sudo ln -sf "$(command -v python3)" /opt/homebrew/bin/python3
+          rm -rf "$X" "$S/kpi"
+          mkdir -p "$S/kpi"
+          echo "== NMX GPU source at 7222618 (last public commit with gpu-port) =="
+          rm -rf /tmp/nmx-src && mkdir -p /tmp/nmx-src
+          git archive 7222618727449426631d13d0654f8347634717e9 gpu-port/xkpi | tar -x -C /tmp/nmx-src
+          cp -R /tmp/nmx-src/gpu-port/xkpi "$X"
+          echo "== drm-kmod at c16de0f9 (fork anchors verified) =="
+          curl -fsSL -o /tmp/drm.tgz https://codeload.github.com/freebsd/drm-kmod/tar.gz/c16de0f9fa84f70b9551f69fde837a7f3a73c0e9
+          tar -xzf /tmp/drm.tgz -C "$S/kpi"
+          mv "$S/kpi"/drm-kmod-c16de0f9fa84f70b9551f69fde837a7f3a73c0e9 "$S/kpi/drm-kmod"
+          echo "== FreeBSD LinuxKPI + Concurrency Kit =="
+          git clone --filter=blob:none --no-checkout --depth 1 https://github.com/freebsd/freebsd-src "$S/kpi/freebsd-src"
+          cd "$S/kpi/freebsd-src"
+          git sparse-checkout init --cone
+          git sparse-checkout set sys/compat/linuxkpi sys/contrib/ck
+          git checkout
+          du -sh "$S/kpi/drm-kmod" "$S/kpi/freebsd-src" "$X"
+
+      - name: Build the kernel extension
+        run: |
+          set -uo pipefail
+          S=/Volumes/MiniData/build/gpu-src
+          X=$S/xkpi
+          cd "$X"
+          python3 gen_flags.py "$S/kpi/drm-kmod" amd.flags | tee /tmp/genflags.log
+          echo "== DRM / TTM / amdgpu =="
+          bash all.sh 30 | tee /tmp/all.log || true
+          echo "== i915 =="
+          bash all-i915.sh 30 | tee /tmp/i915.log || true
+          echo "== LinuxKPI runtime + bsdcompat + IOKit glue =="
+          bash rt.sh | tee /tmp/rt.log || true
+          echo "== link (xe is left out: UHD 770 is i915 only) =="
+          python3 - <<'PY'
+          p = 'kext/build.sh'
+          s = open(p).read()
+          s = s.replace('xcrun ld -r -arch x86_64 obj-xe/*.o -exported_symbols_list xe.exp -o xe_all.o', 'true  # xe sources are not built in this job')
+          s = s.replace('obj-i915/*.o xe_all.o lkobj', 'obj-i915/*.o lkobj')
+          open(p, 'w').write(s)
+          print('patched kext/build.sh')
+          PY
+          grep -n 'obj-i915' kext/build.sh
+          mkdir -p "$GITHUB_WORKSPACE/out/logs"
+          bash kext/build.sh "$GITHUB_WORKSPACE/out" 2>&1 | tee /tmp/link.log || true
+          echo "== summary =="
+          grep -E 'sources:|runtime sources:' /tmp/all.log /tmp/i915.log /tmp/rt.log || true
+          tail -25 /tmp/link.log || true
+
+      - name: Collect logs and the kext
+        if: always()
+        run: |
+          set -uo pipefail
+          S=/Volumes/MiniData/build/gpu-src
+          X=$S/xkpi
+          mkdir -p "$GITHUB_WORKSPACE/out/logs"
+          cp /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log /tmp/genflags.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          for d in logs logs-i915 lklogs; do
+            [ -d "$X/$d" ] && cp -R "$X/$d" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          done
+          cp "$X"/xlog_nmx_kext.txt "$X"/link.log "$X"/acsi-i915.txt "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/out" || true
+          find "$GITHUB_WORKSPACE/out" -maxdepth 3 -type f | head -40 || true
+
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nmxgpu-build
+          path: out
+          if-no-files-found: warn
