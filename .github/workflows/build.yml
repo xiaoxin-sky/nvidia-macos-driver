@@ -197,6 +197,61 @@ jobs:
           ccache --show-config > "$GITHUB_WORKSPACE/out/logs/ccache-config.txt"
           cat "$GITHUB_WORKSPACE/out/logs/ccache-statistics.txt" >> "$GITHUB_STEP_SUMMARY"
 
+      # Every build step above is deliberately tolerant so that all the logs get collected.
+      # Without this gate a dropped translation unit disappears silently: the sources that
+      # fail are the only ones that reference ACPI, so the kext still links with no ACPI at
+      # all. This step turns that into a red run.
+      - name: Fail if any source was dropped
+        if: always()
+        run: |
+          set -uo pipefail
+          total=0
+          detail=""
+          for f in /tmp/all.log /tmp/i915.log /tmp/rt.log; do
+            n=$(sed -n 's/.*failed: *\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null | head -1 || true)
+            if [ -z "${n:-}" ]; then
+              echo "::error::$f is missing or has no summary line"
+              exit 1
+            fi
+            echo "$(basename "$f"): $n failed"
+            detail="$detail $(basename "$f" .log)=$n"
+            total=$((total + n))
+          done
+          ksize=$(stat -f %z "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU" 2>/dev/null || echo 0)
+          sha=$(git -C /Volumes/MiniData/build/gpu-src/kpi/freebsd-src rev-parse --short HEAD 2>/dev/null || echo unknown)
+          echo "::notice title=NMXGPU build result::failed=$total$detail freebsd-src=$sha kext=${ksize}B"
+          echo "total failed sources: $total"
+          if [ "$total" -ne 0 ]; then
+            echo "::error::$total source(s) failed to compile; see ci/last-run.txt and the nmxgpu-build artifact"
+            exit 1
+          fi
+          test -x "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU" \
+            || { echo "::error::NMXGPU was not linked; see ci/last-run.txt"; exit 1; }
+          test -f /tmp/nmx-instrumented \
+            || { echo "::error::diagnostic instrumentation did not complete"; exit 1; }
+          BIN="$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU"
+          xcrun nm -arch x86_64 "$BIN" > /tmp/nmxgpu-symbols.txt \
+            || { echo "::error::cannot read NMXGPU symbols"; exit 1; }
+          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set; do
+            grep -Eq "[[:space:]][TtDdSsBbRr][[:space:]]$sym$" /tmp/nmxgpu-symbols.txt \
+              || { echo "::error::missing defined symbol $sym (undefined imports do not count)"; exit 1; }
+          done
+          strings -a "$BIN" > /tmp/nmxgpu-strings.txt \
+            || { echo "::error::cannot read NMXGPU diagnostic strings"; exit 1; }
+          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete' 'NullMoth PCI enum v1' 'pch_detect type=' 'hpd_tables pch=' 'pch_hpd missing' 'igtt.pin.before' 'igtt.iomap.after' 'boot guard retained for recovery' 'ADL-S CPU scanout, FBC disabled' 'failed: port attach; guard retained'; do
+            grep -Fq "$marker" /tmp/nmxgpu-strings.txt \
+              || { echo "::error::missing diagnostic marker $marker"; exit 1; }
+          done
+          test -f /tmp/nmx-pci-class-test-ok || { echo "::error::PCI class iterator fixture did not pass"; exit 1; }
+          test -f /tmp/nmx-display-fixtures-ok || { echo "::error::display lifecycle/fault fixtures did not pass"; exit 1; }
+          echo "NMXGPU diagnostic symbols and stage markers verified"
+
+      - name: Preflight native kernel collection without loading the driver
+        if: success()
+        run: |
+          bash experimental/uhd770/tools/check_kernel_collection.sh \
+            "$GITHUB_WORKSPACE/out/NMXGPU.kext" "$GITHUB_WORKSPACE/out/logs"
+
       - name: Collect logs and the kext
         if: always()
         run: |
@@ -210,6 +265,10 @@ jobs:
             [ -d "$X/$d" ] && cp -R "$X/$d" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           done
           cp "$X"/xlog_nmx_kext.txt "$X"/link.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          for f in "$X"/srclog_*.txt "$X"/xlog_*.txt; do
+            [ -f "$f" ] || continue
+            cp "$f" "$GITHUB_WORKSPACE/out/logs/"
+          done
           mkdir -p "$GITHUB_WORKSPACE/out/logs/diagnostic-source"
           cp "$X/xnu/nmx_kext.cpp" "$X/xnu/nmx_fb.cpp" "$X/override/src/nmx_fb_bridge.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/xnu/nmx_pci.cpp" "$X/bsdcompat/src/nmx_bus.c" "$X/bsdcompat/include/nmx_xnu.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
@@ -250,16 +309,27 @@ jobs:
             echo "commit $GITHUB_SHA"
             echo "freebsd-src $(git -C "$S/kpi/freebsd-src" rev-parse HEAD 2>/dev/null || echo unknown)"
             echo
-            for f in /tmp/genflags.log /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log; do
-              [ -f "$f" ] && { echo "===== $f"; tail -100 "$f"; echo; }
+            for f in /tmp/genflags.log /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log "$GITHUB_WORKSPACE/out/logs/ccache-statistics.txt"; do
+              if [ -f "$f" ]; then
+                echo "===== $f"
+                tail -100 "$f"
+                echo
+              fi
             done
             echo "===== first failing sources"
             for d in logs logs-i915 lklogs; do
               [ -d "$X/$d" ] || continue
-              grep -l 'error:' "$X/$d"/*.log 2>/dev/null | head -12 | while read -r l; do
+              while IFS= read -r l; do
                 echo "--- $l"
-                grep -m20 'error:' "$l" 2>/dev/null
-              done
+                grep -m20 'error:' "$l" 2>/dev/null || true
+              done < <(grep -l 'error:' "$X/$d"/*.log 2>/dev/null | head -12 || true)
+            done
+            for l in "$X"/srclog_*.txt "$X"/xlog_*.txt; do
+              [ -f "$l" ] || continue
+              if grep -q 'error:' "$l"; then
+                echo "--- $l"
+                grep -m20 'error:' "$l" || true
+              fi
             done
             echo "===== kext"
             ls -l "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU" 2>/dev/null || echo "no NMXGPU binary"
@@ -284,55 +354,6 @@ jobs:
             sleep 5
           done
           echo "::warning title=log not published::the build log stays in ci/last-run.txt on the runner and in the nmxgpu-build artifact"
-
-      # Every build step above is deliberately tolerant so that all the logs get collected.
-      # Without this gate a dropped translation unit disappears silently: the sources that
-      # fail are the only ones that reference ACPI, so the kext still links with no ACPI at
-      # all. This step turns that into a red run.
-      - name: Fail if any source was dropped
-        if: always()
-        run: |
-          set -uo pipefail
-          total=0
-          detail=""
-          for f in /tmp/all.log /tmp/i915.log /tmp/rt.log; do
-            n=$(sed -n 's/.*failed: *\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null | head -1)
-            if [ -z "${n:-}" ]; then
-              echo "::error::$f is missing or has no summary line"
-              exit 1
-            fi
-            echo "$(basename "$f"): $n failed"
-            detail="$detail $(basename "$f" .log)=$n"
-            total=$((total + n))
-          done
-          ksize=$(stat -f %z "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU" 2>/dev/null || echo 0)
-          sha=$(git -C /Volumes/MiniData/build/gpu-src/kpi/freebsd-src rev-parse --short HEAD 2>/dev/null || echo unknown)
-          echo "::notice title=NMXGPU build result::failed=$total$detail freebsd-src=$sha kext=${ksize}B"
-          echo "total failed sources: $total"
-          if [ "$total" -ne 0 ]; then
-            echo "::error::$total source(s) failed to compile; see ci/last-run.txt and the nmxgpu-build artifact"
-            exit 1
-          fi
-          test -x "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU" \
-            || { echo "::error::NMXGPU was not linked; see ci/last-run.txt"; exit 1; }
-          test -f /tmp/nmx-instrumented \
-            || { echo "::error::diagnostic instrumentation did not complete"; exit 1; }
-          BIN="$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU"
-          xcrun nm -arch x86_64 "$BIN" > /tmp/nmxgpu-symbols.txt \
-            || { echo "::error::cannot read NMXGPU symbols"; exit 1; }
-          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set; do
-            grep -Eq "[[:space:]]$sym$" /tmp/nmxgpu-symbols.txt \
-              || { echo "::error::missing symbol $sym"; exit 1; }
-          done
-          strings -a "$BIN" > /tmp/nmxgpu-strings.txt \
-            || { echo "::error::cannot read NMXGPU diagnostic strings"; exit 1; }
-          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete' 'NullMoth PCI enum v1' 'pch_detect type=' 'hpd_tables pch=' 'pch_hpd missing' 'igtt.pin.before' 'igtt.iomap.after' 'boot guard retained for recovery' 'ADL-S CPU scanout, FBC disabled' 'failed: port attach; guard retained'; do
-            grep -Fq "$marker" /tmp/nmxgpu-strings.txt \
-              || { echo "::error::missing diagnostic marker $marker"; exit 1; }
-          done
-          test -f /tmp/nmx-pci-class-test-ok || { echo "::error::PCI class iterator fixture did not pass"; exit 1; }
-          test -f /tmp/nmx-display-fixtures-ok || { echo "::error::display lifecycle/fault fixtures did not pass"; exit 1; }
-          echo "NMXGPU diagnostic symbols and stage markers verified"
 
       - name: Save compiler cache after all build gates pass
         if: success() && env.NMX_USE_CACHE == 'true'

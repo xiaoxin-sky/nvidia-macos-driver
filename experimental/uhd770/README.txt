@@ -46,8 +46,11 @@ Validation
 ----------
 The native PCI lookup is extracted from the patched source and tested by the
 12-case host fixture. All kernel translation units must compile, required symbols
-and stage markers must be present, and the source/configuration evidence is kept
+and stage markers must be defined/present, and the source/configuration evidence is kept
 in the Actions artifact. Builds are not hardware tests.
+An isolated auxiliary kernel collection preflight checks native symbol/provider
+resolution using the runner's boot/system collections. It writes temporary files
+only, installs/loads nothing and does not distribute that KC as a live boot image.
 The actual callback/lifecycle helpers and bridge bodies also run in host fixtures
 covering concurrency, cancellation, mode fallback and injected allocation/map/
 commit/registration failures. Mocked services cannot verify kernel lock ordering

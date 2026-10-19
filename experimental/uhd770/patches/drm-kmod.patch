@@ -1,6 +1,6 @@
 --- a/drivers/gpu/drm/drm_color_mgmt.c
 +++ b/drivers/gpu/drm/drm_color_mgmt.c
-@@ -342,6 +342,28 @@
+@@ -342,6 +342,29 @@
  	return ret;
  }
  
@@ -10,6 +10,7 @@
 +int nmx_drm_gamma_set(struct drm_crtc *crtc, u16 *red, u16 *green, u16 *blue, u32 size)
 +{
 +	struct drm_device *dev;
++	struct drm_modeset_acquire_ctx ctx;
 +	int ret = 0;
 +
 +	if (!crtc || !red || !green || !blue || !size || !crtc->gamma_store || size != crtc->gamma_size)
