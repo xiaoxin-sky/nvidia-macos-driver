@@ -89,7 +89,7 @@ jobs:
 
       - name: Build the kernel extension
         run: |
-          set -uo pipefail
+          set -euo pipefail
           S=/Volumes/MiniData/build/gpu-src
           X=$S/xkpi
           cd "$X"
@@ -99,11 +99,28 @@ jobs:
           echo "== include patch check (want 1 per file) =="
           grep -c 'freebsd-src/sys' cc.sh cc-i915.sh cclk.sh ccsrc.sh || true
           python3 - <<'PY'
-          def ins(path, needle, text):
+          def ins(path, needle, text, scope=None):
+              """Insert a diagnostic after one complete C statement, including multiline calls.
+          
+              The needle must match exactly one line in the pinned source or named function.
+              A scope ends at the column-zero closing brace used by these FreeBSD sources.
+              Never insert between call arguments; reject a missing statement end.
+              """
               lines = open(path).read().split('\n')
-              hits = [i for i, l in enumerate(lines) if needle in l]
+              start, stop = 0, len(lines)
+              if scope is not None:
+                  functions = [i for i, line in enumerate(lines) if scope in line]
+                  assert len(functions) == 1, (path, scope, len(functions))
+                  start = functions[0]
+                  stop = next((i for i in range(start + 1, len(lines)) if lines[i] == '}'), len(lines))
+                  assert stop < len(lines), (path, scope, 'no function end')
+              hits = [i for i in range(start, stop) if needle in lines[i]]
               assert len(hits) == 1, (path, needle, len(hits))
-              lines.insert(hits[0] + 1, text)
+              end = hits[0]
+              while not lines[end].rstrip().endswith(';'):
+                  end += 1
+                  assert end < stop and end - hits[0] < 8, (path, needle, 'no statement end')
+              lines.insert(end + 1, text)
               open(path, 'w').write('\n'.join(lines))
           X = '/Volumes/MiniData/build/gpu-src/xkpi'
           D = '/Volumes/MiniData/build/gpu-src/kpi/drm-kmod/drivers/gpu/drm/i915'
@@ -117,9 +134,10 @@ jobs:
           s = s.replace(a, a + '\n            printf("NullMoth dbg: add_device %s offering %s\\n", device_get_nameunit(dev), dl->driver->name);', 1)
           open(p, 'w').write(s)
           p = X + '/override/src/linux_pci.c'
-          ins(p, 'error = lkpifill_pci_dev(dev, pdev);', '\tprintf("NullMoth dbg: fill -> %d\\n", error);')
-          ins(p, 'error = linux_pdev_dma_init(pdev);', '\tprintf("NullMoth dbg: dma_init -> %d\\n", error);')
-          ins(p, 'error = pdrv->probe(pdev, id);', '\t\tprintf("NullMoth dbg: pdrv %s probe -> %d\\n", pdrv->name, error);')
+          attach_scope = 'linux_pci_attach_device(device_t dev, struct pci_driver *pdrv,'
+          ins(p, 'error = lkpifill_pci_dev(dev, pdev);', '\tprintf("NullMoth dbg: fill -> %d\\n", error);', scope=attach_scope)
+          ins(p, 'error = linux_pdev_dma_init(pdev);', '\tprintf("NullMoth dbg: dma_init -> %d\\n", error);', scope=attach_scope)
+          ins(p, 'error = pdrv->probe(pdev, id);', '\t\tprintf("NullMoth dbg: pdrv %s probe -> %d\\n", pdrv->name, error);', scope=attach_scope)
           d = D + '/i915_driver.c'
           ins(d, 'ret = pci_enable_device(pdev);', '\tpr_info("NullMoth dbg: stage pci_enable -> %d\\n", ret);')
           ins(d, 'ret = i915_driver_early_probe(i915);', '\tpr_info("NullMoth dbg: stage early_probe -> %d\\n", ret);')
@@ -130,6 +148,16 @@ jobs:
           ins(d, 'ret = intel_irq_install(i915);', '\tpr_info("NullMoth dbg: stage irq_install -> %d\\n", ret);')
           ins(d, 'ret = intel_display_driver_probe_nogem(display);', '\tpr_info("NullMoth dbg: stage display_nogem -> %d\\n", ret);')
           ins(d, 'ret = i915_gem_init(i915);', '\tpr_info("NullMoth dbg: stage gem_init -> %d\\n", ret);')
+          ins(d, 'ret = intel_pxp_init(i915);', '\tpr_info("NullMoth dbg: optional pxp_init -> %d (may be ignored by upstream)\\n", ret);')
+          ins(d, 'ret = intel_display_driver_probe(display);', '\tpr_info("NullMoth dbg: stage display_probe -> %d\\n", ret);')
+          # Keep OpRegion's upstream semantics: report its result without propagating it.
+          s = open(d).read()
+          anchor = '\tintel_opregion_setup(display);'
+          assert s.count(anchor) == 1, (d, anchor, s.count(anchor))
+          replacement = '\t{\n\t\tint nmx_opregion_ret = intel_opregion_setup(display);\n\t\tpr_info("NullMoth dbg: optional opregion_setup -> %d (ignored by upstream)\\n", nmx_opregion_ret);\n\t}'
+          open(d, 'w').write(s.replace(anchor, replacement, 1))
+          op = D + '/display/intel_opregion.c'
+          ins(op, 'pci_read_config_dword(pdev, ASLS, &asls);', '\tpr_info("NullMoth dbg: opregion ASLS_present=%d\\n", asls != 0);')
           dd = D + '/display/intel_display_driver.c'
           ins(dd, 'ret = intel_vga_register(display);', '\tpr_info("NullMoth dbg: disp vga_register -> %d\\n", ret);')
           ins(dd, 'ret = intel_power_domains_init(display);', '\tpr_info("NullMoth dbg: disp power_domains_init -> %d\\n", ret);')
@@ -268,4 +296,20 @@ jobs:
           fi
           test -x "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU" \
             || { echo "::error::NMXGPU was not linked; see ci/last-run.txt"; exit 1; }
+          test -f /tmp/nmx-instrumented \
+            || { echo "::error::diagnostic instrumentation did not complete"; exit 1; }
+          BIN="$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU"
+          xcrun nm -arch x86_64 "$BIN" > /tmp/nmxgpu-symbols.txt \
+            || { echo "::error::cannot read NMXGPU symbols"; exit 1; }
+          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach; do
+            grep -Eq "[[:space:]]$sym$" /tmp/nmxgpu-symbols.txt \
+              || { echo "::error::missing symbol $sym"; exit 1; }
+          done
+          strings -a "$BIN" > /tmp/nmxgpu-strings.txt \
+            || { echo "::error::cannot read NMXGPU diagnostic strings"; exit 1; }
+          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present='; do
+            grep -Fq "$marker" /tmp/nmxgpu-strings.txt \
+              || { echo "::error::missing diagnostic marker $marker"; exit 1; }
+          done
+          echo "NMXGPU diagnostic symbols and stage markers verified"
 
