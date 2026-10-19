@@ -24,12 +24,15 @@ The repair batch includes:
   display claim;
 - initializing buffer bounds before registration's synchronous hotplug callback;
 - disabling FBC on Alder Lake-S until CPU writes have a damage/flush protocol;
-- rejecting a framebuffer that cannot allocate its required VBL timer.
+- rejecting a framebuffer that cannot allocate its required VBL timer;
+- real software interrupt disable/unregister and timer/target lifetime handling;
+- bounded initial-mode retries with mapping cleanup and atomic configuration checks;
+- registration-failure ownership and attach/stop/power-operation synchronization.
 
 audit.json maps the reviewed call chain and separates hardware-proven results,
 candidate repairs, known simplified
-interfaces and unverified paths. In particular, the IOFramebuffer interrupt
-disable/unregister implementation, gamma, hotplug, sleep/wake and the complete
+interfaces and unverified paths. In particular, hardware VBL pacing,
+gamma, dynamic mode/connector notification, sleep/wake and the complete
 ANV/Metal path still require work; this batch must not be advertised as a stable,
 complete graphics driver. A missing Metal plugin in the Intel test package is
 not repaired by the display mapping patch.
@@ -40,6 +43,10 @@ The native PCI lookup is extracted from the patched source and tested by the
 12-case host fixture. All kernel translation units must compile, required symbols
 and stage markers must be present, and the source/configuration evidence is kept
 in the Actions artifact. Builds are not hardware tests.
+The actual callback/lifecycle helpers and bridge bodies also run in host fixtures
+covering concurrency, cancellation, mode fallback and injected allocation/map/
+commit/registration failures. Mocked services cannot verify kernel lock ordering
+or actual hardware state. Windows host checks do not replace macOS compilation.
 
 Build caches
 ------------
@@ -72,8 +79,12 @@ that edit for an explicitly supplied config.plist, with backup and validation.
 Never erase all NVRAM merely to retry an experiment. No personal machine logs or
 fixed USB drive letters are committed here.
 
-Next hardware gate (after review and CI)
----------------------------------------
+Hardware gate remains closed during source completeness review
+-------------------------------------------------------------
+The user requested code defects and incomplete contracts to be handled before
+another boot test. audit.json records the remaining review work and readiness;
+a passing build alone does not reopen that gate.
+
 Verify actual runtime build/arguments, PCI/PCH/HPD initialization, GGTT placement
 and aperture mapping, mode selection and atomic commit, IOFramebuffer publication,
 then a visible desktop. Record mode/format and actual monitor signal. GPU command

@@ -129,6 +129,22 @@ jobs:
           c++ -std=c++17 -Wall -Wextra -Werror /tmp/nmx-pci-class-test.cpp -o /tmp/nmx-pci-class-test
           /tmp/nmx-pci-class-test | tee /tmp/nmx-pci-class-test.log
           touch /tmp/nmx-pci-class-test-ok
+          c++ -std=c++17 -Wall -Wextra -Werror -pthread -I"$X/xnu" \
+            "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_interrupt_fixture.cpp" \
+            -o /tmp/nmx-fb-interrupt-test
+          /tmp/nmx-fb-interrupt-test | tee /tmp/nmx-fb-interrupt-test.log
+          c++ -std=c++17 -Wall -Wextra -Werror -pthread -I"$X/xnu" \
+            "$GITHUB_WORKSPACE/experimental/uhd770/tests/attach_lifecycle_fixture.cpp" \
+            -o /tmp/nmx-attach-lifecycle-test
+          /tmp/nmx-attach-lifecycle-test | tee /tmp/nmx-attach-lifecycle-test.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_bridge_fixture.py" \
+            "$X/override/src/nmx_fb_bridge.c" \
+            "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_bridge_fixture.c.in" \
+            /tmp/nmx-fb-bridge-test.c
+          cc -std=c11 -Wall -Wextra -Werror -I"$X/bsdcompat/include/nmxxnu" \
+            /tmp/nmx-fb-bridge-test.c -o /tmp/nmx-fb-bridge-test
+          /tmp/nmx-fb-bridge-test | tee /tmp/nmx-fb-bridge-test.log
+          touch /tmp/nmx-display-fixtures-ok
           python3 gen_flags.py "$S/kpi/drm-kmod" amd.flags | tee /tmp/genflags.log
           if grep -Eq '^-DCONFIG_DRM_(DISPLAY_DP_TUNNEL|I915_DP_TUNNEL)(=|$)' amd.flags; then
             echo "::error::DP tunnel frontend/core flags must both be disabled in this port"
@@ -185,6 +201,10 @@ jobs:
           cp "$X/xnu/nmx_pci.cpp" "$X/bsdcompat/src/nmx_bus.c" "$X/bsdcompat/include/nmx_xnu.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_ddi.c" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_hotplug_irq.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp /tmp/nmx-pci-class-test.cpp /tmp/nmx-pci-class-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-fb-interrupt-test.log /tmp/nmx-fb-bridge-test.c /tmp/nmx-fb-bridge-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-attach-lifecycle-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp "$X/xnu/nmx_fb_interrupts.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
+          cp "$X/xnu/nmx_attach_lifecycle.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp /tmp/nmx-ccache-validation.log /tmp/nmx-toolchain.txt "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/cc.sh" "$X/cc-i915.sh" "$X/cclk.sh" "$X/ccsrc.sh" "$X/ccxx.sh" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/override/i915/nmx_i915_scanout.c" "$X/bsdcompat/include/nmx_port.h" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_fb_pin.c" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_fb_pin.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
@@ -293,6 +313,7 @@ jobs:
               || { echo "::error::missing diagnostic marker $marker"; exit 1; }
           done
           test -f /tmp/nmx-pci-class-test-ok || { echo "::error::PCI class iterator fixture did not pass"; exit 1; }
+          test -f /tmp/nmx-display-fixtures-ok || { echo "::error::display lifecycle/fault fixtures did not pass"; exit 1; }
           echo "NMXGPU diagnostic symbols and stage markers verified"
 
       - name: Save compiler cache after all build gates pass

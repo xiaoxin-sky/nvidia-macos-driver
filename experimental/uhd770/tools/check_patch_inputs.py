@@ -16,6 +16,7 @@ import tempfile
 
 from prepare_pci_fixture import prepare
 from enable_ccache import enable
+from prepare_bridge_fixture import prepare as prepare_bridge
 
 
 def check(port, drm, package):
@@ -39,6 +40,9 @@ def check(port, drm, package):
         for script in (package / "tools").glob("*.py"):
             ast.parse(script.read_text(encoding="utf-8"))
         prepare(x / "xnu/nmx_pci.cpp", package / "tests/pci_class_fixture.cpp.in", root / "pci-class-test.cpp")
+        prepare_bridge(x / "override/src/nmx_fb_bridge.c", package / "tests/fb_bridge_fixture.c.in", root / "fb-bridge-test.c")
+        assert (x / "xnu/nmx_fb_interrupts.h").is_file()
+        assert (x / "xnu/nmx_attach_lifecycle.h").is_file()
         enable(x)
         subprocess.run([sys.executable, str(x / "gen_flags.py"), str(d), str(root / "amd.flags")], check=True)
         flags = (root / "amd.flags").read_text(encoding="utf-8")
@@ -48,6 +52,7 @@ def check(port, drm, package):
             "shared_headers": "passed",
             "python_syntax": "passed",
             "fixture_preparation": "passed; compilation/execution requires a C++ host compiler",
+            "display_fixture_preparation": "passed; host behavior/concurrency execution is separate from GPU validation",
             "compiler_cache_launchers": "passed against patched pinned scripts; runtime cache probe requires macOS",
             "dp_tunnel_configuration": "passed",
             "macos_kernel_compilation": "not performed",

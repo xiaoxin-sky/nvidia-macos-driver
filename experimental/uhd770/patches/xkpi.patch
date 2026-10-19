@@ -291,7 +291,20 @@
  	}
 --- a/override/src/nmx_fb_bridge.c
 +++ b/override/src/nmx_fb_bridge.c
-@@ -16,6 +16,9 @@
+@@ -7,15 +7,21 @@
+  * the kext publishes its physical range as the IOFramebuffer's VRAM and WindowServer draws straight into what the
+  * display engine scans out. Smaller outputs show the top-left of the buffer (mirrored), as fbdev does.
+  *
+- * Any step that fails leaves no client behind and reports why; the kext then publishes no framebuffer.
++ * Failures before registration release all resources. After registration DRM owns
++ * cleanup; an initial hotplug failure closes the bridge, retains its pins until
++ * unregister and publishes no framebuffer. Mode retries never free a registered client.
+  */
+ #include <linux/kernel.h>
+ #include <linux/slab.h>
++#include <linux/mutex.h>
+ #include <linux/pci.h>
+ #include <linux/iosys-map.h>
  
  #include <drm/drm_client.h>
  #include <drm/drm_device.h>
@@ -301,7 +314,7 @@
  #include <drm/drm_fourcc.h>
  #include <drm/drm_framebuffer.h>
  #include <drm/drm_modes.h>
-@@ -25,12 +28,14 @@
+@@ -25,18 +31,24 @@
  
  #include "nmx_xnu.h"
  #include "nmx_port.h"
@@ -312,11 +325,21 @@
      struct drm_client_buffer *buffer;
      struct iosys_map map;
      int mapped;
++    int published;
++    int closed;
++    int hotplug_error;
 +    void *intel_scanout;
      struct nmx_fb_info info;
  };
  
-@@ -68,22 +73,26 @@
+ /* one bridge per PCI function the port drives */
+ #define MAX_FB 8
+ static struct { void *dev; struct nmx_fb *fb; } fbs[MAX_FB];
++static DEFINE_MUTEX(fbs_mutex);
+ 
+ /*
+  * amdgpu may put scan-out buffers in system memory on APUs (scatter-gather display); the bridge needs them in
+@@ -68,22 +80,38 @@
      return drm;
  }
  
@@ -327,73 +350,194 @@
  {
      struct nmx_fb *fb = container_of(client, struct nmx_fb, client);
      struct drm_mode_set *ms;
-+    int ret;
-     if (fb->buffer == NULL)
+-    if (fb->buffer == NULL)
++    int ret = 0;
++    if (READ_ONCE(fb->closed) || !fb->buffer)
          return 0;
 -    if (drm_client_modeset_probe(client, fb->info.width, fb->info.height) != 0)
 -        return 0;
-+    if (!fb->info.width || !fb->info.height)
-+        return -EINVAL;
++    if (!fb->info.width || !fb->info.height) {
++        ret = -EINVAL;
++        goto done;
++    }
++    nmx_gpu_stage_record("fb.hotplug.probe.before", 0);
 +    ret = drm_client_modeset_probe(client, fb->info.width, fb->info.height);
++    nmx_gpu_stage_record("fb.hotplug.probe.after", ret);
 +    if (ret)
-+        return ret;
++        goto done;
      mutex_lock(&client->modeset_mutex);
      drm_client_for_each_modeset(ms, client)
-         if (ms->mode != NULL)
+-        if (ms->mode != NULL)
++        if (ms->mode)
              ms->fb = fb->buffer->fb;
      mutex_unlock(&client->modeset_mutex);
 -    drm_client_modeset_commit(client);
 -    return 0;
-+    return drm_client_modeset_commit(client);
++    ret = drm_client_modeset_check(client);
++    if (!ret) {
++        nmx_gpu_stage_record("fb.hotplug.commit.before", 0);
++        ret = drm_client_modeset_commit(client);
++        nmx_gpu_stage_record("fb.hotplug.commit.after", ret);
++    }
++done:
++    fb->hotplug_error = ret;
++    return ret;
  }
  
  static void bridge_free(struct nmx_fb *fb);
-@@ -118,7 +127,9 @@
- 
- static void bridge_free(struct nmx_fb *fb)
+@@ -91,21 +119,30 @@
+ /* a userland KMS client (a DRM master) closed: put our scan-out back on the outputs */
+ static int bridge_restore(struct drm_client_dev *client)
  {
--    if (fb->mapped)
+-    return drm_client_modeset_commit(client);
++    struct nmx_fb *fb = container_of(client, struct nmx_fb, client);
++    return READ_ONCE(fb->closed) ? -ENODEV : drm_client_modeset_commit(client);
+ }
+ 
+ /*
+  * The DRM device is going away (driver detach): the DRM core has taken the client off its list and hands it back
+  * here to free. Once registered, this is the only place a bridge is freed.
+  */
+-static void bridge_unregister(struct drm_client_dev *client)
+-{
+-    struct nmx_fb *fb = container_of(client, struct nmx_fb, client);
+-    for (int i = 0; i < MAX_FB; i++)
++static void bridge_forget(struct nmx_fb *fb)
++{
++    mutex_lock(&fbs_mutex);
++    for (int i = 0; i < MAX_FB; i++) {
+         if (fbs[i].fb == fb) {
+             fbs[i].dev = NULL;
+             fbs[i].fb = NULL;
+         }
++    }
++    mutex_unlock(&fbs_mutex);
++}
++
++static void bridge_unregister(struct drm_client_dev *client)
++{
++    struct nmx_fb *fb = container_of(client, struct nmx_fb, client);
++    bridge_forget(fb);
+     bridge_free(fb);
+ }
+ 
+@@ -116,45 +153,50 @@
+     .hotplug = bridge_hotplug,
+ };
+ 
++/* Drop mode references before deleting a buffer, both between retries and at
++ * unregister. Mapping pins must be released before the GEM framebuffer. */
++static void bridge_release_buffer(struct nmx_fb *fb)
++{
++    struct drm_mode_set *ms;
++    mutex_lock(&fb->client.modeset_mutex);
++    drm_client_for_each_modeset(ms, &fb->client)
++        ms->fb = NULL;
++    mutex_unlock(&fb->client.modeset_mutex);
 +    if (fb->intel_scanout)
 +        nmx_i915_scanout_unmap(fb->intel_scanout);
 +    else if (fb->mapped)
-         drm_client_buffer_vunmap(fb->buffer);
-     if (fb->buffer != NULL)
-         drm_client_framebuffer_delete(fb->buffer);
-@@ -145,13 +156,17 @@
-     struct nmx_fb *fb = kzalloc(sizeof(*fb), GFP_KERNEL);
-     if (fb == NULL)
-         return ENOMEM;
-+    nmx_gpu_stage_record("fb.client.before", 0);
-     err = -drm_client_init(drm, &fb->client, "nmxfb", &bridge_funcs);
-+    nmx_gpu_stage_record("fb.client.after", err);
-     if (err) {
-         printf("NullMoth display: DRM client refused (%d)\n", err);
-         kfree(fb);
-         return err;
-     }
++        drm_client_buffer_vunmap(fb->buffer);
++    fb->intel_scanout = NULL;
++    fb->mapped = 0;
++    memset(&fb->map, 0, sizeof(fb->map));
++    if (fb->buffer)
++        drm_client_framebuffer_delete(fb->buffer);
++    fb->buffer = NULL;
++}
++
+ static void bridge_free(struct nmx_fb *fb)
+ {
+-    if (fb->mapped)
+-        drm_client_buffer_vunmap(fb->buffer);
+-    if (fb->buffer != NULL)
+-        drm_client_framebuffer_delete(fb->buffer);
++    bridge_release_buffer(fb);
+     drm_client_release(&fb->client);
+     kfree(fb);
+ }
+ 
+-int nmx_fb_open(void *devp, struct nmx_fb_info *out)
+-{
+-    device_t dev = devp;
+-    struct drm_device *drm = drm_of(dev);
++/* One unregistered client can retry bounded modes. No registered client is
++ * released by this path: DRM owns its lifetime after drm_client_register. */
++static int bridge_prepare(struct nmx_fb *fb, struct drm_device *drm,
++                          struct nmx_fb_info *out, unsigned max_width,
++                          unsigned max_height, const struct nmx_fb_info *previous)
++{
+     struct drm_mode_set *ms;
+     const struct drm_display_mode *best = NULL;
+-    int slot = -1, err;
+-
++    int err;
+     memset(out, 0, sizeof(*out));
+-    if (drm == NULL)
+-        return ENODEV;
+-    for (int i = 0; i < MAX_FB; i++)
+-        if (fbs[i].dev == NULL) { slot = i; break; }
+-    if (slot < 0)
+-        return ENOSPC;
+-
+-    struct nmx_fb *fb = kzalloc(sizeof(*fb), GFP_KERNEL);
+-    if (fb == NULL)
+-        return ENOMEM;
+-    err = -drm_client_init(drm, &fb->client, "nmxfb", &bridge_funcs);
+-    if (err) {
+-        printf("NullMoth display: DRM client refused (%d)\n", err);
+-        kfree(fb);
+-        return err;
+-    }
+-    err = -drm_client_modeset_probe(&fb->client, 0, 0);
 +    nmx_gpu_stage_record("fb.probe.before", 0);
-     err = -drm_client_modeset_probe(&fb->client, 0, 0);
++    err = -drm_client_modeset_probe(&fb->client, max_width, max_height);
 +    nmx_gpu_stage_record("fb.probe.after", err);
      if (err) {
          printf("NullMoth display: probing the outputs failed (%d)\n", err);
-         goto fail;
-@@ -180,7 +195,11 @@
-         goto fail;
+-        goto fail;
++        return err;
      }
- 
+     /* the buffer is as large as the largest mode any connected output asked for */
+     mutex_lock(&fb->client.modeset_mutex);
+@@ -177,69 +219,186 @@
+     if (best == NULL) {
+         printf("NullMoth display: no output is connected\n");
+         err = ENXIO;
+-        goto fail;
+-    }
+-
++        return err;
++    }
++
++    if (previous->width == out->width && previous->height == out->height &&
++        previous->pclk_khz == out->pclk_khz)
++        return EALREADY;
++
 +    printf("NullMoth display: selected %ux%u clock=%u kHz totals=%ux%u\n",
 +           out->width, out->height, out->pclk_khz, out->htotal, out->vtotal);
 +    nmx_gpu_stage_record("fb.buffer.before", 0);
      fb->buffer = drm_client_framebuffer_create(&fb->client, out->width, out->height, DRM_FORMAT_XRGB8888);
+-    if (IS_ERR(fb->buffer)) {
+-        err = -PTR_ERR(fb->buffer);
 +    nmx_gpu_stage_record("fb.buffer.after", IS_ERR(fb->buffer) ? (int)PTR_ERR(fb->buffer) : (fb->buffer != NULL ? 0 : -12));
-     if (IS_ERR(fb->buffer)) {
-         err = -PTR_ERR(fb->buffer);
++    if (IS_ERR_OR_NULL(fb->buffer)) {
++        err = fb->buffer ? -PTR_ERR(fb->buffer) : ENOMEM;
          fb->buffer = NULL;
-@@ -189,12 +208,23 @@
-     }
+         printf("NullMoth display: no %ux%u scan-out buffer (%d)\n", out->width, out->height, err);
+-        goto fail;
+-    }
++        return err;
++    }
++    if (!fb->buffer->fb)
++        return EFAULT;
      out->pitch = fb->buffer->fb->pitches[0];
- 
+-
 -    err = -drm_client_buffer_vmap(fb->buffer, &fb->map);
++    if (!out->width || !out->height || !out->pitch ||
++        (u64)out->width * 4 > out->pitch)
++        return EINVAL;
++
 +    nmx_gpu_stage_record("fb.vmap.before", 0);
 +    if (drm->driver && drm->driver->name && !strcmp(drm->driver->name, "i915")) {
 +        /* Alder Lake-S has no generic GEM vmap callback. Use i915's display
@@ -408,26 +552,38 @@
 +    nmx_gpu_stage_record("fb.vmap.after", err);
      if (err) {
          printf("NullMoth display: the scan-out buffer would not map (%d)\n", err);
-         goto fail;
-     }
+-        goto fail;
+-    }
 -    fb->mapped = 1;
++        return err;
++    }
 +    fb->mapped = fb->intel_scanout == NULL;
  
      /* the published range must be one physical run: check every page of the CPU view */
      const char *va = fb->map.is_iomem ? (const char *)fb->map.vaddr_iomem : (const char *)fb->map.vaddr;
-@@ -207,6 +237,11 @@
+     uint64_t size = (uint64_t)out->pitch * out->height;
+     uint64_t base = nmx_xnu_kva_to_phys(va);
++    uint64_t rounded = round_page(size);
++    if (!size || rounded < size || !base || base > (uint64_t)-1 - rounded)
++        return EFAULT;
+     for (uint64_t off = PAGE_SIZE; off < size; off += PAGE_SIZE)
+         if (nmx_xnu_kva_to_phys(va + off) != base + off) {
+             printf("NullMoth display: the scan-out buffer is not physically contiguous (page %llu)\n",
+                    (unsigned long long)(off / PAGE_SIZE));
              err = EFAULT;
-             goto fail;
+-            goto fail;
++            return err;
          }
 +    if (fb->intel_scanout && base != out->phys) {
 +        printf("NullMoth display: GGTT CPU aperture disagrees with scan-out range\n");
 +        err = EFAULT;
-+        goto fail;
++        return err;
 +    }
      if (base == 0) {
          err = EFAULT;
-         goto fail;
-@@ -214,21 +249,31 @@
+-        goto fail;
++        return err;
+     }
      out->phys = base;
      out->size = round_page(size);
      out->kva = (uint64_t)(uintptr_t)va;
@@ -443,36 +599,298 @@
          if (ms->mode != NULL)
              ms->fb = fb->buffer->fb;
      mutex_unlock(&fb->client.modeset_mutex);
++    nmx_gpu_stage_record("fb.check.before", 0);
++    err = -drm_client_modeset_check(&fb->client);
++    nmx_gpu_stage_record("fb.check.after", err);
++    if (err)
++        return err;
 +    nmx_gpu_stage_record("fb.commit.before", 0);
      err = -drm_client_modeset_commit(&fb->client);
 +    nmx_gpu_stage_record("fb.commit.after", err);
      if (err) {
          printf("NullMoth display: the mode set failed (%d)\n", err);
-         goto fail;
-     }
+-        goto fail;
+-    }
 -    drm_client_register(&fb->client);       /* from here on hotplug reaches bridge_hotplug */
 -
-+    /* Register invokes hotplug immediately. Publish its immutable allocation
-+     * bounds first; zero bounds mean mode_config maxima, not our buffer size. */
++        return err;
++    }
++    return 0;
++}
++
++int nmx_fb_open(void *devp, struct nmx_fb_info *out)
++{
++    static const struct { unsigned width, height; } limits[] = {
++        {0, 0}, {1920, 1080}, {1280, 720}, {1024, 768}
++    };
++    struct nmx_fb_info previous = {0};
++    struct drm_device *drm;
++    struct nmx_fb *fb;
++    int slot = -1, err = ENXIO, last_error = ENXIO;
++    if (!out)
++        return EINVAL;
++    memset(out, 0, sizeof(*out));
++    if (!devp)
++        return EINVAL;
++    drm = drm_of(devp);
++    if (!drm)
++        return ENODEV;
++    fb = kzalloc(sizeof(*fb), GFP_KERNEL);
++    if (!fb)
++        return ENOMEM;
++    mutex_lock(&fbs_mutex);
++    for (int i = 0; i < MAX_FB; i++) {
++        if (fbs[i].dev == devp) {
++            mutex_unlock(&fbs_mutex);
++            kfree(fb);
++            return EBUSY;
++        }
++        if (!fbs[i].dev && slot < 0) slot = i;
++    }
++    if (slot >= 0) {
++        fbs[slot].dev = devp;
++        fbs[slot].fb = fb;
++    }
++    mutex_unlock(&fbs_mutex);
++    if (slot < 0) {
++        kfree(fb);
++        return ENOSPC;
++    }
++    nmx_gpu_stage_record("fb.client.before", 0);
++    err = -drm_client_init(drm, &fb->client, "nmxfb", &bridge_funcs);
++    nmx_gpu_stage_record("fb.client.after", err);
++    if (err) {
++        bridge_forget(fb);
++        kfree(fb);
++        return err;
++    }
++    for (unsigned attempt = 0; attempt < ARRAY_SIZE(limits); attempt++) {
++        nmx_gpu_stage_record("fb.mode.attempt", attempt);
++        err = bridge_prepare(fb, drm, out, limits[attempt].width,
++                             limits[attempt].height, &previous);
++        if (!err)
++            break;
++        previous = *out;
++        bridge_release_buffer(fb);
++        if (err == EALREADY)
++            continue;
++        last_error = err;
++        if (err != EINVAL && err != ENOMEM && err != ENOSPC)
++            break;
++    }
++    if (err) {
++        bridge_forget(fb);
++        bridge_free(fb);
++        memset(out, 0, sizeof(*out));
++        return last_error;
++    }
++    out->ok = 1;
      fb->info = *out;
+-    fbs[slot].dev = dev;
+-    fbs[slot].fb = fb;
+-    out->ok = 1;
+-    printf("NullMoth display: %ux%u, pitch %u, phys 0x%llx, %u kHz pixel clock\n", out->width, out->height,
+-           out->pitch, (unsigned long long)out->phys, out->pclk_khz);
 +    nmx_gpu_stage_record("fb.register.before", 0);
 +    drm_client_register(&fb->client);
-+    nmx_gpu_stage_record("fb.register.after", 0);
++    nmx_gpu_stage_record("fb.register.after", fb->hotplug_error);
++    if (fb->hotplug_error) {
++        /* Registration transferred ownership to DRM. Keep the pinned buffer
++         * until unregister, even on failure; releasing the client here is invalid. */
++        WRITE_ONCE(fb->closed, 1);
++        drm_client_modeset_dpms(&fb->client, DRM_MODE_DPMS_OFF);
++        memset(out, 0, sizeof(*out));
++        return -fb->hotplug_error;
++    }
++    mutex_lock(&fbs_mutex);
++    fb->published = 1;
++    mutex_unlock(&fbs_mutex);
++    printf("NullMoth display: %ux%u, pitch %u, %u kHz pixel clock\n",
++           out->width, out->height, out->pitch, out->pclk_khz);
+     return 0;
+-
+-fail:
+-    bridge_free(fb);
+-    memset(out, 0, sizeof(*out));
+-    return err ? err : EIO;
+ }
+ 
+ /*
+@@ -248,16 +407,33 @@
+  */
+ void nmx_fb_close(void *dev)
+ {
+-    for (int i = 0; i < MAX_FB; i++)
+-        if (fbs[i].dev == dev && fbs[i].fb != NULL)
+-            drm_client_modeset_dpms(&fbs[i].fb->client, DRM_MODE_DPMS_OFF);
+-}
+-
+-/* display sleep and wake from macOS (IOFramebuffer power) */
++    mutex_lock(&fbs_mutex);
++    for (int i = 0; i < MAX_FB; i++) {
++        struct nmx_fb *fb = fbs[i].fb;
++        if (fbs[i].dev == dev && fb) {
++            WRITE_ONCE(fb->closed, 1);
++            if (fb->buffer) {
++                int ret = drm_client_modeset_dpms(&fb->client, DRM_MODE_DPMS_OFF);
++                nmx_gpu_stage_record("fb.close.dpms", ret);
++            }
++        }
++    }
++    mutex_unlock(&fbs_mutex);
++}
 +
-     fbs[slot].dev = dev;
-     fbs[slot].fb = fb;
-     out->ok = 1;
++/* Display sleep/wake keeps the same pinned buffer. A failed/closed bridge may
++ * never be reported as powered back on; lifetime remains with the DRM client. */
+ int nmx_fb_power(void *dev, int on)
+ {
+-    for (int i = 0; i < MAX_FB; i++)
+-        if (fbs[i].dev == dev)
+-            return -drm_client_modeset_dpms(&fbs[i].fb->client, on ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF);
+-    return ENODEV;
+-}
++    int err = ENODEV;
++    mutex_lock(&fbs_mutex);
++    for (int i = 0; i < MAX_FB; i++) {
++        struct nmx_fb *fb = fbs[i].fb;
++        if (fbs[i].dev == dev && fb && fb->published && !READ_ONCE(fb->closed)) {
++            err = -drm_client_modeset_dpms(&fb->client, on ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF);
++            break;
++        }
++    }
++    mutex_unlock(&fbs_mutex);
++    return err;
++}
+--- /dev/null
++++ b/xnu/nmx_attach_lifecycle.h
+@@ -0,0 +1,69 @@
++/*
++ * Serialize attach completion, stop requests and power-operation admission.
++ * The owning service supplies its live IOLock. Hardware calls run outside the
++ * lock, but stop must wait for busy() to become false before freeing the device.
++ * Cancellation is cooperative at attach phase boundaries; a hardware probe is
++ * never timed out and freed while its thread is still using the device.
++ */
++#ifndef NMX_ATTACH_LIFECYCLE_H
++#define NMX_ATTACH_LIFECYCLE_H
++class NmxAttachLifecycle {
++    IOLock *fLock = nullptr;
++    int fStatus = 0;
++    unsigned fPowerCalls = 0;
++    bool fStopping = false;
++    bool fDetached = false;
++public:
++    void initialize(IOLock *lock) { fLock = lock; }
++    bool stopping() {
++        if (!fLock) return true;
++        IOLockLock(fLock);
++        bool result = fStopping;
++        IOLockUnlock(fLock);
++        return result;
++    }
++    void requestStop() {
++        IOLockLock(fLock);
++        fStopping = true;
++        IOLockUnlock(fLock);
++    }
++    void complete(int status) {
++        IOLockLock(fLock);
++        fStatus = status;
++        IOLockUnlock(fLock);
++    }
++    bool busy() {
++        IOLockLock(fLock);
++        bool result = fStatus == 0 || fPowerCalls != 0;
++        IOLockUnlock(fLock);
++        return result;
++    }
++    bool enterPower() {
++        if (!fLock) return false;
++        IOLockLock(fLock);
++        bool result = fStatus == 1 && !fStopping && !fDetached;
++        if (result) fPowerCalls++;
++        IOLockUnlock(fLock);
++        return result;
++    }
++    bool beginDetach() {
++        IOLockLock(fLock);
++        bool result = fStopping && fStatus != 0 && !fPowerCalls && !fDetached;
++        if (result) fDetached = true;
++        IOLockUnlock(fLock);
++        return result;
++    }
++    bool enterShutdown() {
++        IOLockLock(fLock);
++        bool result = fStopping && fStatus != 0 && !fPowerCalls && !fDetached;
++        if (result) fPowerCalls++;
++        IOLockUnlock(fLock);
++        return result;
++    }
++    void leavePower() {
++        IOLockLock(fLock);
++        if (fPowerCalls) fPowerCalls--;
++        IOLockUnlock(fLock);
++    }
++};
++#endif
 --- a/xnu/nmx_fb.cpp
 +++ b/xnu/nmx_fb.cpp
-@@ -12,6 +12,7 @@
+@@ -8,10 +8,14 @@
+  * same WindowServer.
+  */
+ #include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
+ #include <IOKit/graphics/IOFramebuffer.h>
  #include <IOKit/IODeviceMemory.h>
  #include <kern/thread_call.h>
++#include <kern/thread.h>
  #include "nmx_port.h"
++#include "nmx_fb_interrupts.h"
 +extern "C" void nmx_gpu_stage_record(const char *, int);
  
  #define FBLOG(fmt, ...) IOLog("NullMoth display: " fmt "\n", ##__VA_ARGS__)
  
-@@ -45,6 +46,12 @@
+@@ -26,26 +30,50 @@
+     nmx_fb_info fInfo = {};
+     uint32_t fRefresh16 = 60 << 16;
+     uint64_t fFrameNs = 16666667ull;
+-    struct Irq { IOFBInterruptProc proc = nullptr; OSObject *target = nullptr; void *ref = nullptr; };
+-    Irq fVbl, fConnect;
++    IOLock *fIrqLock = nullptr;
++    NmxFbInterrupts fInterrupts;
+     thread_call_t fVblTimer = nullptr;
+     uint64_t fVblNext = 0;
+-    volatile bool fStopping = false;
+ 
+     static void vblFire(thread_call_param_t p0, thread_call_param_t) {
+         NMXGPUFB *me = (NMXGPUFB *)p0;
+-        if (me->fStopping) return;
+-        if (me->fVbl.proc) me->fVbl.proc(me->fVbl.target, me->fVbl.ref);
++        NmxFbInterrupts::Call call;
++        if (me->fInterrupts.beginVbl(call)) {
++            call.proc(call.target, call.ref);
++            me->fInterrupts.end(call);
++        }
+         uint64_t period;
+         nanoseconds_to_absolutetime(me->fFrameNs, &period);
+         uint64_t now = mach_absolute_time();
+         me->fVblNext = (me->fVblNext && me->fVblNext + period > now) ? me->fVblNext + period : now + period;
+-        thread_call_enter_delayed(me->fVblTimer, me->fVblNext);
++        me->fInterrupts.arm(me->fVblTimer, me->fVblNext);
++    }
++
++    /* No timer can be rearmed after stop(): cancellation/drain finishes before
++     * IOFramebuffer frees the state that its VBL callback may still access. */
++    void stopTimer() {
++        fInterrupts.stop();
++        if (!fVblTimer) return;
++        thread_call_cancel(fVblTimer);
++        while (!thread_call_free(fVblTimer)) {
++            thread_call_cancel(fVblTimer);
++            IOSleep(5);
++        }
++        fVblTimer = nullptr;
+     }
  
  public:
      bool initWith(void *dev, const nmx_fb_info &info) {
@@ -483,9 +901,13 @@
 +            !bytes || bytes > info.size || info.phys + info.size < info.phys)
 +            return false;
          if (!init()) return false;
++        fIrqLock = IOLockAlloc();
++        if (!fIrqLock) return false;
++        fInterrupts.initialize(fIrqLock);
          fDev = dev;
          fInfo = info;
-@@ -61,6 +68,11 @@
+         if (info.pclk_khz && info.htotal && info.vtotal) {
+@@ -61,27 +89,41 @@
      bool start(IOService *provider) override {
          if (!IOFramebuffer::start(provider)) return false;
          fVblTimer = thread_call_allocate(vblFire, this);
@@ -497,7 +919,47 @@
          if (fVblTimer) {
              uint64_t d;
              clock_interval_to_deadline((uint32_t)(fFrameNs / 1000), kMicrosecondScale, &d);
-@@ -93,7 +105,7 @@
+             fVblNext = d;
+-            thread_call_enter_delayed(fVblTimer, d);
+-        }
+-        registerPowerDriver(this, kFbPowerStates, 2);
++            fInterrupts.arm(fVblTimer, d);
++        }
++        IOReturn power = registerPowerDriver(this, kFbPowerStates, 2);
++        if (power != kIOReturnSuccess) {
++            stopTimer();
++            IOFramebuffer::stop(provider);
++            return false;
++        }
+         FBLOG("framebuffer %ux%u at %u.%02u Hz", fInfo.width, fInfo.height, fRefresh16 >> 16,
+               ((fRefresh16 & 0xFFFF) * 100) >> 16);
+         return true;
+     }
+ 
+     void stop(IOService *provider) override {
+-        fStopping = true;
+-        /* thread_call_cancel_wait is not exported to kexts: cancel and retry the free until the callback is out */
+-        if (fVblTimer) {
+-            thread_call_cancel(fVblTimer);
+-            while (!thread_call_free(fVblTimer)) { thread_call_cancel(fVblTimer); IOSleep(5); }
+-            fVblTimer = nullptr;
+-        }
++        stopTimer();
+         IOFramebuffer::stop(provider);
++        fDev = nullptr;
++    }
++
++    void free() override {
++        stopTimer();
++        if (fIrqLock) {
++            IOLockFree(fIrqLock);
++            fIrqLock = nullptr;
++        }
++        IOFramebuffer::free();
+     }
+ 
+     IOReturn enableController() override { return kIOReturnSuccess; }
+@@ -93,7 +135,7 @@
      IODeviceMemory *getVRAMRange() override { return IODeviceMemory::withRange(fInfo.phys, fInfo.size); }
      const char *getPixelFormats() override { return IO32BitDirectPixels "\0"; }
      IOItemCount getDisplayModeCount() override { return 1; }
@@ -506,7 +968,7 @@
      IOReturn getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info) override {
          if (mode != 1 || !info) return kIOReturnBadArgument;
          bzero(info, sizeof(*info));
-@@ -122,7 +134,7 @@
+@@ -122,7 +164,7 @@
          return kIOReturnSuccess;
      }
      IOReturn getCurrentDisplayMode(IODisplayModeID *mode, IOIndex *depth) override {
@@ -515,7 +977,34 @@
      }
      IOReturn getStartupDisplayMode(IODisplayModeID *mode, IOIndex *depth) override { return getCurrentDisplayMode(mode, depth); }
      /* without a timing, WindowServer shows the display at 0.00 Hz (seen with NMIntelFB) */
-@@ -218,7 +230,9 @@
+@@ -151,12 +193,10 @@
+     IOItemCount getConnectionCount() override { return 1; }
+     IOReturn registerForInterruptType(IOSelect type, IOFBInterruptProc proc, OSObject *target, void *ref,
+                                       void **iref) override {
+-        if (type == kIOFBVBLInterruptType) { fVbl = { proc, target, ref }; if (iref) *iref = &fVbl; return kIOReturnSuccess; }
+-        if (type == kIOFBConnectInterruptType) { fConnect = { proc, target, ref }; if (iref) *iref = &fConnect; return kIOReturnSuccess; }
+-        return kIOReturnUnsupported;
+-    }
+-    IOReturn unregisterInterrupt(void *) override { return kIOReturnSuccess; }
+-    IOReturn setInterruptState(void *, UInt32) override { return kIOReturnSuccess; }
++        return fInterrupts.install(type, proc, target, ref, iref);
++    }
++    IOReturn unregisterInterrupt(void *reference) override { return fInterrupts.remove(reference); }
++    IOReturn setInterruptState(void *reference, UInt32 state) override { return fInterrupts.setState(reference, state); }
+     IOReturn setGammaTable(UInt32, UInt32, UInt32, void *) override { return kIOReturnSuccess; }
+     IOReturn setGammaTable(UInt32, UInt32, UInt32, void *, bool) override { return kIOReturnSuccess; }
+     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
+@@ -171,7 +211,8 @@
+         if (attribute == kIOWindowServerActiveAttribute) return kIOReturnSuccess;
+         if (attribute == kIOPowerAttribute) {
+             /* display sleep turns the outputs off; wake lights them again with the same buffer */
+-            if (fDev) nmx_fb_power(fDev, value != 0);
++            if (!fDev || nmx_fb_power(fDev, value != 0) != 0)
++                return kIOReturnNotReady;
+             if (value) {
+                 IOReturn r = IOFramebuffer::setAttribute(attribute, value);
+                 handleEvent(kIOFBNotifyDidPowerOn);
+@@ -218,7 +259,9 @@
  IOService *nmx_fb_publish(IOService *gpu, void *dev)
  {
      nmx_fb_info info;
@@ -525,9 +1014,142 @@
      if (err || !info.ok) {
          FBLOG("no framebuffer (%d)", err);
          return nullptr;
+--- /dev/null
++++ b/xnu/nmx_fb_interrupts.h
+@@ -0,0 +1,130 @@
++/*
++ * Callback lifetime for the software IOFramebuffer interrupt source. The caller
++ * supplies IOKit/thread declarations and owns the lock and timer. Callback code
++ * runs without this lock. Unregister prevents new calls and waits for another
++ * thread's in-flight call before returning; self-unregister never waits on itself.
++ * Targets are borrowed while installed and retained for each dispatched call.
++ * Stop must precede timer cancellation/drain, and drain must precede lock freeing.
++ * The same implementation is compiled into the host concurrency fixture.
++ */
++#ifndef NMX_FB_INTERRUPTS_H
++#define NMX_FB_INTERRUPTS_H
++
++class NmxFbInterrupts {
++    struct Slot {
++        IOFBInterruptProc proc = nullptr;
++        OSObject *target = nullptr;
++        void *ref = nullptr;
++        bool enabled = false;
++        bool active = false;
++        unsigned removing = 0;
++        thread_t running = THREAD_NULL;
++    };
++    IOLock *fLock = nullptr;
++    Slot fVbl, fConnect;
++    bool fStopping = false;
++
++    Slot *lookup(void *reference) {
++        if (reference == &fVbl) return &fVbl;
++        if (reference == &fConnect) return &fConnect;
++        return nullptr;
++    }
++
++public:
++    struct Call {
++        IOFBInterruptProc proc = nullptr;
++        OSObject *target = nullptr;
++        void *ref = nullptr;
++        void *slot = nullptr;
++    };
++
++    void initialize(IOLock *lock) { fLock = lock; }
++
++    IOReturn install(IOSelect type, IOFBInterruptProc proc, OSObject *target,
++                     void *ref, void **reference) {
++        if (!reference || !proc || !fLock) return kIOReturnBadArgument;
++        *reference = nullptr;
++        Slot *slot = type == kIOFBVBLInterruptType ? &fVbl :
++                     type == kIOFBConnectInterruptType ? &fConnect : nullptr;
++        if (!slot) return kIOReturnUnsupported;
++        IOLockLock(fLock);
++        IOReturn ret = kIOReturnSuccess;
++        if (fStopping) ret = kIOReturnNotReady;
++        else if (slot->proc || slot->active || slot->removing) ret = kIOReturnExclusiveAccess;
++        else {
++            slot->proc = proc;
++            slot->target = target;
++            slot->ref = ref;
++            slot->enabled = true;
++            *reference = slot;
++        }
++        IOLockUnlock(fLock);
++        return ret;
++    }
++
++    IOReturn remove(void *reference) {
++        Slot *slot = lookup(reference);
++        if (!slot || !fLock) return kIOReturnBadArgument;
++        IOLockLock(fLock);
++        slot->removing++;
++        slot->enabled = false;
++        slot->proc = nullptr;
++        slot->target = nullptr;
++        slot->ref = nullptr;
++        while (slot->active && slot->running != current_thread())
++            IOLockSleep(fLock, slot, THREAD_UNINT);
++        slot->removing--;
++        IOLockUnlock(fLock);
++        return kIOReturnSuccess;
++    }
++
++    IOReturn setState(void *reference, UInt32 state) {
++        Slot *slot = lookup(reference);
++        if (!slot || !fLock) return kIOReturnBadArgument;
++        IOLockLock(fLock);
++        IOReturn ret = slot->proc ? kIOReturnSuccess : kIOReturnBadArgument;
++        if (slot->proc) slot->enabled = state != 0 && !fStopping;
++        IOLockUnlock(fLock);
++        return ret;
++    }
++
++    bool beginVbl(Call &call) {
++        IOLockLock(fLock);
++        bool ready = !fStopping && fVbl.enabled && fVbl.proc && !fVbl.active;
++        if (ready) {
++            fVbl.active = true;
++            fVbl.running = current_thread();
++            call = {fVbl.proc, fVbl.target, fVbl.ref, &fVbl};
++            if (call.target) call.target->retain();
++        }
++        IOLockUnlock(fLock);
++        return ready;
++    }
++
++    void end(Call &call) {
++        Slot *slot = lookup(call.slot);
++        if (!slot) return;
++        IOLockLock(fLock);
++        slot->active = false;
++        slot->running = THREAD_NULL;
++        IOLockWakeup(fLock, slot, false);
++        IOLockUnlock(fLock);
++        if (call.target) call.target->release();
++        call = {};
++    }
++
++    void stop() {
++        if (!fLock) return;
++        IOLockLock(fLock);
++        fStopping = true;
++        fVbl.enabled = fConnect.enabled = false;
++        IOLockUnlock(fLock);
++    }
++
++    void arm(thread_call_t timer, uint64_t deadline) {
++        IOLockLock(fLock);
++        if (!fStopping) thread_call_enter_delayed(timer, deadline);
++        IOLockUnlock(fLock);
++    }
++};
++#endif
 --- a/xnu/nmx_kext.cpp
 +++ b/xnu/nmx_kext.cpp
-@@ -18,6 +18,7 @@
+@@ -18,11 +18,13 @@
  #include <IOKit/pci/IOPCIDevice.h>
  #include <libkern/c++/OSBoolean.h>
  #include <libkern/c++/OSData.h>
@@ -535,7 +1157,41 @@
  #include <mach/kmod.h>
  #include <pexpert/pexpert.h>
  #include <kern/thread.h>
-@@ -183,9 +184,47 @@
+ #include "nmx_port.h"
+ #include "nmx_xnu.h"
++#include "nmx_attach_lifecycle.h"
+ 
+ #define AMD_VENDOR 0x1002
+ #define INTEL_VENDOR 0x8086
+@@ -36,10 +38,11 @@
+     void *dev_;
+     IOService *fb_;
+     IOPCIDevice *pci_;
+-    volatile int attach_;   /* 0 = attach pending on its thread, 1 = attached, -1 = not attached */
++    NmxAttachLifecycle lifecycle_;
+     bool pm_;
+     static void attachThread(void *arg, wait_result_t);
+     void attachNow();
++    bool abortIfStopping();
+ public:
+     IOService *probe(IOService *provider, SInt32 *score) override;
+     bool start(IOService *provider) override;
+@@ -109,12 +112,12 @@
+     dev_ = nullptr;
+     fb_ = nullptr;
+     pm_ = false;
+-    attach_ = 0;
++    lifecycle_.initialize(g_lock);
+     retain();
+     thread_t t = THREAD_NULL;
+     if (kernel_thread_start(&NMXGPU::attachThread, this, &t) != KERN_SUCCESS) {
+         IOLog("NullMoth GPU: could not start the attach thread\n");
+-        attach_ = -1;
++        lifecycle_.complete(-1);
+         release();
+         return true;
+     }
+@@ -183,12 +186,65 @@
      n->release();
  }
  
@@ -573,31 +1229,62 @@
 +    IOLog("NullMoth trace: %s\n", value);
 +}
 +
++bool NMXGPU::abortIfStopping()
++{
++    if (!lifecycle_.stopping())
++        return false;
++    setProperty("nullmoth-gpu-state", "cancelled: service stopping");
++    nmx_gpu_stage_record("attach.cancelled", -1);
++    lifecycle_.complete(-1);
++    return true;
++}
++
  void NMXGPU::attachNow()
  {
+-    int err = nmx_xnu_wait_firmware_root(300);
 +    nmx_diag_set_owner(this);
 +    setProperty("nmxdiag-build", "memstage-v2-20261019");
 +    nmx_gpu_stage_record("firmware.wait.before", 0);
-     int err = nmx_xnu_wait_firmware_root(300);
++    int err = 0;
++    for (int wait = 0; wait < 300; wait++) {
++        if (abortIfStopping()) return;
++        err = nmx_xnu_wait_firmware_root(1);
++        if (!err) break;
++    }
 +    nmx_gpu_stage_record("firmware.wait.after", err);
      if (err) {
          IOLog("NullMoth GPU: the firmware folder never appeared (%d); this GPU stays with macOS\n", err);
-         attach_ = -1;
-@@ -199,10 +238,24 @@
-         attach_ = -1;
+-        attach_ = -1;
++        lifecycle_.complete(-1);
          return;
      }
+     if (nmx_marker_set()) {
+@@ -196,45 +252,104 @@
+               "with macOS. Send logs, then turn the test driver off and on to try again\n",
+               pci_->configRead16(kIOPCIConfigVendorID), pci_->configRead16(kIOPCIConfigDeviceID));
+         setProperty("nullmoth-gpu-state", "parked: the last attach never returned");
+-        attach_ = -1;
+-        return;
+-    }
++        lifecycle_.complete(-1);
++        return;
++    }
 +    /* Diagnostic-only delay, not a display/initialization fix. */
 +    int nmx_diag_delay = 90;
 +    PE_parse_boot_argn("nmxdiagdelay", &nmx_diag_delay, sizeof(nmx_diag_delay));
 +    if (nmx_diag_delay < 30 || nmx_diag_delay > 300)
 +        nmx_diag_delay = 90;
 +    nmx_gpu_stage_record("delay.before", nmx_diag_delay);
-+    IOSleep(static_cast<unsigned>(nmx_diag_delay) * 1000U);
++    for (int wait = 0; wait < nmx_diag_delay; wait++) {
++        if (abortIfStopping()) return;
++        IOSleep(1000);
++    }
++    if (abortIfStopping()) return;
 +    nmx_gpu_stage_record("delay.after", 0);
 +    nmx_gpu_stage_record("guard.set.before", 0);
      nmx_marker_write(true);
 +    nmx_gpu_stage_record("guard.set.after", 0);
++    if (abortIfStopping()) return;
 +    nmx_gpu_stage_record("port.before", 0);
      dev_ = nmx_port_attach(pci_);
 +    nmx_gpu_stage_record("port.after", dev_ != nullptr ? 0 : -1);
@@ -608,23 +1295,37 @@
 +        setProperty("nullmoth-gpu-state", "failed: port attach; guard retained");
          IOLog("NullMoth GPU: no driver took %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
                pci_->configRead16(kIOPCIConfigDeviceID));
-         attach_ = -1;
-@@ -213,26 +266,55 @@
+-        attach_ = -1;
+-        return;
+-    }
++        lifecycle_.complete(-1);
++        return;
++    }
++
++    if (abortIfStopping()) return;
+ 
+     static IOPMPowerState states[2] = {
          { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
          { kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
      };
 +    nmx_gpu_stage_record("publish.before", 0);
 +    nmx_gpu_stage_record("pm.init.before", 0);
      PMinit();
++    pm_ = true;
 +    nmx_gpu_stage_record("pm.init.after", 0);
 +    nmx_gpu_stage_record("pm.join.before", 0);
      pci_->joinPMtree(this);
 -    registerPowerDriver(this, states, 2);
+-    pm_ = true;
 +    nmx_gpu_stage_record("pm.join.after", 0);
 +    nmx_gpu_stage_record("pm.register.before", 0);
 +    IOReturn nmx_pm_ret = registerPowerDriver(this, states, 2);
 +    nmx_gpu_stage_record("pm.register.after", static_cast<int>(nmx_pm_ret));
-     pm_ = true;
++    if (nmx_pm_ret != kIOReturnSuccess) {
++        setProperty("nullmoth-gpu-state", "failed: power registration; guard retained");
++        lifecycle_.complete(-1);
++        return;
++    }
 +    nmx_gpu_stage_record("service.self.before", 0);
      registerService();
 +    nmx_gpu_stage_record("service.self.after", 0);
@@ -639,6 +1340,7 @@
 +    nmx_gpu_stage_record("service.pci.after", 0);
 +    nmx_gpu_stage_record("publish.after", 0);
      /* light the outputs and hand them to macOS; without it the device still renders, with no screen of its own */
++    if (abortIfStopping()) return;
 +    nmx_gpu_stage_record("framebuffer.before", 0);
      fb_ = nmx_fb_publish(this, dev_);
 +    nmx_gpu_stage_record("framebuffer.after", fb_ != nullptr ? 0 : -1);
@@ -649,34 +1351,63 @@
 +        setProperty("nullmoth-gpu-state", "failed: no framebuffer; guard retained");
 +        pci_->removeProperty("nmxgpu-claimed");
 +        IOLog("NullMoth GPU: no framebuffer; boot guard retained for recovery\n");
-+        attach_ = -1;
++        lifecycle_.complete(-1);
 +        nmx_gpu_stage_record("attach.no_framebuffer", -1);
 +        return;
 +    }
++    if (abortIfStopping()) return;
      nmx_marker_write(false);
      IOLog("NullMoth GPU: driving %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
            pci_->configRead16(kIOPCIConfigDeviceID));
      OSSynchronizeIO();
-     attach_ = 1;
+-    attach_ = 1;
++    lifecycle_.complete(1);
 +    nmx_gpu_stage_record("attach.complete", fb_ != nullptr ? 0 : -1);
  }
  
  void NMXGPU::stop(IOService *provider)
  {
+-    /* an attach still running on its thread finishes first (it holds a reference on this object meanwhile) */
+-    for (int i = 0; attach_ == 0 && i < 6000; i++)
++    lifecycle_.requestStop();
 +    nmx_diag_set_owner(nullptr);
-     /* an attach still running on its thread finishes first (it holds a reference on this object meanwhile) */
-     for (int i = 0; attach_ == 0 && i < 6000; i++)
++    /* Never detach the port underneath an active probe or power callback. The
++     * attach thread observes cancellation before/after its hardware phases. */
++    while (!lifecycle_.beginDetach())
          IOSleep(100);
-@@ -255,7 +337,9 @@
+     provider->removeProperty("nmxgpu-claimed");
+     if (fb_ != nullptr)
+@@ -254,18 +369,27 @@
+ /* state 0 = sleep, 1 = on */
  IOReturn NMXGPU::setPowerState(unsigned long state, IOService *device)
  {
-     if (dev_ != nullptr) {
+-    if (dev_ != nullptr) {
++    if (lifecycle_.enterPower()) {
 +        nmx_gpu_stage_record("pm.callback.before", static_cast<int>(state));
          int err = nmx_port_power(dev_, state != 0);
 +        nmx_gpu_stage_record("pm.callback.after", err);
          if (err)
              IOLog("NullMoth GPU: %s returned %d\n", state ? "resume" : "suspend", err);
++        lifecycle_.leavePower();
      }
+     return kIOPMAckImplied;
+ }
+ 
+ void NMXGPU::systemWillShutdown(IOOptionBits spec)
+ {
+-    if (dev_ != nullptr)
+-        nmx_port_shutdown(dev_);
++    lifecycle_.requestStop();
++    while (lifecycle_.busy())
++        IOSleep(100);
++    if (lifecycle_.enterShutdown()) {
++        if (dev_ != nullptr)
++            nmx_port_shutdown(dev_);
++        lifecycle_.leavePower();
++    }
+     IOService::systemWillShutdown(spec);
+ }
+ 
 --- a/xnu/nmx_pci.cpp
 +++ b/xnu/nmx_pci.cpp
 @@ -221,6 +221,42 @@

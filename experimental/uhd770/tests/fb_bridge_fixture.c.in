@@ -1,0 +1,256 @@
+/* Fault injection for the actual display bridge. Mock services model DRM client
+ * ownership and buffer pins; no successful result here establishes GPU output. */
+#include <assert.h>
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "nmx_port.h"
+
+typedef uint64_t u64;
+#define __iomem
+#define GFP_KERNEL 0
+#define PAGE_SIZE 4096u
+#define DRM_FORMAT_XRGB8888 1
+#define DRM_MODE_DPMS_ON 0
+#define DRM_MODE_DPMS_OFF 3
+#define M_TEMP 0
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define container_of(p, t, member) ((t *)((char *)(p) - offsetof(t, member)))
+#define round_page(n) (((n) + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1))
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x, v) ((x) = (v))
+#define IS_ERR(p) ((intptr_t)(p) < 0 && (intptr_t)(p) > -4096)
+#define IS_ERR_OR_NULL(p) (!(p) || IS_ERR(p))
+#define PTR_ERR(p) ((int)(intptr_t)(p))
+#define ERR_PTR(n) ((void *)(intptr_t)(n))
+struct mutex { unsigned depth; };
+#define DEFINE_MUTEX(name) struct mutex name = {0}
+static void mutex_lock(struct mutex *m) { assert(!m->depth); m->depth = 1; }
+static void mutex_unlock(struct mutex *m) { assert(m->depth); m->depth = 0; }
+struct drm_client_dev;
+struct drm_client_buffer;
+struct drm_framebuffer {
+    unsigned pitches[1];
+    unsigned height;
+    void *data;
+    struct drm_client_buffer *buffer;
+};
+struct drm_display_mode {
+    unsigned hdisplay, vdisplay, clock, htotal, vtotal;
+    unsigned hsync_start, hsync_end, vsync_start, vsync_end;
+};
+struct drm_mode_set { struct drm_display_mode *mode; struct drm_framebuffer *fb; };
+struct drm_client_funcs {
+    void *owner;
+    void (*unregister)(struct drm_client_dev *);
+    int (*restore)(struct drm_client_dev *);
+    int (*hotplug)(struct drm_client_dev *);
+};
+struct drm_driver { const char *name; };
+struct drm_device { struct drm_driver *driver; };
+struct drm_client_dev {
+    struct drm_device *dev;
+    struct mutex modeset_mutex;
+    struct drm_mode_set modes[1];
+    const struct drm_client_funcs *funcs;
+    int registered;
+};
+struct drm_client_buffer {
+    struct drm_framebuffer *fb;
+    struct drm_client_dev *client;
+    int pinned;
+};
+struct iosys_map { int is_iomem; void *vaddr; void *vaddr_iomem; };
+static void iosys_map_set_vaddr_iomem(struct iosys_map *m, void *p) {
+    m->is_iomem = 1; m->vaddr_iomem = p;
+}
+static void memset_io(void *p, int c, size_t n) { memset(p, c, n); }
+static void wmb(void) {}
+#define drm_client_for_each_modeset(ms, c) \
+    for ((ms) = (c)->modes; (ms) < (c)->modes + 1; ++(ms))
+
+static struct drm_driver driver = {"i915"};
+static struct drm_device mock_drm = {&driver};
+struct pci_dev { struct drm_device *drm; };
+static struct pci_dev pci = {&mock_drm};
+struct mock_device { int attached; };
+typedef struct mock_device *device_t;
+static struct mock_device device = {1};
+static int initialized, buffers, maps, instances, registered_count, unregistering;
+static int init_error, alloc_error, create_failures, create_null, missing_fb;
+static int map_error, map_failures, noncontiguous, probe_error_call, check_error_call;
+static int commit_error_call, no_output, probe_calls, check_calls, commit_calls;
+static unsigned register_width, register_height, mode_cap;
+static struct drm_client_dev *registered[8];
+static struct drm_display_mode modes[] = {
+    {3840,2160,594000,4400,2250,4016,4104,2168,2178},
+    {1920,1080,148500,2200,1125,2008,2052,1084,1089},
+    {1280,720,74250,1650,750,1390,1430,725,730},
+    {1024,768,65000,1344,806,1048,1184,771,777}
+};
+static void *kzalloc(size_t n, int unused) {
+    (void)unused;
+    if (alloc_error) return NULL;
+    void *p = calloc(1, n); if (p) ++instances; return p;
+}
+static void kfree(void *p) { if (p) { assert(instances > 0); --instances; free(p); } }
+static int device_get_children(device_t dev, device_t **kids, int *n) {
+    (void)dev; *kids = malloc(sizeof(**kids)); assert(*kids);
+    **kids = &device; *n = 1; return 0;
+}
+static int device_is_attached(device_t dev) { return dev->attached; }
+static void *device_get_softc(device_t dev) { (void)dev; return &pci; }
+static struct drm_device *pci_get_drvdata(struct pci_dev *p) { return p->drm; }
+static int drm_client_init(struct drm_device *d, struct drm_client_dev *c,
+                           const char *name, const struct drm_client_funcs *funcs) {
+    (void)name;
+    if (init_error) return -init_error;
+    c->dev = d; c->funcs = funcs; ++initialized; return 0;
+}
+static void drm_client_release(struct drm_client_dev *c) {
+    assert(!c->registered || unregistering);
+    assert(initialized > 0); --initialized;
+}
+static int drm_client_modeset_probe(struct drm_client_dev *c, unsigned w, unsigned h) {
+    ++probe_calls;
+    if (probe_error_call == probe_calls) return -EIO;
+    c->modes[0].mode = NULL;
+    if (no_output) return 0;
+    for (unsigned i = 0; i < ARRAY_SIZE(modes); ++i) {
+        if ((!w || modes[i].hdisplay <= w) && (!h || modes[i].vdisplay <= h) &&
+            (!mode_cap || modes[i].hdisplay <= mode_cap)) {
+            c->modes[0].mode = &modes[i]; break;
+        }
+    }
+    return 0;
+}
+static int drm_client_modeset_check(struct drm_client_dev *c) {
+    (void)c; ++check_calls; return check_error_call == check_calls ? -EINVAL : 0;
+}
+static int drm_client_modeset_commit(struct drm_client_dev *c) {
+    assert(c->modes[0].fb); ++commit_calls;
+    return commit_error_call == commit_calls ? -EINVAL : 0;
+}
+static int drm_client_modeset_dpms(struct drm_client_dev *c, int mode) {
+    (void)c; (void)mode; return 0;
+}
+static void drm_client_register(struct drm_client_dev *c) {
+    assert(registered_count < 8);
+    c->registered = 1; registered[registered_count++] = c;
+    assert(c->modes[0].fb);
+    register_width = c->modes[0].mode->hdisplay;
+    register_height = c->modes[0].mode->vdisplay;
+    c->funcs->hotplug(c);
+}
+static struct drm_client_buffer *drm_client_framebuffer_create(
+    struct drm_client_dev *c, unsigned w, unsigned h, int format) {
+    (void)format;
+    if (create_failures) { --create_failures; return ERR_PTR(-ENOMEM); }
+    if (create_null) return NULL;
+    struct drm_client_buffer *b = calloc(1, sizeof(*b)); assert(b);
+    b->client = c; ++buffers;
+    if (missing_fb) return b;
+    b->fb = calloc(1, sizeof(*b->fb)); assert(b->fb);
+    b->fb->pitches[0] = w * 4; b->fb->height = h; b->fb->buffer = b;
+    b->fb->data = calloc(1, (size_t)w * h * 4); assert(b->fb->data);
+    return b;
+}
+static void drm_client_framebuffer_delete(struct drm_client_buffer *b) {
+    assert(!b->pinned && !b->client->modes[0].fb);
+    if (b->fb) { free(b->fb->data); free(b->fb); }
+    free(b); assert(buffers > 0); --buffers;
+}
+static int drm_client_buffer_vmap(struct drm_client_buffer *b, struct iosys_map *m) {
+    m->vaddr = b->fb->data; ++maps; b->pinned = 1; return 0;
+}
+static void drm_client_buffer_vunmap(struct drm_client_buffer *b) {
+    assert(b->pinned); b->pinned = 0; --maps;
+}
+int nmx_i915_scanout_map(struct drm_framebuffer *fb, struct nmx_fb_info *info, void **cookie) {
+    *cookie = NULL;
+    if (map_failures) { --map_failures; return map_error; }
+    fb->buffer->pinned = 1; ++maps; *cookie = fb->buffer;
+    info->kva = (uint64_t)(uintptr_t)fb->data;
+    info->phys = (uint64_t)(uintptr_t)fb->data;
+    return 0;
+}
+void nmx_i915_scanout_unmap(void *cookie) {
+    struct drm_client_buffer *b = cookie;
+    assert(b->pinned); b->pinned = 0; assert(maps > 0); --maps;
+}
+static uint64_t nmx_xnu_kva_to_phys(const void *p) {
+    return (uint64_t)(uintptr_t)p + (noncontiguous ? PAGE_SIZE : 0);
+}
+void nmx_gpu_stage_record(const char *stage, int result) { (void)stage; (void)result; }
+int amdgpu_sg_display;
+// Only the production bridge uses FreeBSD's two-argument free form.
+#define free(p, type) free(p)
+
+/* NMX_BRIDGE_IMPLEMENTATION */
+
+#undef free
+static void cleanup(void) {
+    while (registered_count) {
+        struct drm_client_dev *c = registered[--registered_count];
+        unregistering = 1; c->funcs->unregister(c); unregistering = 0;
+    }
+    assert(!initialized && !buffers && !maps && !instances);
+    for (unsigned i = 0; i < MAX_FB; ++i) assert(!fbs[i].dev && !fbs[i].fb);
+}
+static void reset(void) {
+    cleanup();
+    init_error = alloc_error = create_failures = create_null = missing_fb = 0;
+    map_error = map_failures = noncontiguous = probe_error_call = check_error_call = 0;
+    commit_error_call = no_output = probe_calls = check_calls = commit_calls = 0;
+    register_width = register_height = mode_cap = 0;
+    driver.name = "i915";
+}
+int main(void) {
+    struct nmx_fb_info info;
+    reset();
+    assert(nmx_fb_open(&device, NULL) == EINVAL);
+    alloc_error = 1; assert(nmx_fb_open(&device, &info) == ENOMEM && !info.ok);
+    reset(); init_error = EIO;
+    assert(nmx_fb_open(&device, &info) == EIO && !info.ok);
+    reset(); probe_error_call = 1;
+    assert(nmx_fb_open(&device, &info) == EIO && !info.ok);
+    reset(); no_output = 1;
+    assert(nmx_fb_open(&device, &info) == ENXIO && !info.ok);
+    reset();
+    assert(!nmx_fb_open(&device, &info) && info.ok);
+    assert(register_width == 3840 && register_height == 2160);
+    assert(nmx_fb_open(&device, &info) == EBUSY);
+    assert(!nmx_fb_power(&device, 1));
+    nmx_fb_close(&device); assert(nmx_fb_power(&device, 1) == ENODEV);
+    reset(); create_failures = 1;
+    assert(!nmx_fb_open(&device, &info) && info.width == 1920);
+    reset(); map_failures = 1; map_error = ENOSPC;
+    assert(!nmx_fb_open(&device, &info) && info.width == 1920);
+    reset(); check_error_call = 1;
+    assert(!nmx_fb_open(&device, &info) && info.width == 1920);
+    reset(); commit_error_call = 1;
+    assert(!nmx_fb_open(&device, &info) && info.width == 1920);
+    reset(); probe_error_call = 2;
+    assert(nmx_fb_open(&device, &info) == EIO && !info.ok);
+    assert(registered_count == 1 && initialized == 1 && buffers == 1 && maps == 1);
+    assert(nmx_fb_power(&device, 1) == ENODEV);
+    reset(); commit_error_call = 2;
+    assert(nmx_fb_open(&device, &info) == EINVAL && !info.ok);
+    assert(registered_count == 1 && buffers == 1 && maps == 1);
+    reset(); map_failures = 1; map_error = EFAULT;
+    assert(nmx_fb_open(&device, &info) == EFAULT && !info.ok);
+    reset(); noncontiguous = 1;
+    assert(nmx_fb_open(&device, &info) == EFAULT && !info.ok);
+    reset(); missing_fb = 1;
+    assert(nmx_fb_open(&device, &info) == EFAULT && !info.ok);
+    reset(); create_null = 1;
+    assert(nmx_fb_open(&device, &info) == ENOMEM && !info.ok);
+    reset(); driver.name = "amdgpu";
+    assert(!nmx_fb_open(&device, &info) && info.ok);
+    reset();
+    puts("Framebuffer bridge fixture passed (18 scenarios): faults, mode retries, pins, registration ownership and close");
+    return 0;
+}

@@ -13,13 +13,18 @@
     "Reject missing VBL timer allocation.",
     "Retain the original guard on both port attach and framebuffer publication failure; remove the claim on failed publication.",
     "Initialize framebuffer allocation bounds before drm_client_register synchronously invokes hotplug, and preserve callback errors.",
-    "Disable FBC on the diagnostic Alder Lake-S path because direct WindowServer writes do not implement Linux frontbuffer damage notifications."
+    "Disable FBC on the diagnostic Alder Lake-S path because direct WindowServer writes do not implement Linux frontbuffer damage notifications.",
+    "Implement software VBL registration/enable/disable/unregister with in-flight target references and stop/rearm synchronization.",
+    "Retry preferred/1080p/720p/1024x768 bounds on reported capacity/modeset errors, with atomic checks and mapping cleanup between attempts.",
+    "Track registered-client ownership: an initial registration callback failure keeps pins until DRM unregister instead of freeing an owned client.",
+    "Synchronize attach cancellation, power/shutdown operations and detach; never free a device after a timed wait while its probe still runs.",
+    "Reject failed framebuffer power transitions instead of acknowledging them as successful."
   ],
   "known_display_limitations": [
-    "The inherited unregisterInterrupt/setInterruptState are placeholders; callback lifecycle must be hardened before stability is claimed.",
+    "Software VBL callback lifetime now has a real implementation and host concurrency tests; real hardware IRQ pacing remains unverified.",
     "VBL is software timed; real display IRQ pacing is unverified.",
     "Gamma/CLUT writes are acknowledged without applying a hardware table.",
-    "One initial display mode; no complete mode-fallback/hotplug/resizing implementation.",
+    "Bounded initial mode fallback exists; interactive mode changes and connector-change notification into IOFramebuffer are not yet implemented.",
     "The GGTT mapping candidate intentionally holds an awake reference; sleep/wake is not established."
   ],
   "acceleration_gaps": [
@@ -38,7 +43,7 @@
     "drm_client.c and drm_client_modeset.c: framebuffer allocation, callback ownership, synchronous registration hotplug and probe bounds.",
     "intel_fb_pin.c, i915_vma.c and nmx_i915_scanout.c: GGTT placement, aperture mapping, VMA/fence/object/wake reference pairing.",
     "intel_fbc.c, intel_frontbuffer.c and intel_fbdev.c: compression policy and missing damage/invalidate/flush integration for the macOS aperture writer.",
-    "xnu/nmx_fb.cpp and Apple IOFramebuffer.cpp/.h: range and mode APIs, software VBL, interrupt registration and stop/unpublish ordering. Callback hardening remains outstanding.",
+    "xnu/nmx_fb.cpp and Apple IOFramebuffer.cpp/.h: range and mode APIs, software VBL, interrupt registration and stop/unpublish ordering. Software callback hardening is implemented and host-tested; hardware VBL and dynamic connector delivery remain outstanding.",
     "Acceleration package boundary: NMXGPU display publication is separate from NMXAccel, ANV/libdrm, the missing Metal frontend and real GPU execution. This is not a full Mesa or memory/IRQ-shim audit."
   ],
   "compilation_evidence": {
@@ -53,5 +58,23 @@
     "One instrumented basic-display test covering map/commit/publication/visible output",
     "Separate acceleration tests only after its dependencies and protocol are available"
   ],
-  "policy": "No more one-reboot-per-return-code instructions. Batch statically established fixes first. Do not promise one hardware test can prove complete support."
+  "policy": "No more one-reboot-per-return-code instructions. Batch statically established fixes first. Do not promise one hardware test can prove complete support.",
+  "host_verification": {
+    "platform": "Windows MSVC 2022 with /W4 /WX; actual patched helper headers and complete bridge function bodies, mocked IOKit/DRM services only",
+    "callback_lifetime": "Passed dispatch, disable, invalid handles, concurrent/self unregister, retained targets and stop/rearm checks",
+    "display_bridge": "Passed 18 fault/ownership/mode scenarios, including registered-client failure, partial allocation and generic AMD mapping",
+    "attach_lifetime": "Passed cancellation/admission/drain checks and 200 concurrent completion/stop races",
+    "limits": "These tests do not model IOKit scheduling, actual DRM locking, GPU/IOMMU transactions or visible output. macOS compilation is a separate gate."
+  },
+  "hardware_test_readiness": {
+    "ready": false,
+    "policy": "Do not ask the user for another boot test while the source completeness review and remaining code blockers are open.",
+    "remaining_code_review": [
+      "Gamma/CLUT and unsupported color/connection attribute contracts",
+      "Dynamic connector/mode propagation to IOFramebuffer",
+      "Termination/unpublish ownership and power ordering",
+      "Lower-level DMA/IRQ/map failure boundaries",
+      "Acceleration source/dependency and userland-to-kernel protocol completeness"
+    ]
+  }
 }
