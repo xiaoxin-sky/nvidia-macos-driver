@@ -316,7 +316,39 @@
      struct nmx_fb_info info;
  };
  
-@@ -118,7 +123,9 @@
+@@ -68,22 +73,26 @@
+     return drm;
+ }
+ 
+-/* a monitor plugged or unplugged: probe again and light what is there now with the same buffer */
++/* Registration calls this synchronously, too. info must already describe the
++ * allocated buffer; probe bounds prevent later modes from exceeding its size. */
+ static int bridge_hotplug(struct drm_client_dev *client)
+ {
+     struct nmx_fb *fb = container_of(client, struct nmx_fb, client);
+     struct drm_mode_set *ms;
++    int ret;
+     if (fb->buffer == NULL)
+         return 0;
+-    if (drm_client_modeset_probe(client, fb->info.width, fb->info.height) != 0)
+-        return 0;
++    if (!fb->info.width || !fb->info.height)
++        return -EINVAL;
++    ret = drm_client_modeset_probe(client, fb->info.width, fb->info.height);
++    if (ret)
++        return ret;
+     mutex_lock(&client->modeset_mutex);
+     drm_client_for_each_modeset(ms, client)
+         if (ms->mode != NULL)
+             ms->fb = fb->buffer->fb;
+     mutex_unlock(&client->modeset_mutex);
+-    drm_client_modeset_commit(client);
+-    return 0;
++    return drm_client_modeset_commit(client);
+ }
+ 
+ static void bridge_free(struct nmx_fb *fb);
+@@ -118,7 +127,9 @@
  
  static void bridge_free(struct nmx_fb *fb)
  {
@@ -327,7 +359,7 @@
          drm_client_buffer_vunmap(fb->buffer);
      if (fb->buffer != NULL)
          drm_client_framebuffer_delete(fb->buffer);
-@@ -145,13 +152,17 @@
+@@ -145,13 +156,17 @@
      struct nmx_fb *fb = kzalloc(sizeof(*fb), GFP_KERNEL);
      if (fb == NULL)
          return ENOMEM;
@@ -345,7 +377,7 @@
      if (err) {
          printf("NullMoth display: probing the outputs failed (%d)\n", err);
          goto fail;
-@@ -180,7 +191,11 @@
+@@ -180,7 +195,11 @@
          goto fail;
      }
  
@@ -357,7 +389,7 @@
      if (IS_ERR(fb->buffer)) {
          err = -PTR_ERR(fb->buffer);
          fb->buffer = NULL;
-@@ -189,12 +204,23 @@
+@@ -189,12 +208,23 @@
      }
      out->pitch = fb->buffer->fb->pitches[0];
  
@@ -383,7 +415,7 @@
  
      /* the published range must be one physical run: check every page of the CPU view */
      const char *va = fb->map.is_iomem ? (const char *)fb->map.vaddr_iomem : (const char *)fb->map.vaddr;
-@@ -207,6 +233,11 @@
+@@ -207,6 +237,11 @@
              err = EFAULT;
              goto fail;
          }
@@ -395,7 +427,7 @@
      if (base == 0) {
          err = EFAULT;
          goto fail;
-@@ -214,19 +245,28 @@
+@@ -214,21 +249,31 @@
      out->phys = base;
      out->size = round_page(size);
      out->kva = (uint64_t)(uintptr_t)va;
@@ -419,13 +451,17 @@
          goto fail;
      }
 -    drm_client_register(&fb->client);       /* from here on hotplug reaches bridge_hotplug */
-+    /* From here on hotplug reaches bridge_hotplug. */
+-
++    /* Register invokes hotplug immediately. Publish its immutable allocation
++     * bounds first; zero bounds mean mode_config maxima, not our buffer size. */
+     fb->info = *out;
 +    nmx_gpu_stage_record("fb.register.before", 0);
 +    drm_client_register(&fb->client);
 +    nmx_gpu_stage_record("fb.register.after", 0);
- 
-     fb->info = *out;
++
      fbs[slot].dev = dev;
+     fbs[slot].fb = fb;
+     out->ok = 1;
 --- a/xnu/nmx_fb.cpp
 +++ b/xnu/nmx_fb.cpp
 @@ -12,6 +12,7 @@
@@ -547,7 +583,7 @@
      if (err) {
          IOLog("NullMoth GPU: the firmware folder never appeared (%d); this GPU stays with macOS\n", err);
          attach_ = -1;
-@@ -199,8 +238,20 @@
+@@ -199,10 +238,24 @@
          attach_ = -1;
          return;
      }
@@ -566,9 +602,14 @@
      dev_ = nmx_port_attach(pci_);
 +    nmx_gpu_stage_record("port.after", dev_ != nullptr ? 0 : -1);
      if (dev_ == nullptr) {
-         nmx_marker_write(false);
+-        nmx_marker_write(false);
++        /* A failed probe may already have reset the firmware display. Do not
++         * re-arm it on every boot: only a published framebuffer clears guard. */
++        setProperty("nullmoth-gpu-state", "failed: port attach; guard retained");
          IOLog("NullMoth GPU: no driver took %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
-@@ -213,26 +264,54 @@
+               pci_->configRead16(kIOPCIConfigDeviceID));
+         attach_ = -1;
+@@ -213,26 +266,55 @@
          { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
          { kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
      };
@@ -606,6 +647,7 @@
 +         * device probe with no framebuffer is a failed display start: preserve
 +         * the existing guard so the next boot parks this attempt before reset. */
 +        setProperty("nullmoth-gpu-state", "failed: no framebuffer; guard retained");
++        pci_->removeProperty("nmxgpu-claimed");
 +        IOLog("NullMoth GPU: no framebuffer; boot guard retained for recovery\n");
 +        attach_ = -1;
 +        nmx_gpu_stage_record("attach.no_framebuffer", -1);
@@ -625,7 +667,7 @@
      /* an attach still running on its thread finishes first (it holds a reference on this object meanwhile) */
      for (int i = 0; attach_ == 0 && i < 6000; i++)
          IOSleep(100);
-@@ -255,7 +334,9 @@
+@@ -255,7 +337,9 @@
  IOReturn NMXGPU::setPowerState(unsigned long state, IOService *device)
  {
      if (dev_ != nullptr) {

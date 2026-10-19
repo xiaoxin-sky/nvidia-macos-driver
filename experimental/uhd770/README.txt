@@ -19,10 +19,14 @@ The repair batch includes:
 - Intel scan-out via the existing i915 GGTT framebuffer pinning implementation,
   explicitly requesting a CPU-mappable aperture instead of generic GEM vmap;
 - balanced mapping pins/references and framebuffer range validation;
-- preserving the boot guard when no framebuffer can be published;
+- preserving the boot guard on probe/publication failure and removing a failed
+  display claim;
+- initializing buffer bounds before registration's synchronous hotplug callback;
+- disabling FBC on Alder Lake-S until CPU writes have a damage/flush protocol;
 - rejecting a framebuffer that cannot allocate its required VBL timer.
 
-audit.json separates hardware-proven results, candidate repairs, known simplified
+audit.json maps the reviewed call chain and separates hardware-proven results,
+candidate repairs, known simplified
 interfaces and unverified paths. In particular, the IOFramebuffer interrupt
 disable/unregister implementation, gamma, hotplug, sleep/wake and the complete
 ANV/Metal path still require work; this batch must not be advertised as a stable,

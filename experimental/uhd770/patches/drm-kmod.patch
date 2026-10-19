@@ -21,7 +21,22 @@
  }
 --- a/drivers/gpu/drm/i915/display/intel_display_driver.c
 +++ b/drivers/gpu/drm/i915/display/intel_display_driver.c
-@@ -223,11 +223,13 @@
+@@ -186,6 +186,14 @@
+ 	if (!HAS_DISPLAY(display))
+ 		return;
+ 
++    /* WindowServer writes the diagnostic aperture without Linux dirty/frontbuffer
++     * notifications. Keep FBC off until that protocol is implemented; otherwise
++     * the compressed image may outlive CPU writes. Other platforms keep policy. */
++    if (IS_ALDERLAKE_S(i915)) {
++        display->params.enable_fbc = 0;
++        pr_info("NullMoth display: ADL-S CPU scanout, FBC disabled\n");
++    }
++
+ 	spin_lock_init(&display->fb_tracking.lock);
+ 	mutex_init(&display->backlight.lock);
+ 	mutex_init(&display->audio.mutex);
+@@ -223,11 +231,13 @@
  	intel_bios_init(display);
  
  	ret = intel_vga_register(display);
@@ -35,7 +50,7 @@
  	if (ret < 0)
  		goto cleanup_vga;
  
-@@ -252,22 +254,27 @@
+@@ -252,22 +262,27 @@
  	intel_mode_config_init(display);
  
  	ret = intel_cdclk_init(display);
@@ -63,7 +78,7 @@
  	if (ret)
  		goto cleanup_vga_client_pw_domain_dmc;
  
-@@ -429,6 +436,7 @@
+@@ -429,6 +444,7 @@
  	struct drm_i915_private *i915 = to_i915(display->drm);
  	enum pipe pipe;
  	int ret;
@@ -71,7 +86,7 @@
  
  	if (!HAS_DISPLAY(display))
  		return 0;
-@@ -447,6 +455,7 @@
+@@ -447,6 +463,7 @@
  
  	for_each_pipe(display, pipe) {
  		ret = intel_crtc_init(i915, pipe);
@@ -79,7 +94,7 @@
  		if (ret)
  			goto err_mode_config;
  	}
-@@ -469,6 +478,7 @@
+@@ -469,6 +486,7 @@
  	intel_setup_outputs(i915);
  
  	ret = intel_dp_tunnel_mgr_init(display);

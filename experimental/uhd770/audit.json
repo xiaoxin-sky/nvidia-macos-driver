@@ -11,7 +11,9 @@
     "Use CPU-mappable GGTT scan-out and balance pins/VMA/wake references.",
     "Validate the framebuffer range before exposing it to macOS.",
     "Reject missing VBL timer allocation.",
-    "Retain the original guard on framebuffer publication failure."
+    "Retain the original guard on both port attach and framebuffer publication failure; remove the claim on failed publication.",
+    "Initialize framebuffer allocation bounds before drm_client_register synchronously invokes hotplug, and preserve callback errors.",
+    "Disable FBC on the diagnostic Alder Lake-S path because direct WindowServer writes do not implement Linux frontbuffer damage notifications."
   ],
   "known_display_limitations": [
     "The inherited unregisterInterrupt/setInterruptState are placeholders; callback lifecycle must be hardened before stability is claimed.",
@@ -29,6 +31,21 @@
   "api_checked_not_a_bug": [
     "IOFramebuffer.getPixelFormatsForDisplayMode returning zero is required by its Apple header; it is not an unsupported-format bug."
   ],
+  "source_flow_review": [
+    "xnu/nmx_kext.cpp: opted_in, start/attachThread/attachNow, boot guard, claim, power and stop ordering.",
+    "bsdcompat/src/nmx_port.c and nmx_bus.c: attach_on, child driver selection, native PCI class discovery and detach ownership.",
+    "i915_driver.c, intel_display_driver.c, intel_opregion.c, intel_hotplug_irq.c and intel_ddi.c: probe stages, optional OpRegion, PCH/HPD and tunnel configuration.",
+    "drm_client.c and drm_client_modeset.c: framebuffer allocation, callback ownership, synchronous registration hotplug and probe bounds.",
+    "intel_fb_pin.c, i915_vma.c and nmx_i915_scanout.c: GGTT placement, aperture mapping, VMA/fence/object/wake reference pairing.",
+    "intel_fbc.c, intel_frontbuffer.c and intel_fbdev.c: compression policy and missing damage/invalidate/flush integration for the macOS aperture writer.",
+    "xnu/nmx_fb.cpp and Apple IOFramebuffer.cpp/.h: range and mode APIs, software VBL, interrupt registration and stop/unpublish ordering. Callback hardening remains outstanding.",
+    "Acceleration package boundary: NMXGPU display publication is separate from NMXAccel, ANV/libdrm, the missing Metal frontend and real GPU execution. This is not a full Mesa or memory/IRQ-shim audit."
+  ],
+  "compilation_evidence": {
+    "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39256526728",
+    "commit": "06eb84120b232c6d00460b2b9e9be261815e83ff",
+    "result": "900 DRM/AMD, 274 i915 and 76 runtime units compiled, 12 PCI fixture cases and binary gates passed. Does not validate later follow-up edits or hardware."
+  },
   "validation_order": [
     "Pinned patches/apply checks and host fixtures",
     "All macOS kernel sources compile and binary/source provenance verified",
