@@ -182,6 +182,41 @@ jobs:
           ins(dd, 'ret = intel_dp_tunnel_mgr_init(display);', '\tpr_info("NullMoth dbg: nogem tunnel_mgr_init -> %d\\n", ret);', scope=nogem_scope)
           ir = D + '/i915_irq.c'
           ins(ir, 'ret = request_irq(irq, intel_irq_handler(dev_priv),', '\tpr_info("NullMoth dbg: request_irq(%d) -> %d\\n", irq, ret);')
+          def ins_before(path, needle, text):
+              """Insert a checkpoint before one unique single-line call in the pinned source."""
+              rows = open(path).read().split("\n")
+              hits = [i for i, row in enumerate(rows) if needle in row]
+              assert len(hits) == 1, (path, needle, len(hits))
+              rows.insert(hits[0], text)
+              open(path, "w").write("\n".join(rows))
+          cpp = X + "/xnu/nmx_kext.cpp"
+          source = open(cpp).read()
+          anchor = "#include <libkern/c++/OSData.h>\n"
+          assert source.count(anchor) == 1
+          source = source.replace(anchor, anchor + "#include <libkern/libkern.h>\n", 1)
+          anchor = "\nvoid NMXGPU::attachNow()\n"
+          assert source.count(anchor) == 1
+          stage_helper = '/* Diagnostic build only: retain the last bounded, thread-context attach stage in NVRAM.\n * The original attaching guard is read but never changed here. The trace key is separate,\n * survives a reset/normal completion, and is written only at the fixed probe boundaries.\n */\nextern "C" void nmx_gpu_stage_record(const char *stage, int result)\n{\n    if (stage == nullptr)\n        return;\n    IODTNVRAM *n = nmx_nvram();\n    if (n == nullptr)\n        return;\n    OSObject *armed = n->copyProperty(kAttachMarker);\n    if (armed == nullptr) {\n        n->release();\n        return;\n    }\n    armed->release();\n    char value[96];\n    int count = snprintf(value, sizeof(value), "nvstage-v1 %s ret=%d", stage, result);\n    if (count <= 0) {\n        n->release();\n        return;\n    }\n    unsigned length = static_cast<unsigned>(count);\n    if (length >= sizeof(value))\n        length = sizeof(value) - 1;\n    const OSSymbol *key = OSSymbol::withCString("nullmoth-gpu-stage");\n    OSData *data = OSData::withBytes(value, length);\n    if (key != nullptr && data != nullptr) {\n        bool stored = n->setProperty(key, data);\n        n->sync();\n        IOLog("NullMoth trace: %s ret=%d nvram=%s\\n", stage, result, stored ? "ok" : "failed");\n    }\n    if (data != nullptr)\n        data->release();\n    if (key != nullptr)\n        key->release();\n    n->release();\n}\n'
+          source = source.replace(anchor, "\n" + stage_helper + anchor, 1)
+          open(cpp, "w").write(source)
+          ins_before(cpp, "dev_ = nmx_port_attach(pci_);", '    nmx_gpu_stage_record("port.before", 0);')
+          ins(cpp, "dev_ = nmx_port_attach(pci_);", '    nmx_gpu_stage_record("port.after", dev_ != nullptr ? 0 : -1);')
+          ins_before(cpp, "    PMinit();", '    nmx_gpu_stage_record("publish.before", 0);')
+          ins(cpp, "    pci_->registerService();", '    nmx_gpu_stage_record("publish.after", 0);')
+          ins_before(cpp, "fb_ = nmx_fb_publish(this, dev_);", '    nmx_gpu_stage_record("framebuffer.before", 0);')
+          ins(cpp, "fb_ = nmx_fb_publish(this, dev_);", '    nmx_gpu_stage_record("framebuffer.after", fb_ != nullptr ? 0 : -1);')
+          driver = D + "/i915_driver.c"
+          source = open(driver).read()
+          anchor = '#include "i915_drv.h"\n'
+          assert source.count(anchor) == 1
+          source = source.replace(anchor, anchor + "extern void nmx_gpu_stage_record(const char *, int);\n", 1)
+          open(driver, "w").write(source)
+          for function, label in [("intel_display_driver_probe_noirq", "display_noirq"), ("intel_irq_install", "irq_install"), ("intel_display_driver_probe_nogem", "display_nogem"), ("i915_gem_init", "gem_init"), ("intel_display_driver_probe", "display_probe")]:
+              arg = "display" if function.startswith("intel_display_driver_") else "i915"
+              call = "ret = " + function + "(" + arg + ");"
+              ins_before(driver, call, '\tnmx_gpu_stage_record("' + label + '.before", 0);')
+              ins(driver, call, '\tnmx_gpu_stage_record("' + label + '.after", ret);')
+          print("Persistent stage records enabled; original boot guard preserved")
           open('/tmp/nmx-instrumented', 'w').write('ok\n')
           print('instrumentation complete')
           PY
@@ -321,13 +356,13 @@ jobs:
           BIN="$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU"
           xcrun nm -arch x86_64 "$BIN" > /tmp/nmxgpu-symbols.txt \
             || { echo "::error::cannot read NMXGPU symbols"; exit 1; }
-          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach; do
+          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record; do
             grep -Eq "[[:space:]]$sym$" /tmp/nmxgpu-symbols.txt \
               || { echo "::error::missing symbol $sym"; exit 1; }
           done
           strings -a "$BIN" > /tmp/nmxgpu-strings.txt \
             || { echo "::error::cannot read NMXGPU diagnostic strings"; exit 1; }
-          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init'; do
+          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'nvstage-v1' 'framebuffer.before' 'gem_init.before'; do
             grep -Fq "$marker" /tmp/nmxgpu-strings.txt \
               || { echo "::error::missing diagnostic marker $marker"; exit 1; }
           done
