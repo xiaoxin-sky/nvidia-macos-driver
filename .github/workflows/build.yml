@@ -98,6 +98,52 @@ jobs:
           sed -i '' 's|-I[$]KF|-I$K/freebsd-src/sys -I$KF|' cc.sh cc-i915.sh cclk.sh ccsrc.sh
           echo "== include patch check (want 1 per file) =="
           grep -c 'freebsd-src/sys' cc.sh cc-i915.sh cclk.sh ccsrc.sh || true
+          python3 - <<'PY'
+          def ins(path, needle, text):
+              lines = open(path).read().split('\n')
+              hits = [i for i, l in enumerate(lines) if needle in l]
+              assert len(hits) == 1, (path, needle, len(hits))
+              lines.insert(hits[0] + 1, text)
+              open(path, 'w').write('\n'.join(lines))
+          X = '/Volumes/MiniData/build/gpu-src/xkpi'
+          D = '/Volumes/MiniData/build/gpu-src/kpi/drm-kmod/drivers/gpu/drm/i915'
+          p = X + '/bsdcompat/src/nmx_bus.c'
+          s = open(p).read()
+          a = '    int r = probe ? probe(dev) : 0;'
+          assert s.count(a) == 1
+          s = s.replace(a, a + '\n    printf("NullMoth dbg: probe_with %s -> %d\\n", driver->name, r);', 1)
+          a = '        TAILQ_FOREACH(dl, &dc->drivers, link) {'
+          assert s.count(a) == 1
+          s = s.replace(a, a + '\n            printf("NullMoth dbg: add_device %s offering %s\\n", device_get_nameunit(dev), dl->driver->name);', 1)
+          open(p, 'w').write(s)
+          p = X + '/override/src/linux_pci.c'
+          ins(p, 'error = lkpifill_pci_dev(dev, pdev);', '\tprintf("NullMoth dbg: fill -> %d\\n", error);')
+          ins(p, 'error = linux_pdev_dma_init(pdev);', '\tprintf("NullMoth dbg: dma_init -> %d\\n", error);')
+          ins(p, 'error = pdrv->probe(pdev, id);', '\t\tprintf("NullMoth dbg: pdrv %s probe -> %d\\n", pdrv->name, error);')
+          d = D + '/i915_driver.c'
+          ins(d, 'ret = pci_enable_device(pdev);', '\tpr_info("NullMoth dbg: stage pci_enable -> %d\\n", ret);')
+          ins(d, 'ret = i915_driver_early_probe(i915);', '\tpr_info("NullMoth dbg: stage early_probe -> %d\\n", ret);')
+          ins(d, 'ret = intel_gt_probe_all(i915);', '\tpr_info("NullMoth dbg: stage gt_probe -> %d\\n", ret);')
+          ins(d, 'ret = i915_driver_mmio_probe(i915);', '\tpr_info("NullMoth dbg: stage mmio_probe -> %d\\n", ret);')
+          ins(d, 'ret = i915_driver_hw_probe(i915);', '\tpr_info("NullMoth dbg: stage hw_probe -> %d\\n", ret);')
+          ins(d, 'ret = intel_display_driver_probe_noirq(display);', '\tpr_info("NullMoth dbg: stage display_noirq -> %d\\n", ret);')
+          ins(d, 'ret = intel_irq_install(i915);', '\tpr_info("NullMoth dbg: stage irq_install -> %d\\n", ret);')
+          ins(d, 'ret = intel_display_driver_probe_nogem(display);', '\tpr_info("NullMoth dbg: stage display_nogem -> %d\\n", ret);')
+          ins(d, 'ret = i915_gem_init(i915);', '\tpr_info("NullMoth dbg: stage gem_init -> %d\\n", ret);')
+          dd = D + '/display/intel_display_driver.c'
+          ins(dd, 'ret = intel_vga_register(display);', '\tpr_info("NullMoth dbg: disp vga_register -> %d\\n", ret);')
+          ins(dd, 'ret = intel_power_domains_init(display);', '\tpr_info("NullMoth dbg: disp power_domains_init -> %d\\n", ret);')
+          ins(dd, 'ret = intel_cdclk_init(display);', '\tpr_info("NullMoth dbg: disp cdclk_init -> %d\\n", ret);')
+          ins(dd, 'ret = intel_color_init(display);', '\tpr_info("NullMoth dbg: disp color_init -> %d\\n", ret);')
+          ins(dd, 'ret = intel_dbuf_init(i915);', '\tpr_info("NullMoth dbg: disp dbuf_init -> %d\\n", ret);')
+          ins(dd, 'ret = intel_bw_init(i915);', '\tpr_info("NullMoth dbg: disp bw_init -> %d\\n", ret);')
+          ins(dd, 'ret = intel_pmdemand_init(display);', '\tpr_info("NullMoth dbg: disp pmdemand_init -> %d\\n", ret);')
+          ir = D + '/i915_irq.c'
+          ins(ir, 'ret = request_irq(irq, intel_irq_handler(dev_priv),', '\tpr_info("NullMoth dbg: request_irq(%d) -> %d\\n", irq, ret);')
+          open('/tmp/nmx-instrumented', 'w').write('ok\n')
+          print('instrumentation complete')
+          PY
+          test -f /tmp/nmx-instrumented || { echo "::error::instrumentation did not apply"; exit 1; }
           python3 gen_flags.py "$S/kpi/drm-kmod" amd.flags | tee /tmp/genflags.log
           echo "== DRM / TTM / amdgpu =="
           bash all.sh 30 | tee /tmp/all.log || true
