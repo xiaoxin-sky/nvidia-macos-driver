@@ -1,0 +1,51 @@
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <vector>
+struct OSObject { virtual ~OSObject() = default; };
+struct OSDictionary { void release() { delete this; } };
+struct IOPCIDevice : OSObject {
+    uint8_t cls, subclass;
+    IOPCIDevice(uint8_t c, uint8_t s) : cls(c), subclass(s) {}
+    uint8_t configRead8(int offset) { return offset == 0x0b ? cls : subclass; }
+};
+static std::vector<OSObject *> devices;
+static bool match_available = true, iterator_available = true;
+struct OSIterator {
+    size_t index = 0;
+    OSObject *getNextObject() { return index < devices.size() ? devices[index++] : nullptr; }
+    void release() { delete this; }
+};
+struct IOService {
+    static OSDictionary *serviceMatching(const char *) { return match_available ? new OSDictionary : nullptr; }
+    static OSIterator *getMatchingServices(OSDictionary *) { return iterator_available ? new OSIterator : nullptr; }
+};
+#define OSDynamicCast(T, o) dynamic_cast<T *>(o)
+
+/* NMX_NATIVE_FUNCTION */
+
+int main()
+{
+    OSObject other;
+    IOPCIDevice gpu(3, 0), isa1(6, 1), bridge(6, 4), isa2(6, 1), unknown(6, 1);
+    devices = {&other, &gpu, &isa1, &bridge, &isa2};
+    // The LPC can exist in IOKit before any newbus record has been created.
+    assert(nmx_xnu_pci_find_class(6, 1, nullptr) == &isa1);
+    assert(nmx_xnu_pci_find_class(6, 1, &isa1) == &isa2);
+    assert(nmx_xnu_pci_find_class(6, 1, &isa2) == nullptr);
+    assert(nmx_xnu_pci_find_class(6, 1, &unknown) == nullptr);
+    assert(nmx_xnu_pci_find_class(3, 0, nullptr) == &gpu);
+    assert(nmx_xnu_pci_find_class(6, -1, &isa1) == &bridge);
+    assert(nmx_xnu_pci_find_class(6, 0xff, nullptr) == nullptr);
+    assert(nmx_xnu_pci_find_class(6, -2, nullptr) == nullptr);
+    assert(nmx_xnu_pci_find_class(6, 256, nullptr) == nullptr);
+    match_available = false;
+    assert(nmx_xnu_pci_find_class(6, 1, nullptr) == nullptr);
+    match_available = true;
+    iterator_available = false;
+    assert(nmx_xnu_pci_find_class(6, 1, nullptr) == nullptr);
+    iterator_available = true;
+    devices.clear();
+    assert(nmx_xnu_pci_find_class(6, 1, nullptr) == nullptr);
+    std::puts("PCI class enumeration fixture passed (12 cases)");
+}

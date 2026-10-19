@@ -1,0 +1,294 @@
+--- a/drivers/gpu/drm/i915/display/intel_ddi.c
++++ b/drivers/gpu/drm/i915/display/intel_ddi.c
+@@ -4821,7 +4821,17 @@
+ static bool lpt_digital_port_connected(struct intel_encoder *encoder)
+ {
+ 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
+-	u32 bit = dev_priv->display.hotplug.pch_hpd[encoder->hpd_pin];
++	u32 bit;
++
++	/* A missing chipset or HPD table must not become a kernel null dereference.
++	 * Returning disconnected is a safe failure, not a successful display fix. */
++	if (dev_priv->display.hotplug.pch_hpd == NULL ||
++	    encoder->hpd_pin <= HPD_NONE || encoder->hpd_pin >= HPD_NUM_PINS) {
++		pr_err_once("NullMoth HPD: pch_hpd missing or pin invalid (pch=%d id=%04x pin=%d)\n",
++			    (int)INTEL_PCH_TYPE(dev_priv), INTEL_PCH_ID(dev_priv), (int)encoder->hpd_pin);
++		return false;
++	}
++	bit = dev_priv->display.hotplug.pch_hpd[encoder->hpd_pin];
+ 
+ 	return intel_de_read(dev_priv, SDEISR) & bit;
+ }
+--- a/drivers/gpu/drm/i915/display/intel_display_driver.c
++++ b/drivers/gpu/drm/i915/display/intel_display_driver.c
+@@ -223,11 +223,13 @@
+ 	intel_bios_init(display);
+ 
+ 	ret = intel_vga_register(display);
++	pr_info("NullMoth dbg: disp vga_register -> %d\n", ret);
+ 	if (ret)
+ 		goto cleanup_bios;
+ 
+ 	/* FIXME: completely on the wrong abstraction layer */
+ 	ret = intel_power_domains_init(display);
++	pr_info("NullMoth dbg: disp power_domains_init -> %d\n", ret);
+ 	if (ret < 0)
+ 		goto cleanup_vga;
+ 
+@@ -252,22 +254,27 @@
+ 	intel_mode_config_init(display);
+ 
+ 	ret = intel_cdclk_init(display);
++	pr_info("NullMoth dbg: disp cdclk_init -> %d\n", ret);
+ 	if (ret)
+ 		goto cleanup_vga_client_pw_domain_dmc;
+ 
+ 	ret = intel_color_init(display);
++	pr_info("NullMoth dbg: disp color_init -> %d\n", ret);
+ 	if (ret)
+ 		goto cleanup_vga_client_pw_domain_dmc;
+ 
+ 	ret = intel_dbuf_init(i915);
++	pr_info("NullMoth dbg: disp dbuf_init -> %d\n", ret);
+ 	if (ret)
+ 		goto cleanup_vga_client_pw_domain_dmc;
+ 
+ 	ret = intel_bw_init(i915);
++	pr_info("NullMoth dbg: disp bw_init -> %d\n", ret);
+ 	if (ret)
+ 		goto cleanup_vga_client_pw_domain_dmc;
+ 
+ 	ret = intel_pmdemand_init(display);
++	pr_info("NullMoth dbg: disp pmdemand_init -> %d\n", ret);
+ 	if (ret)
+ 		goto cleanup_vga_client_pw_domain_dmc;
+ 
+@@ -429,6 +436,7 @@
+ 	struct drm_i915_private *i915 = to_i915(display->drm);
+ 	enum pipe pipe;
+ 	int ret;
++	pr_info("NullMoth dbg: tunnel_config i915=%d core=%d\n", IS_ENABLED(CONFIG_DRM_I915_DP_TUNNEL), IS_ENABLED(CONFIG_DRM_DISPLAY_DP_TUNNEL));
+ 
+ 	if (!HAS_DISPLAY(display))
+ 		return 0;
+@@ -447,6 +455,7 @@
+ 
+ 	for_each_pipe(display, pipe) {
+ 		ret = intel_crtc_init(i915, pipe);
++		pr_info("NullMoth dbg: nogem crtc pipe %d -> %d\n", pipe, ret);
+ 		if (ret)
+ 			goto err_mode_config;
+ 	}
+@@ -469,6 +478,7 @@
+ 	intel_setup_outputs(i915);
+ 
+ 	ret = intel_dp_tunnel_mgr_init(display);
++	pr_info("NullMoth dbg: nogem tunnel_mgr_init -> %d\n", ret);
+ 	if (ret)
+ 		goto err_hdcp;
+ 
+--- a/drivers/gpu/drm/i915/display/intel_fb_pin.c
++++ b/drivers/gpu/drm/i915/display/intel_fb_pin.c
+@@ -102,13 +102,13 @@
+ 	return vma;
+ }
+ 
+-struct i915_vma *
+-intel_fb_pin_to_ggtt(const struct drm_framebuffer *fb,
++static struct i915_vma *
++nmx_fb_pin_impl(const struct drm_framebuffer *fb,
+ 		     const struct i915_gtt_view *view,
+ 		     unsigned int alignment,
+ 		     unsigned int phys_alignment,
+ 		     bool uses_fence,
+-		     unsigned long *out_flags)
++		     unsigned long *out_flags, bool force_mappable)
+ {
+ 	struct drm_device *dev = fb->dev;
+ 	struct drm_i915_private *dev_priv = to_i915(dev);
+@@ -154,7 +154,7 @@
+ 	 * happy to scanout from anywhere within its global aperture.
+ 	 */
+ 	pinctl = 0;
+-	if (HAS_GMCH(dev_priv))
++	if (HAS_GMCH(dev_priv) || force_mappable)
+ 		pinctl |= PIN_MAPPABLE;
+ 
+ 	i915_gem_ww_ctx_init(&ww, true);
+@@ -224,6 +224,28 @@
+ 	return vma;
+ }
+ 
++/* Original callers retain the original pinning policy. */
++struct i915_vma *
++intel_fb_pin_to_ggtt(const struct drm_framebuffer *fb,
++                     const struct i915_gtt_view *view,
++                     unsigned int alignment, unsigned int phys_alignment,
++                     bool uses_fence, unsigned long *out_flags)
++{
++    return nmx_fb_pin_impl(fb, view, alignment, phys_alignment,
++                           uses_fence, out_flags, false);
++}
++
++/* The macOS framebuffer exports the CPU-visible GGTT aperture, not scatter pages. */
++struct i915_vma *
++nmx_intel_fb_pin_mappable(const struct drm_framebuffer *fb,
++                          const struct i915_gtt_view *view,
++                          unsigned int alignment, unsigned int phys_alignment,
++                          bool uses_fence, unsigned long *out_flags)
++{
++    return nmx_fb_pin_impl(fb, view, alignment, phys_alignment,
++                           uses_fence, out_flags, true);
++}
++
+ void intel_fb_unpin_vma(struct i915_vma *vma, unsigned long flags)
+ {
+ 	if (flags & PLANE_HAS_FENCE)
+--- a/drivers/gpu/drm/i915/display/intel_fb_pin.h
++++ b/drivers/gpu/drm/i915/display/intel_fb_pin.h
+@@ -21,6 +21,11 @@
+ 		     bool uses_fence,
+ 		     unsigned long *out_flags);
+ 
++struct i915_vma *
++nmx_intel_fb_pin_mappable(const struct drm_framebuffer *fb,
++ const struct i915_gtt_view *view, unsigned int alignment, unsigned int phys_alignment,
++ bool uses_fence, unsigned long *out_flags);
++
+ void intel_fb_unpin_vma(struct i915_vma *vma, unsigned long flags);
+ 
+ int intel_plane_pin_fb(struct intel_plane_state *plane_state);
+--- a/drivers/gpu/drm/i915/display/intel_hotplug_irq.c
++++ b/drivers/gpu/drm/i915/display/intel_hotplug_irq.c
+@@ -1468,6 +1468,7 @@
+ void intel_hotplug_irq_init(struct drm_i915_private *i915)
+ {
+ 	intel_hpd_init_pins(i915);
++	pr_info("NullMoth dbg: hpd_tables pch=%d id=%04x north=%d south=%d\n", (int)INTEL_PCH_TYPE(i915), INTEL_PCH_ID(i915), i915->display.hotplug.hpd != NULL, i915->display.hotplug.pch_hpd != NULL);
+ 
+ 	intel_hpd_init_early(i915);
+ 
+--- a/drivers/gpu/drm/i915/display/intel_opregion.c
++++ b/drivers/gpu/drm/i915/display/intel_opregion.c
+@@ -896,6 +896,7 @@
+ 	BUILD_BUG_ON(sizeof(struct opregion_asle_ext) != 0x400);
+ 
+ 	pci_read_config_dword(pdev, ASLS, &asls);
++	pr_info("NullMoth dbg: opregion ASLS_present=%d\n", asls != 0);
+ 	drm_dbg(display->drm, "graphic opregion physical addr: 0x%x\n",
+ 		asls);
+ 	if (asls == 0) {
+--- a/drivers/gpu/drm/i915/i915_driver.c
++++ b/drivers/gpu/drm/i915/i915_driver.c
+@@ -86,6 +86,7 @@
+ #include "i915_driver.h"
+ #include "i915_drm_client.h"
+ #include "i915_drv.h"
++extern void nmx_gpu_stage_record(const char *, int);
+ #include "i915_file_private.h"
+ #include "i915_getparam.h"
+ #include "i915_hwmon.h"
+@@ -264,6 +265,7 @@
+ 
+ 	/* This must be called before any calls to HAS_PCH_* */
+ 	intel_detect_pch(dev_priv);
++	pr_info("NullMoth dbg: pch_detect type=%d id=%04x\n", (int)INTEL_PCH_TYPE(dev_priv), INTEL_PCH_ID(dev_priv));
+ 
+ 	intel_irq_init(dev_priv);
+ 	intel_display_driver_early_probe(display);
+@@ -565,7 +567,10 @@
+ 	if (ret)
+ 		goto err_msi;
+ 
+-	intel_opregion_setup(display);
++	{
++		int nmx_opregion_ret = intel_opregion_setup(display);
++		pr_info("NullMoth dbg: optional opregion_setup -> %d (ignored by upstream)\n", nmx_opregion_ret);
++	}
+ 
+ 	ret = i915_pcode_init(dev_priv);
+ 	if (ret)
+@@ -784,6 +789,7 @@
+ 	int ret;
+ 
+ 	ret = pci_enable_device(pdev);
++	pr_info("NullMoth dbg: stage pci_enable -> %d\n", ret);
+ 	if (ret) {
+ 		pr_err("Failed to enable graphics device: %pe\n", ERR_PTR(ret));
+ 		return ret;
+@@ -798,6 +804,7 @@
+ 	display = &i915->display;
+ 
+ 	ret = i915_driver_early_probe(i915);
++	pr_info("NullMoth dbg: stage early_probe -> %d\n", ret);
+ 	if (ret < 0)
+ 		goto out_pci_disable;
+ 
+@@ -806,38 +813,57 @@
+ 	intel_vgpu_detect(i915);
+ 
+ 	ret = intel_gt_probe_all(i915);
++	pr_info("NullMoth dbg: stage gt_probe -> %d\n", ret);
+ 	if (ret < 0)
+ 		goto out_runtime_pm_put;
+ 
+ 	ret = i915_driver_mmio_probe(i915);
++	pr_info("NullMoth dbg: stage mmio_probe -> %d\n", ret);
+ 	if (ret < 0)
+ 		goto out_runtime_pm_put;
+ 
+ 	ret = i915_driver_hw_probe(i915);
++	pr_info("NullMoth dbg: stage hw_probe -> %d\n", ret);
+ 	if (ret < 0)
+ 		goto out_cleanup_mmio;
+ 
++	nmx_gpu_stage_record("display_noirq.before", 0);
+ 	ret = intel_display_driver_probe_noirq(display);
++	nmx_gpu_stage_record("display_noirq.after", ret);
++	pr_info("NullMoth dbg: stage display_noirq -> %d\n", ret);
+ 	if (ret < 0)
+ 		goto out_cleanup_hw;
+ 
++	nmx_gpu_stage_record("irq_install.before", 0);
+ 	ret = intel_irq_install(i915);
++	nmx_gpu_stage_record("irq_install.after", ret);
++	pr_info("NullMoth dbg: stage irq_install -> %d\n", ret);
+ 	if (ret)
+ 		goto out_cleanup_modeset;
+ 
++	nmx_gpu_stage_record("display_nogem.before", 0);
+ 	ret = intel_display_driver_probe_nogem(display);
++	nmx_gpu_stage_record("display_nogem.after", ret);
++	pr_info("NullMoth dbg: stage display_nogem -> %d\n", ret);
+ 	if (ret)
+ 		goto out_cleanup_irq;
+ 
++	nmx_gpu_stage_record("gem_init.before", 0);
+ 	ret = i915_gem_init(i915);
++	nmx_gpu_stage_record("gem_init.after", ret);
++	pr_info("NullMoth dbg: stage gem_init -> %d\n", ret);
+ 	if (ret)
+ 		goto out_cleanup_modeset2;
+ 
+ 	ret = intel_pxp_init(i915);
++	pr_info("NullMoth dbg: optional pxp_init -> %d (may be ignored by upstream)\n", ret);
+ 	if (ret && ret != -ENODEV)
+ 		drm_dbg(&i915->drm, "pxp init failed with %d\n", ret);
+ 
++	nmx_gpu_stage_record("display_probe.before", 0);
+ 	ret = intel_display_driver_probe(display);
++	nmx_gpu_stage_record("display_probe.after", ret);
++	pr_info("NullMoth dbg: stage display_probe -> %d\n", ret);
+ 	if (ret)
+ 		goto out_cleanup_gem;
+ 
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -1226,6 +1226,7 @@
+ 
+ 	ret = request_irq(irq, intel_irq_handler(dev_priv),
+ 			  IRQF_SHARED, DRIVER_NAME, dev_priv);
++	pr_info("NullMoth dbg: request_irq(%d) -> %d\n", irq, ret);
+ 	if (ret < 0) {
+ 		dev_priv->irqs_enabled = false;
+ 		return ret;

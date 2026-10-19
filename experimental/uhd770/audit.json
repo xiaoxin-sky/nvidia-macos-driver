@@ -1,0 +1,40 @@
+{
+  "scope": "First-pass end-to-end static review of the pinned port main paths, cross-checked against runtime reports and IOFramebuffer API docs. Not a line-by-line audit of all Linux/FreeBSD/Mesa code.",
+  "hardware_proven": [
+    "UHD 770 PCI matching and i915 attach progressed.",
+    "H610 LPC discovery and PCH_ADP selection work after the enumeration repair.",
+    "Both HPD tables initialize; GEM/display probe and scan-out allocation complete.",
+    "Generic scan-out vmap is refused; no usable framebuffer was published.",
+    "The system can keep running after signal loss."
+  ],
+  "candidate_repairs_not_hardware_verified": [
+    "Use CPU-mappable GGTT scan-out and balance pins/VMA/wake references.",
+    "Validate the framebuffer range before exposing it to macOS.",
+    "Reject missing VBL timer allocation.",
+    "Retain the original guard on framebuffer publication failure."
+  ],
+  "known_display_limitations": [
+    "The inherited unregisterInterrupt/setInterruptState are placeholders; callback lifecycle must be hardened before stability is claimed.",
+    "VBL is software timed; real display IRQ pacing is unverified.",
+    "Gamma/CLUT writes are acknowledged without applying a hardware table.",
+    "One initial display mode; no complete mode-fallback/hotplug/resizing implementation.",
+    "The GGTT mapping candidate intentionally holds an awake reference; sleep/wake is not established."
+  ],
+  "acceleration_gaps": [
+    "The tested install path installs the NMXGPU display/DRM layer only.",
+    "The inspected Intel package includes NMXAccel but not the NVMTLDriver bundle it references.",
+    "ANV GPU mappings, real submission/readback, Metal and accelerated WindowServer have no success evidence on this hardware.",
+    "Kernel mmap ioctl support exists, but that alone does not verify the userland ANV/libdrm calling path."
+  ],
+  "api_checked_not_a_bug": [
+    "IOFramebuffer.getPixelFormatsForDisplayMode returning zero is required by its Apple header; it is not an unsupported-format bug."
+  ],
+  "validation_order": [
+    "Pinned patches/apply checks and host fixtures",
+    "All macOS kernel sources compile and binary/source provenance verified",
+    "Recovery is concrete before enabling a one-attempt test",
+    "One instrumented basic-display test covering map/commit/publication/visible output",
+    "Separate acceleration tests only after its dependencies and protocol are available"
+  ],
+  "policy": "No more one-reboot-per-return-code instructions. Batch statically established fixes first. Do not promise one hardware test can prove complete support."
+}

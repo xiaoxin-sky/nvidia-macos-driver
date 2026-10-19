@@ -1,0 +1,682 @@
+--- a/bsdcompat/include/nmx_port.h
++++ b/bsdcompat/include/nmx_port.h
+@@ -29,6 +29,13 @@
+ int nmx_fb_open(void *dev, struct nmx_fb_info *out);
+ void nmx_fb_close(void *dev);
+ int nmx_fb_power(void *dev, int on);
++
++/* Alder Lake-S scan-out: positive errno; success transfers a pinned mapping
++ * cookie to the display bridge. Unmap before deleting its DRM framebuffer. */
++struct drm_framebuffer;
++int nmx_i915_scanout_map(struct drm_framebuffer *fb, struct nmx_fb_info *info, void **cookie);
++void nmx_i915_scanout_unmap(void *cookie);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsdcompat/include/nmx_xnu.h
++++ b/bsdcompat/include/nmx_xnu.h
+@@ -84,6 +84,8 @@
+ void nmx_xnu_pci_irq_enable(void *cookie, int on);
+ /* the IOPCIDevice at domain:bus:dev.func, or NULL */
+ void *nmx_xnu_pci_find(uint32_t domain, uint8_t bus, uint8_t dev, uint8_t func);
++/* Native class lookup; subclass=-1 means any, after is a prior borrowed PCI device. */
++void *nmx_xnu_pci_find_class(uint8_t cls, int subclass, void *after);
+ /* the device's expansion ROM image (VBIOS) as the firmware left it, copied into 'buf'; returns its length or 0 */
+ size_t nmx_xnu_pci_rom(void *pci, void *buf, size_t max);
+ 
+--- a/bsdcompat/include/nmxxnu/nmx_port.h
++++ b/bsdcompat/include/nmxxnu/nmx_port.h
+@@ -29,6 +29,13 @@
+ int nmx_fb_open(void *dev, struct nmx_fb_info *out);
+ void nmx_fb_close(void *dev);
+ int nmx_fb_power(void *dev, int on);
++
++/* Alder Lake-S scan-out: positive errno; success transfers a pinned mapping
++ * cookie to the display bridge. Unmap before deleting its DRM framebuffer. */
++struct drm_framebuffer;
++int nmx_i915_scanout_map(struct drm_framebuffer *fb, struct nmx_fb_info *info, void **cookie);
++void nmx_i915_scanout_unmap(void *cookie);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsdcompat/include/nmxxnu/nmx_xnu.h
++++ b/bsdcompat/include/nmxxnu/nmx_xnu.h
+@@ -84,6 +84,8 @@
+ void nmx_xnu_pci_irq_enable(void *cookie, int on);
+ /* the IOPCIDevice at domain:bus:dev.func, or NULL */
+ void *nmx_xnu_pci_find(uint32_t domain, uint8_t bus, uint8_t dev, uint8_t func);
++/* Native class lookup; subclass=-1 means any, after is a prior borrowed PCI device. */
++void *nmx_xnu_pci_find_class(uint8_t cls, int subclass, void *after);
+ /* the device's expansion ROM image (VBIOS) as the firmware left it, copied into 'buf'; returns its length or 0 */
+ size_t nmx_xnu_pci_rom(void *pci, void *buf, size_t max);
+ 
+@@ -157,8 +159,13 @@
+ /* a clone node at /dev/<path>; 'cookie' is handed back to nmx_cdev_open for every open of it */
+ void *nmx_xnu_devfs_make(const char *path, uint32_t uid, uint32_t gid, int mode, void *cookie);
+ void nmx_xnu_devfs_remove(void *node);
+-/* maps physical pages into the calling process (the GPU mmap ioctl); 'uaddr' receives the user address */
+-int nmx_xnu_map_user(const uint64_t *pages, size_t npages, int cache, int writable, uint64_t *uaddr, void **handle);
++/*
++ * maps physical pages into the calling process (the GPU mmap ioctl); 'uaddr' receives the user address. fixed != 0
++ * places the mapping at that address, replacing whatever the process had there (Linux MAP_FIXED); unmapping such a
++ * mapping leaves a hole, as munmap(2) does.
++ */
++int nmx_xnu_map_user(const uint64_t *pages, size_t npages, int cache, int writable, uint64_t fixed, uint64_t *uaddr,
++                     void **handle);
+ void nmx_xnu_unmap_user(void *handle);
+ 
+ /* implemented on the LinuxKPI side (override/src/nmx_linux_cdev.c), called by the device-node glue */
+--- a/bsdcompat/src/nmx_bus.c
++++ b/bsdcompat/src/nmx_bus.c
+@@ -496,6 +496,7 @@
+         return err;
+     device_probe_t *probe = (device_probe_t *)nmx_device_method(dev, "device_probe");
+     int r = probe ? probe(dev) : 0;
++    printf("NullMoth dbg: probe_with %s -> %d\n", driver->name, r);
+     if (r > 0) {
+         set_driver(dev, NULL);
+         return r;
+@@ -676,6 +677,7 @@
+         struct driverlink *dl;
+         int n = 0;
+         TAILQ_FOREACH(dl, &dc->drivers, link) {
++            printf("NullMoth dbg: add_device %s offering %s\n", device_get_nameunit(dev), dl->driver->name);
+             offer(dev, dl->driver);
+             n++;
+         }
+@@ -1150,28 +1152,23 @@
+ 
+ device_t pci_find_class_from(uint8_t cls, uint8_t subcls, device_t from)
+ {
+-    device_t d, found = NULL;
+-    int past = from == NULL;
+-    mtx_lock(&bus_mtx);
+-    TAILQ_FOREACH(d, &all_devices, all) {
+-        if (!past) { past = d == from; continue; }
+-        if (d->is_pci && d->dinfo.cfg.baseclass == cls && d->dinfo.cfg.subclass == subcls) { found = d; break; }
+-    }
+-    mtx_unlock(&bus_mtx);
++    /* i915 discovers the PCH through ISA class 06:01. It may not have been
++     * wrapped before the GPU probes, so all_devices is not a PCI inventory. */
++    void *native = nmx_xnu_pci_find_class(cls, subcls, from ? P(from)->xnu : NULL);
++    device_t found = nmx_device_for_pci(native);
++    if (found != NULL)
++        printf("NullMoth PCI enum v1: class %02x:%02x -> %04x:%04x\n", cls, subcls,
++               P(found)->dinfo.cfg.vendor, P(found)->dinfo.cfg.device);
++    else
++        printf("NullMoth PCI enum v1: class %02x:%02x -> none\n", cls, subcls);
+     return found;
+ }
+ 
+ device_t pci_find_base_class_from(uint8_t cls, device_t from)
+ {
+-    device_t d, found = NULL;
+-    int past = from == NULL;
+-    mtx_lock(&bus_mtx);
+-    TAILQ_FOREACH(d, &all_devices, all) {
+-        if (!past) { past = d == from; continue; }
+-        if (d->is_pci && d->dinfo.cfg.baseclass == cls) { found = d; break; }
+-    }
+-    mtx_unlock(&bus_mtx);
+-    return found;
++    /* Same native enumeration and continuation semantics as the full class query. */
++    void *native = nmx_xnu_pci_find_class(cls, -1, from ? P(from)->xnu : NULL);
++    return nmx_device_for_pci(native);
+ }
+ 
+ struct resource *pci_reserve_map(device_t dev, device_t child, int type, int rid, rman_res_t start, rman_res_t end,
+--- a/gen_flags.py
++++ b/gen_flags.py
+@@ -8,7 +8,7 @@
+     "COMPAT",                                       # 32-bit ioctls: macOS 15 runs 64-bit processes only
+     "FB", "DRM_FBDEV_EMULATION", "DRM_FBDEV_OVERALLOC", "DRM_CLIENT_DEFAULT_FBDEV", "DRM_CLIENT_DEFAULT",
+     "DRM_CLIENT", "DRM_CLIENT_SETUP", "VIDEO_CMDLINE",  # in-kernel fbdev clients: macOS uses IOFramebuffer
+-    "DRM_MIPI_DSI", "DRM_PANEL_ORIENTATION_QUIRKS", "DRM_PANEL_BACKLIGHT_QUIRKS", "DRM_DISPLAY_DP_TUNNEL",
++    "DRM_MIPI_DSI", "DRM_PANEL_ORIENTATION_QUIRKS", "DRM_PANEL_BACKLIGHT_QUIRKS", "DRM_DISPLAY_DP_TUNNEL", "DRM_I915_DP_TUNNEL",
+ }
+ txt = (dk / "kconfig.mk").read_text()
+ # amd64 branch, FBDEV branch dropped (excluded anyway)
+--- /dev/null
++++ b/override/i915/nmx_i915_scanout.c
+@@ -0,0 +1,122 @@
++/*
++ * Alder Lake-S diagnostic scan-out mapping for the NullMoth display bridge.
++ * Reuse i915's framebuffer GGTT pinning and CPU aperture mapping, as fbdev does.
++ * Shmem pages need not be physically adjacent: the GGTT aperture is contiguous.
++ * The cookie owns the display VMA pin/reference, iomap pin, and an awake reference
++ * until unmap. Keeping the GPU awake is intentional for this initial display test;
++ * this does not establish sleep/wake or Metal support. Return positive errno to
++ * match nmx_fb_open; outputs/cookie are assigned only after complete success.
++ */
++#include <linux/err.h>
++#include <linux/slab.h>
++#include <drm/drm_framebuffer.h>
++#include "gem/i915_gem_object.h"
++#include "gt/intel_gt.h"
++#include "i915_drv.h"
++#include "i915_gem_gtt.h"
++#include "i915_vma.h"
++#include "display/intel_display_types.h"
++#include "display/intel_fb.h"
++#include "display/intel_fb_pin.h"
++#include "nmx_port.h"
++
++extern void nmx_gpu_stage_record(const char *, int);
++
++struct nmx_i915_scanout {
++    struct drm_i915_private *i915;
++    struct i915_vma *vma;
++    unsigned long flags;
++    intel_wakeref_t wakeref;
++    bool iomap_pinned;
++};
++
++void nmx_i915_scanout_unmap(void *cookie)
++{
++    struct nmx_i915_scanout *ctx = cookie;
++
++    if (!ctx)
++        return;
++    if (ctx->iomap_pinned)
++        i915_vma_unpin_iomap(ctx->vma);
++    if (ctx->vma)
++        intel_fb_unpin_vma(ctx->vma, ctx->flags);
++    intel_runtime_pm_put(&ctx->i915->runtime_pm, ctx->wakeref);
++    kfree(ctx);
++}
++
++int nmx_i915_scanout_map(struct drm_framebuffer *fb,
++                         struct nmx_fb_info *info, void **cookie)
++{
++    const struct i915_gtt_view view = { .type = I915_GTT_VIEW_NORMAL };
++    struct nmx_i915_scanout *ctx;
++    struct drm_i915_private *i915;
++    struct i915_ggtt *ggtt;
++    void __iomem *vaddr;
++    u64 used, length, offset, aperture;
++    int ret;
++
++    if (!fb || !fb->dev || !info || !cookie)
++        return EINVAL;
++    *cookie = NULL;
++    i915 = to_i915(fb->dev);
++    if (!IS_ALDERLAKE_S(i915))
++        return EOPNOTSUPP;
++    used = (u64)fb->pitches[0] * fb->height;
++    length = PAGE_ALIGN(used);
++    if (!used || length < used)
++        return EINVAL;
++
++    ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
++    if (!ctx)
++        return ENOMEM;
++    ctx->i915 = i915;
++    ctx->wakeref = intel_runtime_pm_get(&i915->runtime_pm);
++    nmx_gpu_stage_record("igtt.pin.before", 0);
++    ctx->vma = nmx_intel_fb_pin_mappable(fb, &view,
++        to_intel_framebuffer(fb)->min_alignment, 0, false, &ctx->flags);
++    if (IS_ERR(ctx->vma)) {
++        ret = PTR_ERR(ctx->vma);
++        ctx->vma = NULL;
++        nmx_gpu_stage_record("igtt.pin.after", ret);
++        goto fail;
++    }
++    nmx_gpu_stage_record("igtt.pin.after", 0);
++
++    ggtt = to_gt(i915)->ggtt;
++    offset = i915_ggtt_offset(ctx->vma);
++    aperture = resource_size(&ggtt->gmadr);
++    if (!i915_vma_is_map_and_fenceable(ctx->vma) ||
++        length > i915_vma_size(ctx->vma) || offset > aperture ||
++        length > aperture - offset) {
++        ret = -ENOSPC;
++        nmx_gpu_stage_record("igtt.aperture", ret);
++        goto fail;
++    }
++    nmx_gpu_stage_record("igtt.aperture", 0);
++
++    nmx_gpu_stage_record("igtt.lock.before", 0);
++    ret = i915_gem_object_lock(ctx->vma->obj, NULL);
++    nmx_gpu_stage_record("igtt.lock.after", ret);
++    if (ret)
++        goto fail;
++    nmx_gpu_stage_record("igtt.iomap.before", 0);
++    vaddr = i915_vma_pin_iomap(ctx->vma);
++    i915_gem_object_unlock(ctx->vma->obj);
++    if (IS_ERR_OR_NULL(vaddr)) {
++        ret = vaddr ? PTR_ERR(vaddr) : -ENOMEM;
++        nmx_gpu_stage_record("igtt.iomap.after", ret);
++        goto fail;
++    }
++    ctx->iomap_pinned = true;
++    nmx_gpu_stage_record("igtt.iomap.after", 0);
++
++    info->phys = ggtt->gmadr.start + offset;
++    info->size = length;
++    info->kva = (u64)(uintptr_t)vaddr;
++    *cookie = ctx;
++    return 0;
++
++fail:
++    nmx_i915_scanout_unmap(ctx);
++    return -ret;
++}
+--- a/override/src/linux_pci.c
++++ b/override/src/linux_pci.c
+@@ -707,6 +707,7 @@
+ 	}
+ 
+ 	error = lkpifill_pci_dev(dev, pdev);
++	printf("NullMoth dbg: fill -> %d\n", error);
+ 	if (error != 0)
+ 		return (error);
+ 
+@@ -723,6 +724,7 @@
+ 		pdev->dev.irq = LINUX_IRQ_INVALID;
+ 	pdev->irq = pdev->dev.irq;
+ 	error = linux_pdev_dma_init(pdev);
++	printf("NullMoth dbg: dma_init -> %d\n", error);
+ 	if (error)
+ 		goto out_err;
+ 
+@@ -753,6 +755,7 @@
+ 
+ 	if (pdrv != NULL) {
+ 		error = pdrv->probe(pdev, id);
++		printf("NullMoth dbg: pdrv %s probe -> %d\n", pdrv->name, error);
+ 		if (error)
+ 			goto out_err;
+ 	}
+--- a/override/src/nmx_fb_bridge.c
++++ b/override/src/nmx_fb_bridge.c
+@@ -16,6 +16,9 @@
+ 
+ #include <drm/drm_client.h>
+ #include <drm/drm_device.h>
++#include <drm/drm_drv.h>
++#include <linux/io.h>
++#include <linux/string.h>
+ #include <drm/drm_fourcc.h>
+ #include <drm/drm_framebuffer.h>
+ #include <drm/drm_modes.h>
+@@ -25,12 +28,14 @@
+ 
+ #include "nmx_xnu.h"
+ #include "nmx_port.h"
++extern void nmx_gpu_stage_record(const char *, int);
+ 
+ struct nmx_fb {
+     struct drm_client_dev client;
+     struct drm_client_buffer *buffer;
+     struct iosys_map map;
+     int mapped;
++    void *intel_scanout;
+     struct nmx_fb_info info;
+ };
+ 
+@@ -118,7 +123,9 @@
+ 
+ static void bridge_free(struct nmx_fb *fb)
+ {
+-    if (fb->mapped)
++    if (fb->intel_scanout)
++        nmx_i915_scanout_unmap(fb->intel_scanout);
++    else if (fb->mapped)
+         drm_client_buffer_vunmap(fb->buffer);
+     if (fb->buffer != NULL)
+         drm_client_framebuffer_delete(fb->buffer);
+@@ -145,13 +152,17 @@
+     struct nmx_fb *fb = kzalloc(sizeof(*fb), GFP_KERNEL);
+     if (fb == NULL)
+         return ENOMEM;
++    nmx_gpu_stage_record("fb.client.before", 0);
+     err = -drm_client_init(drm, &fb->client, "nmxfb", &bridge_funcs);
++    nmx_gpu_stage_record("fb.client.after", err);
+     if (err) {
+         printf("NullMoth display: DRM client refused (%d)\n", err);
+         kfree(fb);
+         return err;
+     }
++    nmx_gpu_stage_record("fb.probe.before", 0);
+     err = -drm_client_modeset_probe(&fb->client, 0, 0);
++    nmx_gpu_stage_record("fb.probe.after", err);
+     if (err) {
+         printf("NullMoth display: probing the outputs failed (%d)\n", err);
+         goto fail;
+@@ -180,7 +191,11 @@
+         goto fail;
+     }
+ 
++    printf("NullMoth display: selected %ux%u clock=%u kHz totals=%ux%u\n",
++           out->width, out->height, out->pclk_khz, out->htotal, out->vtotal);
++    nmx_gpu_stage_record("fb.buffer.before", 0);
+     fb->buffer = drm_client_framebuffer_create(&fb->client, out->width, out->height, DRM_FORMAT_XRGB8888);
++    nmx_gpu_stage_record("fb.buffer.after", IS_ERR(fb->buffer) ? (int)PTR_ERR(fb->buffer) : (fb->buffer != NULL ? 0 : -12));
+     if (IS_ERR(fb->buffer)) {
+         err = -PTR_ERR(fb->buffer);
+         fb->buffer = NULL;
+@@ -189,12 +204,23 @@
+     }
+     out->pitch = fb->buffer->fb->pitches[0];
+ 
+-    err = -drm_client_buffer_vmap(fb->buffer, &fb->map);
++    nmx_gpu_stage_record("fb.vmap.before", 0);
++    if (drm->driver && drm->driver->name && !strcmp(drm->driver->name, "i915")) {
++        /* Alder Lake-S has no generic GEM vmap callback. Use i915's display
++         * aperture mapping so scattered shmem pages still expose one physical
++         * range to IOFramebuffer. The cookie owns all pins until bridge_free. */
++        err = nmx_i915_scanout_map(fb->buffer->fb, out, &fb->intel_scanout);
++        if (!err)
++            iosys_map_set_vaddr_iomem(&fb->map, (void __iomem *)(uintptr_t)out->kva);
++    } else {
++        err = -drm_client_buffer_vmap(fb->buffer, &fb->map);
++    }
++    nmx_gpu_stage_record("fb.vmap.after", err);
+     if (err) {
+         printf("NullMoth display: the scan-out buffer would not map (%d)\n", err);
+         goto fail;
+     }
+-    fb->mapped = 1;
++    fb->mapped = fb->intel_scanout == NULL;
+ 
+     /* the published range must be one physical run: check every page of the CPU view */
+     const char *va = fb->map.is_iomem ? (const char *)fb->map.vaddr_iomem : (const char *)fb->map.vaddr;
+@@ -207,6 +233,11 @@
+             err = EFAULT;
+             goto fail;
+         }
++    if (fb->intel_scanout && base != out->phys) {
++        printf("NullMoth display: GGTT CPU aperture disagrees with scan-out range\n");
++        err = EFAULT;
++        goto fail;
++    }
+     if (base == 0) {
+         err = EFAULT;
+         goto fail;
+@@ -214,19 +245,28 @@
+     out->phys = base;
+     out->size = round_page(size);
+     out->kva = (uint64_t)(uintptr_t)va;
+-    memset(__DECONST(char *, va), 0, size);       /* black until WindowServer draws */
++    if (fb->map.is_iomem)
++        memset_io(fb->map.vaddr_iomem, 0, size);
++    else
++        memset(fb->map.vaddr, 0, size);
++    wmb(); /* Make aperture writes visible before committing scan-out. */
+ 
+     mutex_lock(&fb->client.modeset_mutex);
+     drm_client_for_each_modeset(ms, &fb->client)
+         if (ms->mode != NULL)
+             ms->fb = fb->buffer->fb;
+     mutex_unlock(&fb->client.modeset_mutex);
++    nmx_gpu_stage_record("fb.commit.before", 0);
+     err = -drm_client_modeset_commit(&fb->client);
++    nmx_gpu_stage_record("fb.commit.after", err);
+     if (err) {
+         printf("NullMoth display: the mode set failed (%d)\n", err);
+         goto fail;
+     }
+-    drm_client_register(&fb->client);       /* from here on hotplug reaches bridge_hotplug */
++    /* From here on hotplug reaches bridge_hotplug. */
++    nmx_gpu_stage_record("fb.register.before", 0);
++    drm_client_register(&fb->client);
++    nmx_gpu_stage_record("fb.register.after", 0);
+ 
+     fb->info = *out;
+     fbs[slot].dev = dev;
+--- a/xnu/nmx_fb.cpp
++++ b/xnu/nmx_fb.cpp
+@@ -12,6 +12,7 @@
+ #include <IOKit/IODeviceMemory.h>
+ #include <kern/thread_call.h>
+ #include "nmx_port.h"
++extern "C" void nmx_gpu_stage_record(const char *, int);
+ 
+ #define FBLOG(fmt, ...) IOLog("NullMoth display: " fmt "\n", ##__VA_ARGS__)
+ 
+@@ -45,6 +46,12 @@
+ 
+ public:
+     bool initWith(void *dev, const nmx_fb_info &info) {
++        /* Validate the range before IOFramebuffer exposes it to WindowServer. */
++        const uint64_t bytes = (uint64_t)info.pitch * info.height;
++        if (dev == nullptr || !info.ok || !info.width || !info.height ||
++            (uint64_t)info.width * 4 > info.pitch || !info.phys ||
++            !bytes || bytes > info.size || info.phys + info.size < info.phys)
++            return false;
+         if (!init()) return false;
+         fDev = dev;
+         fInfo = info;
+@@ -61,6 +68,11 @@
+     bool start(IOService *provider) override {
+         if (!IOFramebuffer::start(provider)) return false;
+         fVblTimer = thread_call_allocate(vblFire, this);
++        if (!fVblTimer) {
++            FBLOG("VBL timer allocation failed");
++            IOFramebuffer::stop(provider);
++            return false;
++        }
+         if (fVblTimer) {
+             uint64_t d;
+             clock_interval_to_deadline((uint32_t)(fFrameNs / 1000), kMicrosecondScale, &d);
+@@ -93,7 +105,7 @@
+     IODeviceMemory *getVRAMRange() override { return IODeviceMemory::withRange(fInfo.phys, fInfo.size); }
+     const char *getPixelFormats() override { return IO32BitDirectPixels "\0"; }
+     IOItemCount getDisplayModeCount() override { return 1; }
+-    IOReturn getDisplayModes(IODisplayModeID *modes) override { modes[0] = 1; return kIOReturnSuccess; }
++    IOReturn getDisplayModes(IODisplayModeID *modes) override { if (!modes) return kIOReturnBadArgument; modes[0] = 1; return kIOReturnSuccess; }
+     IOReturn getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info) override {
+         if (mode != 1 || !info) return kIOReturnBadArgument;
+         bzero(info, sizeof(*info));
+@@ -122,7 +134,7 @@
+         return kIOReturnSuccess;
+     }
+     IOReturn getCurrentDisplayMode(IODisplayModeID *mode, IOIndex *depth) override {
+-        *mode = 1; *depth = 0; return kIOReturnSuccess;
++        if (mode) *mode = 1; if (depth) *depth = 0; return kIOReturnSuccess;
+     }
+     IOReturn getStartupDisplayMode(IODisplayModeID *mode, IOIndex *depth) override { return getCurrentDisplayMode(mode, depth); }
+     /* without a timing, WindowServer shows the display at 0.00 Hz (seen with NMIntelFB) */
+@@ -218,7 +230,9 @@
+ IOService *nmx_fb_publish(IOService *gpu, void *dev)
+ {
+     nmx_fb_info info;
++    nmx_gpu_stage_record("fb.open.before", 0);
+     int err = nmx_fb_open(dev, &info);
++    nmx_gpu_stage_record("fb.open.after", err);
+     if (err || !info.ok) {
+         FBLOG("no framebuffer (%d)", err);
+         return nullptr;
+--- a/xnu/nmx_kext.cpp
++++ b/xnu/nmx_kext.cpp
+@@ -18,6 +18,7 @@
+ #include <IOKit/pci/IOPCIDevice.h>
+ #include <libkern/c++/OSBoolean.h>
+ #include <libkern/c++/OSData.h>
++#include <libkern/libkern.h>
+ #include <mach/kmod.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/thread.h>
+@@ -183,9 +184,47 @@
+     n->release();
+ }
+ 
++/* Diagnostic build for one UHD 770: publish stages in RAM and IOLog only.
++ * No checkpoint calls NVRAM or sync. The original attach guard stays unchanged.
++ * g_lock protects the owner and sequence; it is released before property/log I/O.
++ * The attach thread/IOKit owns the service, and stop clears the borrowed owner.
++ */
++static IOService *g_nmx_stage_owner;
++static unsigned g_nmx_stage_sequence;
++
++static void nmx_diag_set_owner(IOService *owner)
++{
++    IOLockLock(g_lock);
++    g_nmx_stage_owner = owner;
++    IOLockUnlock(g_lock);
++}
++
++extern "C" void nmx_gpu_stage_record(const char *stage, int result)
++{
++    if (stage == nullptr || g_lock == nullptr)
++        return;
++    IOLockLock(g_lock);
++    unsigned sequence = ++g_nmx_stage_sequence;
++    IOService *owner = g_nmx_stage_owner;
++    if (owner != nullptr)
++        owner->retain();
++    IOLockUnlock(g_lock);
++    char value[160];
++    snprintf(value, sizeof(value), "memstage-v2 seq=%u %s ret=%d", sequence, stage, result);
++    if (owner != nullptr) {
++        owner->setProperty("nmxdiag-stage", value);
++        owner->release();
++    }
++    IOLog("NullMoth trace: %s\n", value);
++}
++
+ void NMXGPU::attachNow()
+ {
++    nmx_diag_set_owner(this);
++    setProperty("nmxdiag-build", "memstage-v2-20261019");
++    nmx_gpu_stage_record("firmware.wait.before", 0);
+     int err = nmx_xnu_wait_firmware_root(300);
++    nmx_gpu_stage_record("firmware.wait.after", err);
+     if (err) {
+         IOLog("NullMoth GPU: the firmware folder never appeared (%d); this GPU stays with macOS\n", err);
+         attach_ = -1;
+@@ -199,8 +238,20 @@
+         attach_ = -1;
+         return;
+     }
++    /* Diagnostic-only delay, not a display/initialization fix. */
++    int nmx_diag_delay = 90;
++    PE_parse_boot_argn("nmxdiagdelay", &nmx_diag_delay, sizeof(nmx_diag_delay));
++    if (nmx_diag_delay < 30 || nmx_diag_delay > 300)
++        nmx_diag_delay = 90;
++    nmx_gpu_stage_record("delay.before", nmx_diag_delay);
++    IOSleep(static_cast<unsigned>(nmx_diag_delay) * 1000U);
++    nmx_gpu_stage_record("delay.after", 0);
++    nmx_gpu_stage_record("guard.set.before", 0);
+     nmx_marker_write(true);
++    nmx_gpu_stage_record("guard.set.after", 0);
++    nmx_gpu_stage_record("port.before", 0);
+     dev_ = nmx_port_attach(pci_);
++    nmx_gpu_stage_record("port.after", dev_ != nullptr ? 0 : -1);
+     if (dev_ == nullptr) {
+         nmx_marker_write(false);
+         IOLog("NullMoth GPU: no driver took %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
+@@ -213,26 +264,54 @@
+         { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+         { kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
+     };
++    nmx_gpu_stage_record("publish.before", 0);
++    nmx_gpu_stage_record("pm.init.before", 0);
+     PMinit();
++    nmx_gpu_stage_record("pm.init.after", 0);
++    nmx_gpu_stage_record("pm.join.before", 0);
+     pci_->joinPMtree(this);
+-    registerPowerDriver(this, states, 2);
++    nmx_gpu_stage_record("pm.join.after", 0);
++    nmx_gpu_stage_record("pm.register.before", 0);
++    IOReturn nmx_pm_ret = registerPowerDriver(this, states, 2);
++    nmx_gpu_stage_record("pm.register.after", static_cast<int>(nmx_pm_ret));
+     pm_ = true;
++    nmx_gpu_stage_record("service.self.before", 0);
+     registerService();
++    nmx_gpu_stage_record("service.self.after", 0);
+     /* NMXAccel (the Metal accelerator for this GPU) starts only on a device this driver has claimed; it declined while
+        the claim was pending, so matching on the device runs again now that it is set */
+-    pci_->setProperty("nmxgpu-claimed", kOSBooleanTrue);
++    nmx_gpu_stage_record("claim.before", 0);
++    bool nmx_claim_set = pci_->setProperty("nmxgpu-claimed", kOSBooleanTrue);
++    nmx_gpu_stage_record("claim.after", nmx_claim_set ? 0 : -1);
++    nmx_gpu_stage_record("service.pci.before", 0);
+     pci_->registerService();
++    nmx_gpu_stage_record("service.pci.after", 0);
++    nmx_gpu_stage_record("publish.after", 0);
+     /* light the outputs and hand them to macOS; without it the device still renders, with no screen of its own */
++    nmx_gpu_stage_record("framebuffer.before", 0);
+     fb_ = nmx_fb_publish(this, dev_);
++    nmx_gpu_stage_record("framebuffer.after", fb_ != nullptr ? 0 : -1);
++    if (fb_ == nullptr) {
++        /* The GPU may have reset the firmware display already. A completed
++         * device probe with no framebuffer is a failed display start: preserve
++         * the existing guard so the next boot parks this attempt before reset. */
++        setProperty("nullmoth-gpu-state", "failed: no framebuffer; guard retained");
++        IOLog("NullMoth GPU: no framebuffer; boot guard retained for recovery\n");
++        attach_ = -1;
++        nmx_gpu_stage_record("attach.no_framebuffer", -1);
++        return;
++    }
+     nmx_marker_write(false);
+     IOLog("NullMoth GPU: driving %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
+           pci_->configRead16(kIOPCIConfigDeviceID));
+     OSSynchronizeIO();
+     attach_ = 1;
++    nmx_gpu_stage_record("attach.complete", fb_ != nullptr ? 0 : -1);
+ }
+ 
+ void NMXGPU::stop(IOService *provider)
+ {
++    nmx_diag_set_owner(nullptr);
+     /* an attach still running on its thread finishes first (it holds a reference on this object meanwhile) */
+     for (int i = 0; attach_ == 0 && i < 6000; i++)
+         IOSleep(100);
+@@ -255,7 +334,9 @@
+ IOReturn NMXGPU::setPowerState(unsigned long state, IOService *device)
+ {
+     if (dev_ != nullptr) {
++        nmx_gpu_stage_record("pm.callback.before", static_cast<int>(state));
+         int err = nmx_port_power(dev_, state != 0);
++        nmx_gpu_stage_record("pm.callback.after", err);
+         if (err)
+             IOLog("NullMoth GPU: %s returned %d\n", state ? "resume" : "suspend", err);
+     }
+--- a/xnu/nmx_pci.cpp
++++ b/xnu/nmx_pci.cpp
+@@ -221,6 +221,42 @@
+ 
+ /* ---- lookup and ROM ----------------------------------------------------------------------------------------------- */
+ 
++/* Same borrowed-device lifetime convention as nmx_xnu_pci_find().
++ * Enumerate real PCI services, including chipset functions not yet wrapped by
++ * newbus. The caller wraps the result with nmx_device_for_pci; no driver is
++ * attached, PCI config written, or BAR mapped by this lookup. subclass=-1 is
++ * the pci_find_base_class_from wildcard. after must be a prior native result.
++ */
++extern "C" void *nmx_xnu_pci_find_class(uint8_t cls, int subclass, void *after)
++{
++    if (subclass < -1 || subclass > 255)
++        return nullptr;
++    OSDictionary *match = IOService::serviceMatching("IOPCIDevice");
++    if (match == nullptr)
++        return nullptr;
++    OSIterator *it = IOService::getMatchingServices(match);
++    match->release();
++    if (it == nullptr)
++        return nullptr;
++    IOPCIDevice *found = nullptr;
++    bool past = after == nullptr;
++    while (OSObject *o = it->getNextObject()) {
++        IOPCIDevice *d = OSDynamicCast(IOPCIDevice, o);
++        if (!past) {
++            past = d == after;
++            continue;
++        }
++        /* PCI configuration class and subclass bytes, not a cached GPU list. */
++        if (d != nullptr && d->configRead8(0x0b) == cls &&
++            (subclass < 0 || d->configRead8(0x0a) == subclass)) {
++            found = d;
++            break;
++        }
++    }
++    it->release();
++    return found;
++}
++
+ extern "C" void *nmx_xnu_pci_find(uint32_t domain, uint8_t bus, uint8_t dev, uint8_t func)
+ {
+     OSDictionary *match = IOService::serviceMatching("IOPCIDevice");
