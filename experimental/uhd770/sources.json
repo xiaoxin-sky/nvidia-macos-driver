@@ -1,6 +1,7 @@
 {
   "port": "7222618727449426631d13d0654f8347634717e9",
   "drm_kmod": "c16de0f9fa84f70b9551f69fde837a7f3a73c0e9",
+  "drm_kmod_archive_sha256": "4515282c690c0f88d936fd4919e691f1125e8f14b5fc124160d799f098bf61e7",
   "freebsd": "7668705cb9837d4c3a6db9b3434b3a522220c8ea",
   "target": "Alder Lake-S iGPU; macOS 15; experimental basic display",
   "metal_acceleration_verified": false

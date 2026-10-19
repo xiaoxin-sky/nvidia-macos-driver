@@ -1,9 +1,15 @@
 name: build NMXGPU (UHD 770 audited display batch)
 on:
   workflow_dispatch:
+    inputs:
+      clean_build:
+        description: Ignore all caches for a clean diagnostic build
+        type: boolean
+        default: false
   push:
     paths:
       - '.github/workflows/build.yml'
+      - 'experimental/uhd770/sources.json'
       - 'experimental/uhd770/patches/**'
       - 'experimental/uhd770/tools/**'
       - 'experimental/uhd770/tests/**'
@@ -13,6 +19,10 @@ jobs:
   build:
     runs-on: macos-15-intel
     timeout-minutes: 240
+    env:
+      NMX_USE_CACHE: ${{ github.event_name != 'workflow_dispatch' || !inputs.clean_build }}
+      CCACHE_NODIRECT: 'true'
+      CCACHE_COMPILERCHECK: content
     steps:
       - name: Check out this fork (full history, for the GPU source at 7222618)
         uses: actions/checkout@v4
@@ -35,60 +45,64 @@ jobs:
           echo "== Kernel.framework headers =="
           ls "$SDK/System/Library/Frameworks/Kernel.framework/Headers" 2>/dev/null | head -5 || true
 
-      - name: Stage the sources
+      - name: Prepare compiler cache and toolchain identity
+        id: toolchain
         run: |
           set -euo pipefail
-          S=/Volumes/MiniData/build/gpu-src
-          X=$S/xkpi
-          sudo mkdir -p "$S" /opt/homebrew/bin
-          sudo chown -R "$(id -u):$(id -g)" /Volumes/MiniData
-          sudo ln -sf "$(command -v python3)" /opt/homebrew/bin/python3
-          rm -rf "$X" "$S/kpi"
-          mkdir -p "$S/kpi"
-          echo "== NMX GPU source at 7222618 =="
-          rm -rf /tmp/nmx-src && mkdir -p /tmp/nmx-src
-          git archive 7222618727449426631d13d0654f8347634717e9 gpu-port/xkpi | tar -x -C /tmp/nmx-src
-          cp -R /tmp/nmx-src/gpu-port/xkpi "$X"
-          chmod +x "$X"/*.sh
-          echo "== drm-kmod at c16de0f9 =="
-          curl -fsSL -o /tmp/drm.tgz https://codeload.github.com/freebsd/drm-kmod/tar.gz/c16de0f9fa84f70b9551f69fde837a7f3a73c0e9
-          tar -xzf /tmp/drm.tgz -C "$S/kpi"
-          mv "$S/kpi"/drm-kmod-c16de0f9fa84f70b9551f69fde837a7f3a73c0e9 "$S/kpi/drm-kmod"
-          echo "== the port's linux_pci.c against today's linux/pci.h =="
-          python3 - "$X" <<'PY'
-          import pathlib, sys
-          p = pathlib.Path(sys.argv[1], 'override/src/linux_pci.c')
-          s = p.read_text()
-          anchor = '#include "pcib_if.h"\n'
-          shim = '''
-          #include <linux/list.h>
-          #include <linux/spinlock.h>
+          if ! command -v ccache >/dev/null; then
+            HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ccache
+          fi
+          {
+            sw_vers -productVersion
+            xcodebuild -version
+            xcrun clang --version
+            xcrun --sdk macosx --show-sdk-version
+            ccache --version
+          } > /tmp/nmx-toolchain.txt
+          echo "fingerprint=$(shasum -a 256 /tmp/nmx-toolchain.txt | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "CCACHE_DIR=$HOME/.cache/nmxgpu/ccache" >> "$GITHUB_ENV"
+          echo "NMX_DEPENDENCY_CACHE=$HOME/.cache/nmxgpu/dependencies" >> "$GITHUB_ENV"
+          if [[ "$NMX_USE_CACHE" != true ]]; then
+            echo 'CCACHE_DISABLE=true' >> "$GITHUB_ENV"
+          fi
 
-          /* freebsd-src 2026 made these static inside linux_pci.c (and renamed them to
-           * lkpi_pci_*) after this file was forked. The fork replaces that translation
-           * unit and override/src/linux_compat.c still defines all three, so declare them. */
-          extern struct list_head pci_drivers;
-          extern struct list_head pci_devices;
-          extern spinlock_t pci_lock;
-          '''
-          assert s.count(anchor) == 1, s.count(anchor)
-          if 'extern spinlock_t pci_lock;' not in s:
-              p.write_text(s.replace(anchor, anchor + shim, 1))
-              print('linux_pci.c: declared pci_drivers/pci_devices/pci_lock')
-          PY
-          grep -n 'extern spinlock_t pci_lock' "$X/override/src/linux_pci.c"
-          echo "== FreeBSD LinuxKPI + CK + ACPICA (pinned) =="
-          FBSD_SHA=7668705cb9837d4c3a6db9b3434b3a522220c8ea
-          git init -q "$S/kpi/freebsd-src"
-          cd "$S/kpi/freebsd-src"
-          git remote add origin https://github.com/freebsd/freebsd-src
-          git fetch -q --depth 1 --filter=blob:none origin "$FBSD_SHA"
-          git sparse-checkout init --cone
-          git sparse-checkout set sys/compat/linuxkpi sys/contrib/ck sys/contrib/dev/acpica
-          git checkout -q FETCH_HEAD
-          echo "freebsd-src $(git rev-parse HEAD)"
-          test -f sys/contrib/dev/acpica/include/acpi.h
-          du -sh "$S/kpi/drm-kmod" "$S/kpi/freebsd-src" "$X"
+      - name: Restore pristine pinned dependencies
+        id: dependencies
+        if: env.NMX_USE_CACHE == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/nmxgpu/dependencies
+          key: nmxgpu-deps-v1-${{ runner.os }}-${{ hashFiles('experimental/uhd770/sources.json') }}
+
+      - name: Restore compiler cache
+        id: objects
+        if: env.NMX_USE_CACHE == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/nmxgpu/ccache
+          key: nmxgpu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            nmxgpu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-
+
+      - name: Stage the sources
+        run: bash experimental/uhd770/tools/stage_sources.sh
+
+      - name: Save pristine pinned dependencies
+        if: env.NMX_USE_CACHE == 'true' && steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/nmxgpu/dependencies
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
+
+      - name: Validate compiler cache invalidation
+        run: |
+          set -euo pipefail
+          bash experimental/uhd770/tools/check_ccache.sh | tee /tmp/nmx-ccache-validation.log
+          ccache --set-config=max_size=512M
+          ccache --set-config=sloppiness=
+          ccache --set-config=direct_mode=false
+          ccache --set-config=depend_mode=false
+          ccache --zero-stats
 
       - name: Build the kernel extension
         run: |
@@ -105,6 +119,7 @@ jobs:
           git -C "$S/kpi/drm-kmod" apply --check "$GITHUB_WORKSPACE/experimental/uhd770/patches/drm-kmod.patch"
           git -C "$X" apply "$GITHUB_WORKSPACE/experimental/uhd770/patches/xkpi.patch"
           git -C "$S/kpi/drm-kmod" apply "$GITHUB_WORKSPACE/experimental/uhd770/patches/drm-kmod.patch"
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/enable_ccache.py" "$X"
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_pci_fixture.py" \
             "$X/xnu/nmx_pci.cpp" \
             "$GITHUB_WORKSPACE/experimental/uhd770/tests/pci_class_fixture.cpp.in" \
@@ -143,6 +158,15 @@ jobs:
           grep -E 'sources:|runtime sources:' /tmp/all.log /tmp/i915.log /tmp/rt.log || true
           tail -30 /tmp/link.log || true
 
+      - name: Record compiler cache statistics
+        if: always() && steps.toolchain.outcome == 'success'
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out/logs"
+          ccache --show-stats | tee "$GITHUB_WORKSPACE/out/logs/ccache-statistics.txt"
+          ccache --print-stats > "$GITHUB_WORKSPACE/out/logs/ccache-statistics.tsv"
+          ccache --show-config > "$GITHUB_WORKSPACE/out/logs/ccache-config.txt"
+          cat "$GITHUB_WORKSPACE/out/logs/ccache-statistics.txt" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Collect logs and the kext
         if: always()
         run: |
@@ -161,7 +185,10 @@ jobs:
           cp "$X/xnu/nmx_pci.cpp" "$X/bsdcompat/src/nmx_bus.c" "$X/bsdcompat/include/nmx_xnu.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_ddi.c" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_hotplug_irq.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp /tmp/nmx-pci-class-test.cpp /tmp/nmx-pci-class-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-ccache-validation.log /tmp/nmx-toolchain.txt "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp "$X/cc.sh" "$X/cc-i915.sh" "$X/cclk.sh" "$X/ccsrc.sh" "$X/ccxx.sh" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/override/i915/nmx_i915_scanout.c" "$X/bsdcompat/include/nmx_port.h" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_fb_pin.c" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_fb_pin.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
+          cp "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_display_driver.c" "$GITHUB_WORKSPACE/experimental/uhd770/sources.json" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           ls -la "$GITHUB_WORKSPACE/out" || true
 
       - name: Upload the result
@@ -261,10 +288,16 @@ jobs:
           done
           strings -a "$BIN" > /tmp/nmxgpu-strings.txt \
             || { echo "::error::cannot read NMXGPU diagnostic strings"; exit 1; }
-          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete' 'NullMoth PCI enum v1' 'pch_detect type=' 'hpd_tables pch=' 'pch_hpd missing' 'igtt.pin.before' 'igtt.iomap.after' 'boot guard retained for recovery'; do
+          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete' 'NullMoth PCI enum v1' 'pch_detect type=' 'hpd_tables pch=' 'pch_hpd missing' 'igtt.pin.before' 'igtt.iomap.after' 'boot guard retained for recovery' 'ADL-S CPU scanout, FBC disabled' 'failed: port attach; guard retained'; do
             grep -Fq "$marker" /tmp/nmxgpu-strings.txt \
               || { echo "::error::missing diagnostic marker $marker"; exit 1; }
           done
           test -f /tmp/nmx-pci-class-test-ok || { echo "::error::PCI class iterator fixture did not pass"; exit 1; }
           echo "NMXGPU diagnostic symbols and stage markers verified"
 
+      - name: Save compiler cache after all build gates pass
+        if: success() && env.NMX_USE_CACHE == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/nmxgpu/ccache
+          key: ${{ steps.objects.outputs.cache-primary-key }}

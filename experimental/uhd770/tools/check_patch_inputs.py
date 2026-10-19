@@ -15,6 +15,7 @@ import sys
 import tempfile
 
 from prepare_pci_fixture import prepare
+from enable_ccache import enable
 
 
 def check(port, drm, package):
@@ -38,6 +39,7 @@ def check(port, drm, package):
         for script in (package / "tools").glob("*.py"):
             ast.parse(script.read_text(encoding="utf-8"))
         prepare(x / "xnu/nmx_pci.cpp", package / "tests/pci_class_fixture.cpp.in", root / "pci-class-test.cpp")
+        enable(x)
         subprocess.run([sys.executable, str(x / "gen_flags.py"), str(d), str(root / "amd.flags")], check=True)
         flags = (root / "amd.flags").read_text(encoding="utf-8")
         assert "CONFIG_DRM_DISPLAY_DP_TUNNEL" not in flags and "CONFIG_DRM_I915_DP_TUNNEL" not in flags
@@ -46,6 +48,7 @@ def check(port, drm, package):
             "shared_headers": "passed",
             "python_syntax": "passed",
             "fixture_preparation": "passed; compilation/execution requires a C++ host compiler",
+            "compiler_cache_launchers": "passed against patched pinned scripts; runtime cache probe requires macOS",
             "dp_tunnel_configuration": "passed",
             "macos_kernel_compilation": "not performed",
             "hardware_test": "not performed",

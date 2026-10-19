@@ -3,8 +3,9 @@ UHD 770 experimental display bring-up
 
 This fork's current main branch does not contain the historical Intel port.
 sources.json pins that port, drm-kmod and FreeBSD. The Actions workflow stages
-those exact inputs and applies the readable patches in patches/. No code is
-loaded on the GitHub runner; the only executable test uses mock IOKit objects.
+those exact inputs and applies the readable patches in patches/. No driver code
+is loaded on the GitHub runner. Executable checks use mock IOKit objects and a
+small userspace compiler-cache probe.
 
 Current scope
 -------------
@@ -39,6 +40,26 @@ The native PCI lookup is extracted from the patched source and tested by the
 12-case host fixture. All kernel translation units must compile, required symbols
 and stage markers must be present, and the source/configuration evidence is kept
 in the Actions artifact. Builds are not hardware tests.
+
+Build caches
+------------
+The dependency cache contains a checksum-verified drm-kmod archive and a clean
+FreeBSD checkout at the pinned commit. Each build stages fresh copies, reapplies
+the patches and regenerates flags. Patched source trees are not cached.
+
+ccache covers all five active C/C++ compiler launchers. The GitHub cache is
+isolated by macOS/architecture and Xcode/Clang/SDK/ccache identity. ccache uses
+preprocessor mode, compiler content checking and no sloppiness, so source,
+included-header and argument changes still invalidate the relevant object.
+Output directories and final kexts are never restored; every source is accounted
+for and the kext is linked and checked again. Compiler cache saves occur only
+after the build gates pass. A disposable userspace test checks an actual cache
+hit plus header, flag and source invalidation. Statistics and configuration are
+included in the artifact; a first cold run is not evidence of a speedup.
+
+For an independent diagnostic build, choose Run workflow with clean_build=true.
+That skips dependency/compiler cache restore/save and bypasses ccache for the
+kernel build. The disposable cache self-test still runs in its own temp folder.
 
 Recovery contract
 -----------------
