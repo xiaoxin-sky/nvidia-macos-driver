@@ -22,6 +22,19 @@ statically identified callback, registration, retry and resource-lifetime defect
 Host tests exercise the patched code with mocked services, not a GPU. The current
 CI builds NMXGPU only; it does not produce a complete Intel acceleration package.
 Real VBL pacing, connector/mode notifications and sleep/wake remain separate work.
+The native class also has no explicit bridge from the Linux connector's EDID to
+the macOS DDC interface. Generic framebuffer output and complete monitor/mode
+integration must be distinguished; do not infer HiDPI or refresh support from
+the framebuffer being allocated successfully.
+
+Verified code/build checkpoint
+------------------------------
+Actions run 39271960508 at 211ce2a compiled all 1,250 kernel translation units,
+passed the host behavior/concurrency/fault fixtures and required-symbol definition
+checks, and created/inspected a temporary auxiliary kernel collection against the
+runner's real kernel providers. Nothing was installed or loaded. Compiler cache
+hits were 1,228 of 1,251 cacheable calls (98.16%). These results are source/build
+evidence, not visible-output, GPU-command or acceleration evidence.
 
 Public userland materials exist; installed components are a different question
 -----------------------------------------------------------------------------

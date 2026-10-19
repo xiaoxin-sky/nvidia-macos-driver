@@ -30,7 +30,8 @@
     "VBL is software timed; real display IRQ pacing is unverified.",
     "Gamma now has a DRM atomic commit implementation and host conversion/error tests; visible color behavior remains hardware-unverified. Indexed CLUT is not applicable to the advertised direct format.",
     "Bounded initial fallback exists. Interactive mode changes and DRM connector notifications into IOFramebuffer remain incomplete; connection-interrupt registration explicitly reports unsupported.",
-    "The GGTT mapping candidate intentionally holds an awake reference; sleep/wake is not established."
+    "The GGTT mapping candidate intentionally holds an awake reference; sleep/wake is not established.",
+    "The native class has no explicit DRM connector EDID-to-macOS DDC bridge; monitor identity/mode metadata and the connection-notification protocol still need integration."
   ],
   "acceleration_gaps": [
     "The tested install path installs the NMXGPU display/DRM layer only.",
@@ -43,7 +44,8 @@
   ],
   "api_checked_not_a_bug": [
     "IOFramebuffer.getPixelFormatsForDisplayMode returning zero is required by its Apple header; it is not an unsupported-format bug.",
-    "The public IOGraphics color definitions confirm RGB mode bit 0x1 and 8-bit RGB depth bit 0x2; those existing answers were not a color-enumeration bug."
+    "The public IOGraphics color definitions confirm RGB mode bit 0x1 and 8-bit RGB depth bit 0x2; those existing answers were not a color-enumeration bug.",
+    "IOService normal provider termination finalizes clients before provider stop; nmx_fb_unpublish is only called from that stop path. This does not certify arbitrary manual stop or native runtime lock ordering."
   ],
   "source_flow_review": [
     "xnu/nmx_kext.cpp: opted_in, start/attachThread/attachNow, boot guard, claim, power and stop ordering.",
@@ -56,9 +58,14 @@
     "Acceleration package boundary: NMXGPU display publication is separate from NMXAccel, ANV/libdrm, the missing Metal frontend and real GPU execution. This is not a full Mesa or memory/IRQ-shim audit."
   ],
   "compilation_evidence": {
-    "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39264537253",
-    "commit": "5195693",
-    "result": "macOS kernel build, software callback/attach concurrency and bridge fault fixtures passed; does not validate subsequent gamma edits or hardware."
+    "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39271960508",
+    "commit": "211ce2a121a1465e6c50319f49d7f409907325e4",
+    "result": "900 DRM/AMD + 274 i915 + 76 runtime units compiled, all host fixtures passed, required symbol definitions verified, temporary native auxiliary kernel collection created and inspected successfully. No driver was installed/loaded and no hardware was tested.",
+    "compiler_cache": {
+      "cacheable_calls": 1251,
+      "hits": 1228,
+      "hit_rate_percent": 98.16
+    }
   },
   "validation_order": [
     "Pinned patches/apply checks and host fixtures",
@@ -82,9 +89,8 @@
     "ready": false,
     "policy": "Do not ask the user for another boot test while the source completeness review and remaining code blockers are open.",
     "remaining_code_review": [
-      "Complete dynamic connector/interactive mode protocol beyond fixed-mode compatibility",
-      "Verify termination/unpublish ownership and native power ordering",
-      "Audit per-device IOMMU/IRQ service semantics beyond the repaired arithmetic and snapshot lifetimes",
+      "Complete DRM connector EDID/DDC, connection notification and interactive mode protocol",
+      "Establish native sleep/wake and per-device IOMMU/resource ownership contracts for the supported configuration",
       "Build/package the matched Intel userland components and implement/test WindowServer admission, IOSurface and presentation contracts"
     ]
   }
