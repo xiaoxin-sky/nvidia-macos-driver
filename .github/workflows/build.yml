@@ -97,7 +97,7 @@ jobs:
       - name: Validate compiler cache invalidation
         run: |
           set -euo pipefail
-          bash experimental/uhd770/tools/check_ccache.sh | tee /tmp/nmx-ccache-validation.log
+          bash experimental/uhd770/tools/check_ccache.sh 2>&1 | tee /tmp/nmx-ccache-validation.log
           ccache --set-config=max_size=512M
           ccache --set-config=sloppiness=
           ccache --set-config=direct_mode=false
