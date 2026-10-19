@@ -124,6 +124,16 @@ jobs:
               open(path, 'w').write('\n'.join(lines))
           X = '/Volumes/MiniData/build/gpu-src/xkpi'
           D = '/Volumes/MiniData/build/gpu-src/kpi/drm-kmod/drivers/gpu/drm/i915'
+          # The port omits the generic DP tunnel helper. Disable its i915 frontend too:
+          # otherwise drm_dp_tunnel_mgr_create() is the -EOPNOTSUPP header stub.
+          flags_path = X + '/gen_flags.py'
+          flags_source = open(flags_path).read()
+          tunnel_anchor = '"DRM_DISPLAY_DP_TUNNEL",'
+          assert flags_source.count(tunnel_anchor) == 1
+          assert '"DRM_I915_DP_TUNNEL"' not in flags_source
+          flags_source = flags_source.replace(tunnel_anchor, tunnel_anchor + ' "DRM_I915_DP_TUNNEL",', 1)
+          open(flags_path, 'w').write(flags_source)
+          print('Disabled both DRM_DISPLAY_DP_TUNNEL and DRM_I915_DP_TUNNEL')
           p = X + '/bsdcompat/src/nmx_bus.c'
           s = open(p).read()
           a = '    int r = probe ? probe(dev) : 0;'
@@ -166,6 +176,10 @@ jobs:
           ins(dd, 'ret = intel_dbuf_init(i915);', '\tpr_info("NullMoth dbg: disp dbuf_init -> %d\\n", ret);')
           ins(dd, 'ret = intel_bw_init(i915);', '\tpr_info("NullMoth dbg: disp bw_init -> %d\\n", ret);')
           ins(dd, 'ret = intel_pmdemand_init(display);', '\tpr_info("NullMoth dbg: disp pmdemand_init -> %d\\n", ret);')
+          nogem_scope = 'int intel_display_driver_probe_nogem('
+          ins(dd, 'int ret;', '\tpr_info("NullMoth dbg: tunnel_config i915=%d core=%d\\n", IS_ENABLED(CONFIG_DRM_I915_DP_TUNNEL), IS_ENABLED(CONFIG_DRM_DISPLAY_DP_TUNNEL));', scope=nogem_scope)
+          ins(dd, 'ret = intel_crtc_init(i915, pipe);', '\t\tpr_info("NullMoth dbg: nogem crtc pipe %d -> %d\\n", pipe, ret);', scope=nogem_scope)
+          ins(dd, 'ret = intel_dp_tunnel_mgr_init(display);', '\tpr_info("NullMoth dbg: nogem tunnel_mgr_init -> %d\\n", ret);', scope=nogem_scope)
           ir = D + '/i915_irq.c'
           ins(ir, 'ret = request_irq(irq, intel_irq_handler(dev_priv),', '\tpr_info("NullMoth dbg: request_irq(%d) -> %d\\n", irq, ret);')
           open('/tmp/nmx-instrumented', 'w').write('ok\n')
@@ -173,6 +187,11 @@ jobs:
           PY
           test -f /tmp/nmx-instrumented || { echo "::error::instrumentation did not apply"; exit 1; }
           python3 gen_flags.py "$S/kpi/drm-kmod" amd.flags | tee /tmp/genflags.log
+          if grep -Eq '^-DCONFIG_DRM_(DISPLAY_DP_TUNNEL|I915_DP_TUNNEL)(=|$)' amd.flags; then
+            echo "::error::DP tunnel frontend/core flags must both be disabled in this port"
+            exit 1
+          fi
+          echo "DP tunnel configuration verified: frontend=off core=off"
           echo "== DRM / TTM / amdgpu =="
           bash all.sh 30 | tee /tmp/all.log || true
           echo "== i915 =="
@@ -204,6 +223,7 @@ jobs:
           X=$S/xkpi
           mkdir -p "$GITHUB_WORKSPACE/out/logs"
           cp /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log /tmp/genflags.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp "$X/amd.flags" "$GITHUB_WORKSPACE/out/logs/amd.flags" 2>/dev/null || true
           for d in logs logs-i915 lklogs; do
             [ -d "$X/$d" ] && cp -R "$X/$d" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           done
@@ -307,7 +327,7 @@ jobs:
           done
           strings -a "$BIN" > /tmp/nmxgpu-strings.txt \
             || { echo "::error::cannot read NMXGPU diagnostic strings"; exit 1; }
-          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present='; do
+          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init'; do
             grep -Fq "$marker" /tmp/nmxgpu-strings.txt \
               || { echo "::error::missing diagnostic marker $marker"; exit 1; }
           done
