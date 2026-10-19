@@ -1,4 +1,4 @@
-name: build NMXGPU (UHD 770 live stage v2)
+name: build NMXGPU (UHD 770 PCI PCH repair)
 on:
   workflow_dispatch:
   push:
@@ -274,10 +274,55 @@ jobs:
               ins_before(bridge, call, '    nmx_gpu_stage_record("' + label + '.before", 0);')
               ins(bridge, call, '    nmx_gpu_stage_record("' + label + '.after", ' + result + ');', scope='int nmx_fb_open(')
           print("Live stage v2 enabled: no checkpoint firmware writes; bounded 90-second default delay")
+          NATIVE_HELPER = '/* Same borrowed-device lifetime convention as nmx_xnu_pci_find().\n * Enumerate real PCI services, including chipset functions not yet wrapped by\n * newbus. The caller wraps the result with nmx_device_for_pci; no driver is\n * attached, PCI config written, or BAR mapped by this lookup. subclass=-1 is\n * the pci_find_base_class_from wildcard. after must be a prior native result.\n */\nextern "C" void *nmx_xnu_pci_find_class(uint8_t cls, int subclass, void *after)\n{\n    if (subclass < -1 || subclass > 255)\n        return nullptr;\n    OSDictionary *match = IOService::serviceMatching("IOPCIDevice");\n    if (match == nullptr)\n        return nullptr;\n    OSIterator *it = IOService::getMatchingServices(match);\n    match->release();\n    if (it == nullptr)\n        return nullptr;\n    IOPCIDevice *found = nullptr;\n    bool past = after == nullptr;\n    while (OSObject *o = it->getNextObject()) {\n        IOPCIDevice *d = OSDynamicCast(IOPCIDevice, o);\n        if (!past) {\n            past = d == after;\n            continue;\n        }\n        /* PCI configuration class and subclass bytes, not a cached GPU list. */\n        if (d != nullptr && d->configRead8(0x0b) == cls &&\n            (subclass < 0 || d->configRead8(0x0a) == subclass)) {\n            found = d;\n            break;\n        }\n    }\n    it->release();\n    return found;\n}\n'
+          CLASS_LOOKUP = 'device_t pci_find_class_from(uint8_t cls, uint8_t subcls, device_t from)\n{\n    /* i915 discovers the PCH through ISA class 06:01. It may not have been\n     * wrapped before the GPU probes, so all_devices is not a PCI inventory. */\n    void *native = nmx_xnu_pci_find_class(cls, subcls, from ? P(from)->xnu : NULL);\n    device_t found = nmx_device_for_pci(native);\n    if (found != NULL)\n        printf("NullMoth PCI enum v1: class %02x:%02x -> %04x:%04x\\n", cls, subcls,\n               P(found)->dinfo.cfg.vendor, P(found)->dinfo.cfg.device);\n    else\n        printf("NullMoth PCI enum v1: class %02x:%02x -> none\\n", cls, subcls);\n    return found;\n}'
+          BASE_LOOKUP = 'device_t pci_find_base_class_from(uint8_t cls, device_t from)\n{\n    /* Same native enumeration and continuation semantics as the full class query. */\n    void *native = nmx_xnu_pci_find_class(cls, -1, from ? P(from)->xnu : NULL);\n    return nmx_device_for_pci(native);\n}'
+          FIXTURE_PREFIX = '#include <cassert>\n#include <cstdint>\n#include <cstdio>\n#include <vector>\nstruct OSObject { virtual ~OSObject() = default; };\nstruct OSDictionary { void release() { delete this; } };\nstruct IOPCIDevice : OSObject {\n    uint8_t cls, subclass;\n    IOPCIDevice(uint8_t c, uint8_t s) : cls(c), subclass(s) {}\n    uint8_t configRead8(int offset) { return offset == 0x0b ? cls : subclass; }\n};\nstatic std::vector<OSObject *> devices;\nstatic bool match_available = true, iterator_available = true;\nstruct OSIterator {\n    size_t index = 0;\n    OSObject *getNextObject() { return index < devices.size() ? devices[index++] : nullptr; }\n    void release() { delete this; }\n};\nstruct IOService {\n    static OSDictionary *serviceMatching(const char *) { return match_available ? new OSDictionary : nullptr; }\n    static OSIterator *getMatchingServices(OSDictionary *) { return iterator_available ? new OSIterator : nullptr; }\n};\n#define OSDynamicCast(T, o) dynamic_cast<T *>(o)\n'
+          FIXTURE_SUFFIX = '\nint main()\n{\n    OSObject other;\n    IOPCIDevice gpu(3, 0), isa1(6, 1), bridge(6, 4), isa2(6, 1), unknown(6, 1);\n    devices = {&other, &gpu, &isa1, &bridge, &isa2};\n    // The LPC can exist in IOKit before any newbus record has been created.\n    assert(nmx_xnu_pci_find_class(6, 1, nullptr) == &isa1);\n    assert(nmx_xnu_pci_find_class(6, 1, &isa1) == &isa2);\n    assert(nmx_xnu_pci_find_class(6, 1, &isa2) == nullptr);\n    assert(nmx_xnu_pci_find_class(6, 1, &unknown) == nullptr);\n    assert(nmx_xnu_pci_find_class(3, 0, nullptr) == &gpu);\n    assert(nmx_xnu_pci_find_class(6, -1, &isa1) == &bridge);\n    assert(nmx_xnu_pci_find_class(6, 0xff, nullptr) == nullptr);\n    assert(nmx_xnu_pci_find_class(6, -2, nullptr) == nullptr);\n    assert(nmx_xnu_pci_find_class(6, 256, nullptr) == nullptr);\n    match_available = false;\n    assert(nmx_xnu_pci_find_class(6, 1, nullptr) == nullptr);\n    match_available = true;\n    iterator_available = false;\n    assert(nmx_xnu_pci_find_class(6, 1, nullptr) == nullptr);\n    iterator_available = true;\n    devices.clear();\n    assert(nmx_xnu_pci_find_class(6, 1, nullptr) == nullptr);\n    std::puts("PCI class enumeration fixture passed (12 cases)");\n}\n'
+          def replace_function(path, signature, replacement):
+              """Replace one complete column-zero function in the exact pinned C source."""
+              source = open(path).read()
+              assert source.count(signature + "\n{") == 1, (path, signature)
+              start = source.index(signature + "\n{")
+              stop = source.index("\n}", start) + 2
+              open(path, "w").write(source[:start] + replacement + source[stop:])
+
+          native = X + "/xnu/nmx_pci.cpp"
+          source = open(native).read()
+          anchor = 'extern "C" void *nmx_xnu_pci_find(uint32_t domain, uint8_t bus, uint8_t dev, uint8_t func)'
+          assert source.count(anchor) == 1
+          source = source.replace(anchor, NATIVE_HELPER + "\n" + anchor, 1)
+          open(native, "w").write(source)
+          for relative in ["bsdcompat/include/nmx_xnu.h", "bsdcompat/include/nmxxnu/nmx_xnu.h"]:
+              path = X + "/" + relative
+              source = open(path).read()
+              anchor = 'void *nmx_xnu_pci_find(uint32_t domain, uint8_t bus, uint8_t dev, uint8_t func);'
+              assert source.count(anchor) == 1
+              declaration = "/* Native class lookup; subclass=-1 means any, after is a prior borrowed PCI device. */\nvoid *nmx_xnu_pci_find_class(uint8_t cls, int subclass, void *after);"
+              open(path, "w").write(source.replace(anchor, anchor + "\n" + declaration, 1))
+          bus = X + "/bsdcompat/src/nmx_bus.c"
+          replace_function(bus, "device_t pci_find_class_from(uint8_t cls, uint8_t subcls, device_t from)", CLASS_LOOKUP)
+          replace_function(bus, "device_t pci_find_base_class_from(uint8_t cls, device_t from)", BASE_LOOKUP)
+          ins(d, 'intel_detect_pch(dev_priv);', '\tpr_info("NullMoth dbg: pch_detect type=%d id=%04x\\n", (int)INTEL_PCH_TYPE(dev_priv), INTEL_PCH_ID(dev_priv));')
+          hotplug = D + "/display/intel_hotplug_irq.c"
+          ins(hotplug, 'intel_hpd_init_pins(i915);', '\tpr_info("NullMoth dbg: hpd_tables pch=%d id=%04x north=%d south=%d\\n", (int)INTEL_PCH_TYPE(i915), INTEL_PCH_ID(i915), i915->display.hotplug.hpd != NULL, i915->display.hotplug.pch_hpd != NULL);')
+          ddi = D + "/display/intel_ddi.c"
+          source = open(ddi).read()
+          anchor = '\tu32 bit = dev_priv->display.hotplug.pch_hpd[encoder->hpd_pin];'
+          assert source.count(anchor) == 1
+          replacement = '\tu32 bit;\n\n\t/* A missing chipset or HPD table must not become a kernel null dereference.\n\t * Returning disconnected is a safe failure, not a successful display fix. */\n\tif (dev_priv->display.hotplug.pch_hpd == NULL ||\n\t    encoder->hpd_pin <= HPD_NONE || encoder->hpd_pin >= HPD_NUM_PINS) {\n\t\tpr_err_once("NullMoth HPD: pch_hpd missing or pin invalid (pch=%d id=%04x pin=%d)\\n",\n\t\t\t    (int)INTEL_PCH_TYPE(dev_priv), INTEL_PCH_ID(dev_priv), (int)encoder->hpd_pin);\n\t\treturn false;\n\t}\n\tbit = dev_priv->display.hotplug.pch_hpd[encoder->hpd_pin];'
+          open(ddi, "w").write(source.replace(anchor, replacement, 1))
+          fixture = FIXTURE_PREFIX + NATIVE_HELPER + FIXTURE_SUFFIX
+          open("/tmp/nmx-pci-class-test.cpp", "w").write(fixture)
+          print("PCI class lookup repaired; native ISA discovery and HPD table diagnostics enabled")
+
           open('/tmp/nmx-instrumented', 'w').write('ok\n')
           print('instrumentation complete')
           PY
           test -f /tmp/nmx-instrumented || { echo "::error::instrumentation did not apply"; exit 1; }
+          c++ -std=c++17 -Wall -Wextra -Werror /tmp/nmx-pci-class-test.cpp -o /tmp/nmx-pci-class-test
+          /tmp/nmx-pci-class-test | tee /tmp/nmx-pci-class-test.log
+          touch /tmp/nmx-pci-class-test-ok
           python3 gen_flags.py "$S/kpi/drm-kmod" amd.flags | tee /tmp/genflags.log
           if grep -Eq '^-DCONFIG_DRM_(DISPLAY_DP_TUNNEL|I915_DP_TUNNEL)(=|$)' amd.flags; then
             echo "::error::DP tunnel frontend/core flags must both be disabled in this port"
@@ -322,6 +367,9 @@ jobs:
           cp "$X"/xlog_nmx_kext.txt "$X"/link.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           mkdir -p "$GITHUB_WORKSPACE/out/logs/diagnostic-source"
           cp "$X/xnu/nmx_kext.cpp" "$X/xnu/nmx_fb.cpp" "$X/override/src/nmx_fb_bridge.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
+          cp "$X/xnu/nmx_pci.cpp" "$X/bsdcompat/src/nmx_bus.c" "$X/bsdcompat/include/nmx_xnu.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
+          cp "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_ddi.c" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_hotplug_irq.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
+          cp /tmp/nmx-pci-class-test.cpp /tmp/nmx-pci-class-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           ls -la "$GITHUB_WORKSPACE/out" || true
 
       - name: Upload the result
@@ -415,15 +463,16 @@ jobs:
           BIN="$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU"
           xcrun nm -arch x86_64 "$BIN" > /tmp/nmxgpu-symbols.txt \
             || { echo "::error::cannot read NMXGPU symbols"; exit 1; }
-          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record; do
+          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class; do
             grep -Eq "[[:space:]]$sym$" /tmp/nmxgpu-symbols.txt \
               || { echo "::error::missing symbol $sym"; exit 1; }
           done
           strings -a "$BIN" > /tmp/nmxgpu-strings.txt \
             || { echo "::error::cannot read NMXGPU diagnostic strings"; exit 1; }
-          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete'; do
+          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete' 'NullMoth PCI enum v1' 'pch_detect type=' 'hpd_tables pch=' 'pch_hpd missing'; do
             grep -Fq "$marker" /tmp/nmxgpu-strings.txt \
               || { echo "::error::missing diagnostic marker $marker"; exit 1; }
           done
+          test -f /tmp/nmx-pci-class-test-ok || { echo "::error::PCI class iterator fixture did not pass"; exit 1; }
           echo "NMXGPU diagnostic symbols and stage markers verified"
 
