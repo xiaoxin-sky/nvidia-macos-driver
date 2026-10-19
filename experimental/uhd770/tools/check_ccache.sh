@@ -19,6 +19,7 @@ cleanup() {
 }
 trap cleanup EXIT
 CC=$(xcrun --find clang)
+SDK=$(xcrun --sdk macosx --show-sdk-path)
 printf '#define HEADER_VALUE 1\n' > "$TMP/value.h"
 printf '#include "value.h"\nint value(void) { return HEADER_VALUE + FLAG_VALUE; }\n' > "$TMP/value.c"
 printf '#include <stdio.h>\nint value(void); int main(void) { printf("%%d\\n", value()); }\n' > "$TMP/main.c"
@@ -27,8 +28,8 @@ printf '#include <stdio.h>\nint value(void); int main(void) { printf("%%d\\n", v
 sleep 1
 probe() {
     local actual
-    ccache "$CC" -O2 "-DFLAG_VALUE=$1" -c "$TMP/value.c" -o "$TMP/value.o"
-    "$CC" "$TMP/main.c" "$TMP/value.o" -o "$TMP/probe"
+    ccache "$CC" -isysroot "$SDK" -O2 "-DFLAG_VALUE=$1" -c "$TMP/value.c" -o "$TMP/value.o"
+    "$CC" -isysroot "$SDK" "$TMP/main.c" "$TMP/value.o" -o "$TMP/probe"
     actual=$("$TMP/probe")
     printf 'Cache probe flag=%s expected=%s actual=%s\n' "$1" "$2" "$actual"
     [[ "$actual" == "$2" ]]
