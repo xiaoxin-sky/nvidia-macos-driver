@@ -1,4 +1,4 @@
-name: build NMXGPU (Intel, UHD 770)
+name: build NMXGPU (UHD 770 live stage v2)
 on:
   workflow_dispatch:
   push:
@@ -196,7 +196,7 @@ jobs:
           source = source.replace(anchor, anchor + "#include <libkern/libkern.h>\n", 1)
           anchor = "\nvoid NMXGPU::attachNow()\n"
           assert source.count(anchor) == 1
-          stage_helper = '/* Diagnostic build only: retain the last bounded, thread-context attach stage in NVRAM.\n * The original attaching guard is read but never changed here. The trace key is separate,\n * survives a reset/normal completion, and is written only at the fixed probe boundaries.\n */\nextern "C" void nmx_gpu_stage_record(const char *stage, int result)\n{\n    if (stage == nullptr)\n        return;\n    IODTNVRAM *n = nmx_nvram();\n    if (n == nullptr)\n        return;\n    OSObject *armed = n->copyProperty(kAttachMarker);\n    if (armed == nullptr) {\n        n->release();\n        return;\n    }\n    armed->release();\n    char value[96];\n    int count = snprintf(value, sizeof(value), "nvstage-v1 %s ret=%d", stage, result);\n    if (count <= 0) {\n        n->release();\n        return;\n    }\n    unsigned length = static_cast<unsigned>(count);\n    if (length >= sizeof(value))\n        length = sizeof(value) - 1;\n    const OSSymbol *key = OSSymbol::withCString("nullmoth-gpu-stage");\n    OSData *data = OSData::withBytes(value, length);\n    if (key != nullptr && data != nullptr) {\n        bool stored = n->setProperty(key, data);\n        n->sync();\n        IOLog("NullMoth trace: %s ret=%d nvram=%s\\n", stage, result, stored ? "ok" : "failed");\n    }\n    if (data != nullptr)\n        data->release();\n    if (key != nullptr)\n        key->release();\n    n->release();\n}\n'
+          stage_helper = '/* Diagnostic build for one UHD 770: publish stages in RAM and IOLog only.\n * No checkpoint calls NVRAM or sync. The original attach guard stays unchanged.\n * g_lock protects the owner and sequence; it is released before property/log I/O.\n * The attach thread/IOKit owns the service, and stop clears the borrowed owner.\n */\nstatic IOService *g_nmx_stage_owner;\nstatic unsigned g_nmx_stage_sequence;\n\nstatic void nmx_diag_set_owner(IOService *owner)\n{\n    IOLockLock(g_lock);\n    g_nmx_stage_owner = owner;\n    IOLockUnlock(g_lock);\n}\n\nextern "C" void nmx_gpu_stage_record(const char *stage, int result)\n{\n    if (stage == nullptr || g_lock == nullptr)\n        return;\n    IOLockLock(g_lock);\n    unsigned sequence = ++g_nmx_stage_sequence;\n    IOService *owner = g_nmx_stage_owner;\n    if (owner != nullptr)\n        owner->retain();\n    IOLockUnlock(g_lock);\n    char value[160];\n    snprintf(value, sizeof(value), "memstage-v2 seq=%u %s ret=%d", sequence, stage, result);\n    if (owner != nullptr) {\n        owner->setProperty("nmxdiag-stage", value);\n        owner->release();\n    }\n    IOLog("NullMoth trace: %s\\n", value);\n}\n'
           source = source.replace(anchor, "\n" + stage_helper + anchor, 1)
           open(cpp, "w").write(source)
           ins_before(cpp, "dev_ = nmx_port_attach(pci_);", '    nmx_gpu_stage_record("port.before", 0);')
@@ -216,7 +216,64 @@ jobs:
               call = "ret = " + function + "(" + arg + ");"
               ins_before(driver, call, '\tnmx_gpu_stage_record("' + label + '.before", 0);')
               ins(driver, call, '\tnmx_gpu_stage_record("' + label + '.after", ret);')
-          print("Persistent stage records enabled; original boot guard preserved")
+          # The original boot guard remains authoritative. Let launchd/logd and the
+          # bounded userspace recorder start before touching display hardware.
+          source = open(cpp).read()
+          anchor = "void NMXGPU::attachNow()\n{\n"
+          assert source.count(anchor) == 1
+          source = source.replace(anchor, anchor + '    nmx_diag_set_owner(this);\n    setProperty("nmxdiag-build", "memstage-v2-20261019");\n    nmx_gpu_stage_record("firmware.wait.before", 0);\n', 1)
+          anchor = "void NMXGPU::stop(IOService *provider)\n{\n"
+          assert source.count(anchor) == 1
+          source = source.replace(anchor, anchor + '    nmx_diag_set_owner(nullptr);\n', 1)
+          open(cpp, "w").write(source)
+          ins(cpp, "int err = nmx_xnu_wait_firmware_root(300);", '    nmx_gpu_stage_record("firmware.wait.after", err);')
+          delay = '    /* Diagnostic-only delay, not a display/initialization fix. */\n    int nmx_diag_delay = 90;\n    PE_parse_boot_argn("nmxdiagdelay", &nmx_diag_delay, sizeof(nmx_diag_delay));\n    if (nmx_diag_delay < 30 || nmx_diag_delay > 300)\n        nmx_diag_delay = 90;\n    nmx_gpu_stage_record("delay.before", nmx_diag_delay);\n    IOSleep(static_cast<unsigned>(nmx_diag_delay) * 1000U);\n    nmx_gpu_stage_record("delay.after", 0);\n    nmx_gpu_stage_record("guard.set.before", 0);'
+          ins_before(cpp, "    nmx_marker_write(true);", delay)
+          ins(cpp, "    nmx_marker_write(true);", '    nmx_gpu_stage_record("guard.set.after", 0);')
+          source = open(cpp).read()
+          for old, new in [('    registerPowerDriver(this, states, 2);', '    IOReturn nmx_pm_ret = registerPowerDriver(this, states, 2);'), ('    pci_->setProperty("nmxgpu-claimed", kOSBooleanTrue);', '    bool nmx_claim_set = pci_->setProperty("nmxgpu-claimed", kOSBooleanTrue);')]:
+              assert source.count(old) == 1
+              source = source.replace(old, new, 1)
+          open(cpp, "w").write(source)
+          for call, label in [("    PMinit();", "pm.init"), ("    pci_->joinPMtree(this);", "pm.join"), ("    registerService();", "service.self"), ("    pci_->registerService();", "service.pci")]:
+              ins_before(cpp, call, '    nmx_gpu_stage_record("' + label + '.before", 0);')
+              ins(cpp, call, '    nmx_gpu_stage_record("' + label + '.after", 0);')
+          ins_before(cpp, '    IOReturn nmx_pm_ret = registerPowerDriver(this, states, 2);', '    nmx_gpu_stage_record("pm.register.before", 0);')
+          ins(cpp, '    IOReturn nmx_pm_ret = registerPowerDriver(this, states, 2);', '    nmx_gpu_stage_record("pm.register.after", static_cast<int>(nmx_pm_ret));')
+          ins_before(cpp, '    bool nmx_claim_set = pci_->setProperty("nmxgpu-claimed", kOSBooleanTrue);', '    nmx_gpu_stage_record("claim.before", 0);')
+          ins(cpp, '    bool nmx_claim_set = pci_->setProperty("nmxgpu-claimed", kOSBooleanTrue);', '    nmx_gpu_stage_record("claim.after", nmx_claim_set ? 0 : -1);')
+          ins(cpp, "    attach_ = 1;", '    nmx_gpu_stage_record("attach.complete", fb_ != nullptr ? 0 : -1);')
+          power_scope = "IOReturn NMXGPU::setPowerState("
+          ins_before(cpp, "        int err = nmx_port_power(dev_, state != 0);", '        nmx_gpu_stage_record("pm.callback.before", static_cast<int>(state));')
+          ins(cpp, "        int err = nmx_port_power(dev_, state != 0);", '        nmx_gpu_stage_record("pm.callback.after", err);', scope=power_scope)
+
+          # Observe the actual display bridge as well: successful port attach does not
+          # imply that probing connectors, mapping a scan-out, or committing a mode works.
+          fb = X + "/xnu/nmx_fb.cpp"
+          bridge = X + "/override/src/nmx_fb_bridge.c"
+          for path, declaration in [(fb, 'extern "C" void nmx_gpu_stage_record(const char *, int);'), (bridge, 'extern void nmx_gpu_stage_record(const char *, int);')]:
+              source = open(path).read()
+              anchor = '#include "nmx_port.h"\n'
+              assert source.count(anchor) == 1
+              open(path, "w").write(source.replace(anchor, anchor + declaration + "\n", 1))
+          source = open(bridge).read()
+          old = '    drm_client_register(&fb->client);       /* from here on hotplug reaches bridge_hotplug */'
+          assert source.count(old) == 1
+          source = source.replace(old, '    /* From here on hotplug reaches bridge_hotplug. */\n    drm_client_register(&fb->client);', 1)
+          open(bridge, "w").write(source)
+          ins_before(fb, "    int err = nmx_fb_open(dev, &info);", '    nmx_gpu_stage_record("fb.open.before", 0);')
+          ins(fb, "    int err = nmx_fb_open(dev, &info);", '    nmx_gpu_stage_record("fb.open.after", err);')
+          for call, label, result in [
+              ('    err = -drm_client_init(drm, &fb->client, "nmxfb", &bridge_funcs);', 'fb.client', 'err'),
+              ('    err = -drm_client_modeset_probe(&fb->client, 0, 0);', 'fb.probe', 'err'),
+              ('    fb->buffer = drm_client_framebuffer_create(&fb->client, out->width, out->height, DRM_FORMAT_XRGB8888);', 'fb.buffer', 'IS_ERR(fb->buffer) ? (int)PTR_ERR(fb->buffer) : (fb->buffer != NULL ? 0 : -12)'),
+              ('    err = -drm_client_buffer_vmap(fb->buffer, &fb->map);', 'fb.vmap', 'err'),
+              ('    err = -drm_client_modeset_commit(&fb->client);', 'fb.commit', 'err'),
+              ('    drm_client_register(&fb->client);', 'fb.register', '0'),
+          ]:
+              ins_before(bridge, call, '    nmx_gpu_stage_record("' + label + '.before", 0);')
+              ins(bridge, call, '    nmx_gpu_stage_record("' + label + '.after", ' + result + ');', scope='int nmx_fb_open(')
+          print("Live stage v2 enabled: no checkpoint firmware writes; bounded 90-second default delay")
           open('/tmp/nmx-instrumented', 'w').write('ok\n')
           print('instrumentation complete')
           PY
@@ -263,6 +320,8 @@ jobs:
             [ -d "$X/$d" ] && cp -R "$X/$d" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           done
           cp "$X"/xlog_nmx_kext.txt "$X"/link.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          mkdir -p "$GITHUB_WORKSPACE/out/logs/diagnostic-source"
+          cp "$X/xnu/nmx_kext.cpp" "$X/xnu/nmx_fb.cpp" "$X/override/src/nmx_fb_bridge.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           ls -la "$GITHUB_WORKSPACE/out" || true
 
       - name: Upload the result
@@ -362,7 +421,7 @@ jobs:
           done
           strings -a "$BIN" > /tmp/nmxgpu-strings.txt \
             || { echo "::error::cannot read NMXGPU diagnostic strings"; exit 1; }
-          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'nvstage-v1' 'framebuffer.before' 'gem_init.before'; do
+          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete'; do
             grep -Fq "$marker" /tmp/nmxgpu-strings.txt \
               || { echo "::error::missing diagnostic marker $marker"; exit 1; }
           done
