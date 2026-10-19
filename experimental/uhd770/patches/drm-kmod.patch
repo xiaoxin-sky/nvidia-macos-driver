@@ -1,3 +1,34 @@
+--- a/drivers/gpu/drm/drm_color_mgmt.c
++++ b/drivers/gpu/drm/drm_color_mgmt.c
+@@ -342,6 +342,28 @@
+ 	return ret;
+ }
+ 
++/* Private in-kernel adapter for IOFramebuffer. Reuse the core's legacy-to-atomic
++ * conversion and lock backoff instead of programming i915 LUT registers here.
++ * The caller supplies three normalized tables matching crtc->gamma_size. */
++int nmx_drm_gamma_set(struct drm_crtc *crtc, u16 *red, u16 *green, u16 *blue, u32 size)
++{
++	struct drm_device *dev;
++	int ret = 0;
++
++	if (!crtc || !red || !green || !blue || !size || !crtc->gamma_store || size != crtc->gamma_size)
++		return -EINVAL;
++	dev = crtc->dev;
++	DRM_MODESET_LOCK_ALL_BEGIN(dev, ctx, 0, ret);
++	ret = drm_crtc_legacy_gamma_set(crtc, red, green, blue, size, &ctx);
++	if (!ret) {
++		memcpy(crtc->gamma_store, red, size * sizeof(u16));
++		memcpy(crtc->gamma_store + size, green, size * sizeof(u16));
++		memcpy(crtc->gamma_store + size * 2, blue, size * sizeof(u16));
++	}
++	DRM_MODESET_LOCK_ALL_END(dev, ctx, ret);
++	return ret;
++}
++
+ /**
+  * drm_mode_gamma_set_ioctl - set the gamma table
+  * @dev: DRM device
 --- a/drivers/gpu/drm/i915/display/intel_ddi.c
 +++ b/drivers/gpu/drm/i915/display/intel_ddi.c
 @@ -4821,7 +4821,17 @@

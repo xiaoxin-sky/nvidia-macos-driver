@@ -137,6 +137,20 @@ jobs:
             "$GITHUB_WORKSPACE/experimental/uhd770/tests/attach_lifecycle_fixture.cpp" \
             -o /tmp/nmx-attach-lifecycle-test
           /tmp/nmx-attach-lifecycle-test | tee /tmp/nmx-attach-lifecycle-test.log
+          c++ -std=c++17 -Wall -Wextra -Werror -I"$X/bsdcompat/include/nmxxnu" \
+            "$GITHUB_WORKSPACE/experimental/uhd770/tests/gamma_lut_fixture.cpp" \
+            -o /tmp/nmx-gamma-lut-test
+          /tmp/nmx-gamma-lut-test | tee /tmp/nmx-gamma-lut-test.log
+          c++ -std=c++17 -Wall -Wextra -Werror -I"$X/bsdcompat/include/nmxxnu" \
+            "$GITHUB_WORKSPACE/experimental/uhd770/tests/checked_ranges_fixture.cpp" \
+            -o /tmp/nmx-checked-ranges-test
+          /tmp/nmx-checked-ranges-test | tee /tmp/nmx-checked-ranges-test.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_irq_fixture.py" \
+            "$X/bsdcompat/src/nmx_bus.c" \
+            "$GITHUB_WORKSPACE/experimental/uhd770/tests/irq_drain_fixture.c.in" \
+            /tmp/nmx-irq-drain-test.c
+          cc -std=c11 -Wall -Wextra -Werror /tmp/nmx-irq-drain-test.c -o /tmp/nmx-irq-drain-test
+          /tmp/nmx-irq-drain-test | tee /tmp/nmx-irq-drain-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_bridge_fixture.py" \
             "$X/override/src/nmx_fb_bridge.c" \
             "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_bridge_fixture.c.in" \
@@ -203,8 +217,12 @@ jobs:
           cp /tmp/nmx-pci-class-test.cpp /tmp/nmx-pci-class-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-fb-interrupt-test.log /tmp/nmx-fb-bridge-test.c /tmp/nmx-fb-bridge-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-attach-lifecycle-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-gamma-lut-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-checked-ranges-test.log /tmp/nmx-irq-drain-test.c /tmp/nmx-irq-drain-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/xnu/nmx_fb_interrupts.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/xnu/nmx_attach_lifecycle.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
+          cp "$X/bsdcompat/include/nmx_gamma_lut.h" "$S/kpi/drm-kmod/drivers/gpu/drm/drm_color_mgmt.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
+          cp "$X/bsdcompat/include/nmx_checked_ranges.h" "$X/bsdcompat/src/nmx_busdma.c" "$X/xnu/nmx_dma.cpp" "$X/xnu/nmx_vm.cpp" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp /tmp/nmx-ccache-validation.log /tmp/nmx-toolchain.txt "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/cc.sh" "$X/cc-i915.sh" "$X/cclk.sh" "$X/ccsrc.sh" "$X/ccxx.sh" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/override/i915/nmx_i915_scanout.c" "$X/bsdcompat/include/nmx_port.h" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_fb_pin.c" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_fb_pin.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
@@ -302,7 +320,7 @@ jobs:
           BIN="$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU"
           xcrun nm -arch x86_64 "$BIN" > /tmp/nmxgpu-symbols.txt \
             || { echo "::error::cannot read NMXGPU symbols"; exit 1; }
-          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable; do
+          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set; do
             grep -Eq "[[:space:]]$sym$" /tmp/nmxgpu-symbols.txt \
               || { echo "::error::missing symbol $sym"; exit 1; }
           done

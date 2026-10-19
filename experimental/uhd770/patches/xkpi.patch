@@ -1,9 +1,95 @@
+--- /dev/null
++++ b/bsdcompat/include/nmx_checked_ranges.h
+@@ -0,0 +1,28 @@
++/* Checked inclusive DMA ranges and page-aligned IOKit mapping spans. These
++ * helpers only validate arithmetic; callers still own the memory and enforce
++ * device address masks. IOKit spans may not wrap their exclusive end at 2^64. */
++#ifndef NMX_CHECKED_RANGES_H
++#define NMX_CHECKED_RANGES_H
++#include <stdint.h>
++
++static inline int nmx_checked_last(uint64_t start, uint64_t length, uint64_t *last)
++{
++    if (!last || !length || length - 1 > UINT64_MAX - start) return 0;
++    *last = start + length - 1;
++    return 1;
++}
++
++static inline int nmx_checked_page_span(uint64_t start, uint64_t length, uint64_t page_size,
++                                      uint64_t *base, uint64_t *span)
++{
++    uint64_t last, mask, end;
++    if (!base || !span || !page_size || (page_size & (page_size - 1)) ||
++        !nmx_checked_last(start, length, &last)) return 0;
++    mask = page_size - 1;
++    end = last | mask;
++    if (end == UINT64_MAX) return 0;
++    *base = start & ~mask;
++    *span = end - *base + 1;
++    return 1;
++}
++#endif
+--- /dev/null
++++ b/bsdcompat/include/nmx_gamma_lut.h
+@@ -0,0 +1,50 @@
++/*
++ * Normalize IOFramebuffer's packed 1/3-channel 8/16-bit gamma tables to the
++ * pinned i915 legacy gamma ABI (256 unsigned 16-bit entries per channel).
++ * The kernel caller must already own a buffer of channels*count*(bits/8) bytes;
++ * this helper validates metadata, never probes user pointers and has no I/O.
++ * Keep the size in sync with nmx_drm_gamma_set and the bridge's channel offsets.
++ */
++#ifndef NMX_GAMMA_LUT_H
++#define NMX_GAMMA_LUT_H
++#include <stdint.h>
++#include <string.h>
++#define NMX_GAMMA_ENTRIES 256u
++
++static inline int nmx_gamma_valid(unsigned channels, unsigned count, unsigned bits)
++{
++    return (channels == 1 || channels == 3) && count >= 2 && count <= 65536 &&
++        (bits == 8 || bits == 16);
++}
++
++static inline uint16_t nmx_gamma_sample(const uint8_t *data, unsigned index, unsigned bits)
++{
++    uint16_t value;
++    if (bits == 8) return (uint16_t)(data[index] * 257u);
++    memcpy(&value, data + index * 2u, sizeof(value));
++    return value;
++}
++
++static inline int nmx_gamma_normalize(unsigned channels, unsigned count, unsigned bits,
++                                    const void *data, uint16_t *output)
++{
++    if (!data || !output || !nmx_gamma_valid(channels, count, bits))
++        return 0;
++    for (unsigned channel = 0; channel < 3; channel++) {
++        const uint8_t *source = (const uint8_t *)data +
++            (channels == 1 ? 0 : channel * count * (bits / 8));
++        for (unsigned i = 0; i < NMX_GAMMA_ENTRIES; i++) {
++            uint32_t position = i * (count - 1);
++            unsigned index = position / (NMX_GAMMA_ENTRIES - 1);
++            unsigned fraction = position % (NMX_GAMMA_ENTRIES - 1);
++            unsigned next = index + (index + 1 < count);
++            uint32_t a = nmx_gamma_sample(source, index, bits);
++            uint32_t b = nmx_gamma_sample(source, next, bits);
++            const unsigned scale = NMX_GAMMA_ENTRIES - 1;
++            output[channel * NMX_GAMMA_ENTRIES + i] = (uint16_t)
++                ((a * (scale - fraction) + b * fraction + scale / 2) / scale);
++        }
++    }
++    return 1;
++}
++#endif
 --- a/bsdcompat/include/nmx_port.h
 +++ b/bsdcompat/include/nmx_port.h
-@@ -29,6 +29,13 @@
+@@ -29,6 +29,15 @@
  int nmx_fb_open(void *dev, struct nmx_fb_info *out);
  void nmx_fb_close(void *dev);
  int nmx_fb_power(void *dev, int on);
++/* Packed IOFramebuffer gamma: positive errno; synchronous DRM color commit. */
++int nmx_fb_gamma(void *dev, unsigned channels, unsigned count, unsigned bits, const void *data);
 +
 +/* Alder Lake-S scan-out: positive errno; success transfers a pinned mapping
 + * cookie to the display bridge. Unmap before deleting its DRM framebuffer. */
@@ -16,7 +102,14 @@
  #endif
 --- a/bsdcompat/include/nmx_xnu.h
 +++ b/bsdcompat/include/nmx_xnu.h
-@@ -84,6 +84,8 @@
+@@ -81,9 +81,15 @@
+ void nmx_xnu_pci_irq_teardown(void *cookie);
+ /* returns once a handler running on this source has finished */
+ void nmx_xnu_pci_irq_drain(void *cookie);
++/* Retain while a live IRQ cookie is owned (e.g. BSD list lock). Release drains
++ * the retained work loop and drops it, independent of later cookie teardown. */
++void *nmx_xnu_pci_irq_drain_retain(void *cookie);
++void nmx_xnu_pci_irq_drain_release(void *handle);
  void nmx_xnu_pci_irq_enable(void *cookie, int on);
  /* the IOPCIDevice at domain:bus:dev.func, or NULL */
  void *nmx_xnu_pci_find(uint32_t domain, uint8_t bus, uint8_t dev, uint8_t func);
@@ -25,12 +118,98 @@
  /* the device's expansion ROM image (VBIOS) as the firmware left it, copied into 'buf'; returns its length or 0 */
  size_t nmx_xnu_pci_rom(void *pci, void *buf, size_t max);
  
+--- /dev/null
++++ b/bsdcompat/include/nmxxnu/nmx_checked_ranges.h
+@@ -0,0 +1,28 @@
++/* Checked inclusive DMA ranges and page-aligned IOKit mapping spans. These
++ * helpers only validate arithmetic; callers still own the memory and enforce
++ * device address masks. IOKit spans may not wrap their exclusive end at 2^64. */
++#ifndef NMX_CHECKED_RANGES_H
++#define NMX_CHECKED_RANGES_H
++#include <stdint.h>
++
++static inline int nmx_checked_last(uint64_t start, uint64_t length, uint64_t *last)
++{
++    if (!last || !length || length - 1 > UINT64_MAX - start) return 0;
++    *last = start + length - 1;
++    return 1;
++}
++
++static inline int nmx_checked_page_span(uint64_t start, uint64_t length, uint64_t page_size,
++                                      uint64_t *base, uint64_t *span)
++{
++    uint64_t last, mask, end;
++    if (!base || !span || !page_size || (page_size & (page_size - 1)) ||
++        !nmx_checked_last(start, length, &last)) return 0;
++    mask = page_size - 1;
++    end = last | mask;
++    if (end == UINT64_MAX) return 0;
++    *base = start & ~mask;
++    *span = end - *base + 1;
++    return 1;
++}
++#endif
+--- /dev/null
++++ b/bsdcompat/include/nmxxnu/nmx_gamma_lut.h
+@@ -0,0 +1,50 @@
++/*
++ * Normalize IOFramebuffer's packed 1/3-channel 8/16-bit gamma tables to the
++ * pinned i915 legacy gamma ABI (256 unsigned 16-bit entries per channel).
++ * The kernel caller must already own a buffer of channels*count*(bits/8) bytes;
++ * this helper validates metadata, never probes user pointers and has no I/O.
++ * Keep the size in sync with nmx_drm_gamma_set and the bridge's channel offsets.
++ */
++#ifndef NMX_GAMMA_LUT_H
++#define NMX_GAMMA_LUT_H
++#include <stdint.h>
++#include <string.h>
++#define NMX_GAMMA_ENTRIES 256u
++
++static inline int nmx_gamma_valid(unsigned channels, unsigned count, unsigned bits)
++{
++    return (channels == 1 || channels == 3) && count >= 2 && count <= 65536 &&
++        (bits == 8 || bits == 16);
++}
++
++static inline uint16_t nmx_gamma_sample(const uint8_t *data, unsigned index, unsigned bits)
++{
++    uint16_t value;
++    if (bits == 8) return (uint16_t)(data[index] * 257u);
++    memcpy(&value, data + index * 2u, sizeof(value));
++    return value;
++}
++
++static inline int nmx_gamma_normalize(unsigned channels, unsigned count, unsigned bits,
++                                    const void *data, uint16_t *output)
++{
++    if (!data || !output || !nmx_gamma_valid(channels, count, bits))
++        return 0;
++    for (unsigned channel = 0; channel < 3; channel++) {
++        const uint8_t *source = (const uint8_t *)data +
++            (channels == 1 ? 0 : channel * count * (bits / 8));
++        for (unsigned i = 0; i < NMX_GAMMA_ENTRIES; i++) {
++            uint32_t position = i * (count - 1);
++            unsigned index = position / (NMX_GAMMA_ENTRIES - 1);
++            unsigned fraction = position % (NMX_GAMMA_ENTRIES - 1);
++            unsigned next = index + (index + 1 < count);
++            uint32_t a = nmx_gamma_sample(source, index, bits);
++            uint32_t b = nmx_gamma_sample(source, next, bits);
++            const unsigned scale = NMX_GAMMA_ENTRIES - 1;
++            output[channel * NMX_GAMMA_ENTRIES + i] = (uint16_t)
++                ((a * (scale - fraction) + b * fraction + scale / 2) / scale);
++        }
++    }
++    return 1;
++}
++#endif
 --- a/bsdcompat/include/nmxxnu/nmx_port.h
 +++ b/bsdcompat/include/nmxxnu/nmx_port.h
-@@ -29,6 +29,13 @@
+@@ -29,6 +29,15 @@
  int nmx_fb_open(void *dev, struct nmx_fb_info *out);
  void nmx_fb_close(void *dev);
  int nmx_fb_power(void *dev, int on);
++/* Packed IOFramebuffer gamma: positive errno; synchronous DRM color commit. */
++int nmx_fb_gamma(void *dev, unsigned channels, unsigned count, unsigned bits, const void *data);
 +
 +/* Alder Lake-S scan-out: positive errno; success transfers a pinned mapping
 + * cookie to the display bridge. Unmap before deleting its DRM framebuffer. */
@@ -43,7 +222,14 @@
  #endif
 --- a/bsdcompat/include/nmxxnu/nmx_xnu.h
 +++ b/bsdcompat/include/nmxxnu/nmx_xnu.h
-@@ -84,6 +84,8 @@
+@@ -81,9 +81,15 @@
+ void nmx_xnu_pci_irq_teardown(void *cookie);
+ /* returns once a handler running on this source has finished */
+ void nmx_xnu_pci_irq_drain(void *cookie);
++/* Retain while a live IRQ cookie is owned (e.g. BSD list lock). Release drains
++ * the retained work loop and drops it, independent of later cookie teardown. */
++void *nmx_xnu_pci_irq_drain_retain(void *cookie);
++void nmx_xnu_pci_irq_drain_release(void *handle);
  void nmx_xnu_pci_irq_enable(void *cookie, int on);
  /* the IOPCIDevice at domain:bus:dev.func, or NULL */
  void *nmx_xnu_pci_find(uint32_t domain, uint8_t bus, uint8_t dev, uint8_t func);
@@ -52,7 +238,7 @@
  /* the device's expansion ROM image (VBIOS) as the firmware left it, copied into 'buf'; returns its length or 0 */
  size_t nmx_xnu_pci_rom(void *pci, void *buf, size_t max);
  
-@@ -157,8 +159,13 @@
+@@ -157,8 +163,13 @@
  /* a clone node at /dev/<path>; 'cookie' is handed back to nmx_cdev_open for every open of it */
  void *nmx_xnu_devfs_make(const char *path, uint32_t uid, uint32_t gid, int mode, void *cookie);
  void nmx_xnu_devfs_remove(void *node);
@@ -86,7 +272,33 @@
              offer(dev, dl->driver);
              n++;
          }
-@@ -1150,28 +1152,23 @@
+@@ -721,6 +723,8 @@
+ /*
+  * synchronize_irq(): returns once no handler for interrupt number 'irq' is running. Handlers run on their interrupt
+  * source's work loop, so a pass through that work loop's gate waits for one in flight.
++ * Snapshot retained work loops while the list lock protects each IRQ cookie;
++ * teardown may free the cookie as soon as that lock is dropped.
+  */
+ void _intr_drain(int irq)
+ {
+@@ -730,10 +734,14 @@
+     mtx_lock(&bus_mtx);
+     TAILQ_FOREACH(in, &intrs, link)
+         if ((int)in->r->irqno == irq && n < 8)
+-            cookies[n++] = in->xcookie;
++        {
++            void *loop = nmx_xnu_pci_irq_drain_retain(in->xcookie);
++            if (loop)
++                cookies[n++] = loop;
++        }
+     mtx_unlock(&bus_mtx);
+     for (int i = 0; i < n; i++)
+-        nmx_xnu_pci_irq_drain(cookies[i]);
++        nmx_xnu_pci_irq_drain_release(cookies[i]);
+ }
+ 
+ int bus_child_present(device_t child)
+@@ -1150,28 +1158,23 @@
  
  device_t pci_find_class_from(uint8_t cls, uint8_t subcls, device_t from)
  {
@@ -127,6 +339,79 @@
  }
  
  struct resource *pci_reserve_map(device_t dev, device_t child, int type, int rid, rman_res_t start, rman_res_t end,
+--- a/bsdcompat/src/nmx_busdma.c
++++ b/bsdcompat/src/nmx_busdma.c
+@@ -18,6 +18,7 @@
+ #include <vm/vm_extern.h>
+ #include <vm/pmap.h>
+ #include "nmx_xnu.h"
++#include "nmx_checked_ranges.h"
+ 
+ MALLOC_DEFINE(M_BUSDMA, "busdma", "bus_dma tags and maps");
+ 
+@@ -112,13 +113,14 @@
+ /* true when the device address of [buf, buf+len) is the physical address and the tag's limits all hold */
+ bool bus_dma_id_mapped(bus_dma_tag_t dmat, vm_paddr_t buf, bus_size_t buflen)
+ {
+-    if (nmx_xnu_iommu_active() || buflen == 0)
+-        return false;
+-    if (buf + buflen - 1 > dmat->lowaddr)
++    uint64_t last;
++    if (!dmat || nmx_xnu_iommu_active() || !nmx_checked_last(buf, buflen, &last))
++        return false;
++    if (last > dmat->lowaddr)
+         return false;
+     if ((buf & (dmat->alignment - 1)) != 0)
+         return false;
+-    if (dmat->boundary != 0 && (buf / dmat->boundary) != ((buf + buflen - 1) / dmat->boundary))
++    if (dmat->boundary != 0 && (buf / dmat->boundary) != (last / dmat->boundary))
+         return false;
+     return true;
+ }
+@@ -165,7 +167,8 @@
+ /* maps one physically contiguous range as one segment */
+ static int load_one(bus_dma_tag_t dmat, bus_dmamap_t map, vm_paddr_t pa, bus_size_t len, int flags, bus_addr_t *out)
+ {
+-    if (len == 0 || len > dmat->maxsegsz || len > dmat->maxsize)
++    uint64_t last;
++    if (!nmx_checked_last(pa, len, &last) || len > dmat->maxsegsz || len > dmat->maxsize)
+         return EFBIG;
+     int err = map_reserve(map, flags);
+     if (err)
+@@ -175,9 +178,9 @@
+     err = nmx_xnu_dma_map(dmat->pci, pa, (size_t)len, dmat->lowaddr, &addr, &h);
+     if (err)
+         return err;
+-    if ((addr & (dmat->alignment - 1)) != 0 ||
+-        (dmat->boundary != 0 && (addr / dmat->boundary) != ((addr + len - 1) / dmat->boundary)) ||
+-        addr + len - 1 > dmat->lowaddr) {
++    if (!nmx_checked_last(addr, len, &last) || (addr & (dmat->alignment - 1)) != 0 ||
++        (dmat->boundary != 0 && (addr / dmat->boundary) != (last / dmat->boundary)) ||
++        last > dmat->lowaddr) {
+         nmx_xnu_dma_unmap(h);
+         return EFBIG;
+     }
+@@ -210,6 +213,9 @@
+ int bus_dmamap_load(bus_dma_tag_t dmat, bus_dmamap_t map, void *buf, bus_size_t buflen,
+                     bus_dmamap_callback_t *callback, void *callback_arg, int flags)
+ {
++    uint64_t last;
++    if (buflen > dmat->maxsize) return EFBIG;
++    if (buflen && !nmx_checked_last((uint64_t)(uintptr_t)buf, buflen, &last)) return EFAULT;
+     int nmax = dmat->nsegments > 64 ? 64 : dmat->nsegments;
+     bus_dma_segment_t *segs = malloc(sizeof(*segs) * (size_t)nmax, M_BUSDMA, flags & BUS_DMA_NOWAIT ? M_NOWAIT : M_WAITOK);
+     if (segs == NULL)
+--- a/ccxx.sh
++++ b/ccxx.sh
+@@ -6,7 +6,7 @@
+ mkdir -p $X/xnuobj
+ # nmxxnu/ holds the two boundary headers for the IOKit side (which must not see the FreeBSD include tree); they are
+ # copies of bsdcompat/include's, refreshed here so a declaration added there always reaches the C++ side
+-cp -p $X/bsdcompat/include/nmx_port.h $X/bsdcompat/include/nmx_xnu.h $X/bsdcompat/include/nmxxnu/
++cp -p $X/bsdcompat/include/nmx_port.h $X/bsdcompat/include/nmx_xnu.h $X/bsdcompat/include/nmx_gamma_lut.h $X/bsdcompat/include/nmx_checked_ranges.h $X/bsdcompat/include/nmxxnu/
+ exec xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -ffile-prefix-map=/Volumes/MiniData/build/gpu-src=/src -mkernel -fapple-kext -nostdinc -isysroot "$SDK" -I"$KF" \
+   -I$X/bsdcompat/include/nmxxnu -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
+   -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -O2 -g0 -Wall -Wno-unused-parameter \
 --- a/gen_flags.py
 +++ b/gen_flags.py
 @@ -8,7 +8,7 @@
@@ -314,10 +599,12 @@
  #include <drm/drm_fourcc.h>
  #include <drm/drm_framebuffer.h>
  #include <drm/drm_modes.h>
-@@ -25,18 +31,24 @@
+@@ -25,18 +31,26 @@
  
  #include "nmx_xnu.h"
  #include "nmx_port.h"
++#include "nmx_gamma_lut.h"
++extern int nmx_drm_gamma_set(struct drm_crtc *, uint16_t *, uint16_t *, uint16_t *, unsigned);
 +extern void nmx_gpu_stage_record(const char *, int);
  
  struct nmx_fb {
@@ -339,7 +626,7 @@
  
  /*
   * amdgpu may put scan-out buffers in system memory on APUs (scatter-gather display); the bridge needs them in
-@@ -68,22 +80,38 @@
+@@ -68,22 +82,38 @@
      return drm;
  }
  
@@ -385,7 +672,7 @@
  }
  
  static void bridge_free(struct nmx_fb *fb);
-@@ -91,21 +119,30 @@
+@@ -91,21 +121,30 @@
  /* a userland KMS client (a DRM master) closed: put our scan-out back on the outputs */
  static int bridge_restore(struct drm_client_dev *client)
  {
@@ -421,7 +708,7 @@
      bridge_free(fb);
  }
  
-@@ -116,45 +153,50 @@
+@@ -116,45 +155,50 @@
      .hotplug = bridge_hotplug,
  };
  
@@ -500,7 +787,7 @@
      }
      /* the buffer is as large as the largest mode any connected output asked for */
      mutex_lock(&fb->client.modeset_mutex);
-@@ -177,69 +219,186 @@
+@@ -177,69 +221,186 @@
      if (best == NULL) {
          printf("NullMoth display: no output is connected\n");
          err = ENXIO;
@@ -572,8 +859,9 @@
                     (unsigned long long)(off / PAGE_SIZE));
              err = EFAULT;
 -            goto fail;
+-        }
 +            return err;
-         }
++        }
 +    if (fb->intel_scanout && base != out->phys) {
 +        printf("NullMoth display: GGTT CPU aperture disagrees with scan-out range\n");
 +        err = EFAULT;
@@ -716,7 +1004,7 @@
  }
  
  /*
-@@ -248,16 +407,33 @@
+@@ -248,16 +409,79 @@
   */
  void nmx_fb_close(void *dev)
  {
@@ -759,6 +1047,52 @@
 +        }
 +    }
 +    mutex_unlock(&fbs_mutex);
++    return err;
++}
++
++/* The IOFramebuffer caller owns a validated packed kernel buffer. Normalize it
++ * once, then use DRM's existing CRTC color path under the same lock ordering as
++ * modesetting. Never acknowledge a failed or closed bridge as gamma-capable. */
++int nmx_fb_gamma(void *dev, unsigned channels, unsigned count, unsigned bits, const void *data)
++{
++    int err = ENODEV;
++    uint16_t *lut;
++    if (!dev || !data || !nmx_gamma_valid(channels, count, bits))
++        return EINVAL;
++    lut = kzalloc(3 * NMX_GAMMA_ENTRIES * sizeof(*lut), GFP_KERNEL);
++    if (!lut)
++        return ENOMEM;
++    if (!nmx_gamma_normalize(channels, count, bits, data, lut)) {
++        kfree(lut);
++        return EINVAL;
++    }
++    mutex_lock(&fbs_mutex);
++    for (int i = 0; i < MAX_FB; i++) {
++        struct nmx_fb *fb = fbs[i].fb;
++        struct drm_mode_set *ms;
++        if (fbs[i].dev != dev || !fb || !fb->published || READ_ONCE(fb->closed))
++            continue;
++        err = ENXIO;
++        mutex_lock(&fb->client.modeset_mutex);
++        drm_client_for_each_modeset(ms, &fb->client) {
++            if (!ms->mode || !ms->crtc)
++                continue;
++            if (ms->crtc->gamma_size != NMX_GAMMA_ENTRIES) {
++                err = EOPNOTSUPP;
++                break;
++            }
++            nmx_gpu_stage_record("fb.gamma.before", 0);
++            err = -nmx_drm_gamma_set(ms->crtc, lut, lut + NMX_GAMMA_ENTRIES,
++                                   lut + NMX_GAMMA_ENTRIES * 2, NMX_GAMMA_ENTRIES);
++            nmx_gpu_stage_record("fb.gamma.after", err);
++            if (err)
++                break;
++        }
++        mutex_unlock(&fb->client.modeset_mutex);
++        break;
++    }
++    mutex_unlock(&fbs_mutex);
++    kfree(lut);
 +    return err;
 +}
 --- /dev/null
@@ -833,9 +1167,44 @@
 +    }
 +};
 +#endif
+--- a/xnu/nmx_dma.cpp
++++ b/xnu/nmx_dma.cpp
+@@ -13,6 +13,7 @@
+ #include <IOKit/IOLib.h>
+ #include <sys/errno.h>
+ #include "nmx_xnu.h"
++#include "nmx_checked_ranges.h"
+ 
+ struct nmx_dma_map {
+     IODMACommand *cmd;
+@@ -26,9 +27,13 @@
+ 
+ extern "C" int nmx_xnu_dma_map(void *pci, uint64_t pa, size_t size, uint64_t dma_mask, uint64_t *dma_addr, void **handle)
+ {
++    uint64_t last;
++    if (!handle || !dma_addr) return EINVAL;
+     *handle = nullptr;
++    *dma_addr = 0;
++    if (!nmx_checked_last(pa, size, &last)) return EINVAL;
+     if (IOMapper::gSystem == nullptr) {
+-        if (dma_mask && (pa + size - 1) > dma_mask)
++        if (dma_mask && last > dma_mask)
+             return EFBIG;     /* beyond what the device can address; nothing is bounced */
+         *dma_addr = pa;
+         return 0;
+@@ -54,7 +59,8 @@
+     UInt64 offset = 0;
+     UInt32 nseg = 1;
+     IOReturn r = cmd->gen64IOVMSegments(&offset, &seg, &nseg);
+-    if (r != kIOReturnSuccess || nseg != 1 || seg.fLength < size) {
++    if (r != kIOReturnSuccess || nseg != 1 || seg.fLength < size ||
++        !nmx_checked_last(seg.fIOVMAddr, size, &last) || (dma_mask && last > dma_mask)) {
+         /* a mapping the IOMMU split in two cannot be handed to the GPU as one address */
+         cmd->clearMemoryDescriptor(true);
+         cmd->release();
 --- a/xnu/nmx_fb.cpp
 +++ b/xnu/nmx_fb.cpp
-@@ -8,10 +8,14 @@
+@@ -8,10 +8,15 @@
   * same WindowServer.
   */
  #include <IOKit/IOLib.h>
@@ -844,13 +1213,14 @@
  #include <IOKit/IODeviceMemory.h>
  #include <kern/thread_call.h>
 +#include <kern/thread.h>
++#include <sys/errno.h>
  #include "nmx_port.h"
 +#include "nmx_fb_interrupts.h"
 +extern "C" void nmx_gpu_stage_record(const char *, int);
  
  #define FBLOG(fmt, ...) IOLog("NullMoth display: " fmt "\n", ##__VA_ARGS__)
  
-@@ -26,26 +30,50 @@
+@@ -26,26 +31,60 @@
      nmx_fb_info fInfo = {};
      uint32_t fRefresh16 = 60 << 16;
      uint64_t fFrameNs = 16666667ull;
@@ -890,6 +1260,16 @@
 +            IOSleep(5);
 +        }
 +        fVblTimer = nullptr;
++    }
++
++    IOReturn applyGamma(UInt32 channels, UInt32 count, UInt32 bits, void *data) {
++        if (!fDev) return kIOReturnNotReady;
++        int err = nmx_fb_gamma(fDev, channels, count, bits, data);
++        if (!err) return kIOReturnSuccess;
++        if (err == EINVAL) return kIOReturnBadArgument;
++        if (err == ENOMEM) return kIOReturnNoMemory;
++        if (err == EOPNOTSUPP) return kIOReturnUnsupported;
++        return kIOReturnError;
      }
  
  public:
@@ -907,7 +1287,7 @@
          fDev = dev;
          fInfo = info;
          if (info.pclk_khz && info.htotal && info.vtotal) {
-@@ -61,27 +89,41 @@
+@@ -61,27 +100,41 @@
      bool start(IOService *provider) override {
          if (!IOFramebuffer::start(provider)) return false;
          fVblTimer = thread_call_allocate(vblFire, this);
@@ -959,7 +1339,7 @@
      }
  
      IOReturn enableController() override { return kIOReturnSuccess; }
-@@ -93,7 +135,7 @@
+@@ -93,7 +146,7 @@
      IODeviceMemory *getVRAMRange() override { return IODeviceMemory::withRange(fInfo.phys, fInfo.size); }
      const char *getPixelFormats() override { return IO32BitDirectPixels "\0"; }
      IOItemCount getDisplayModeCount() override { return 1; }
@@ -968,7 +1348,7 @@
      IOReturn getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info) override {
          if (mode != 1 || !info) return kIOReturnBadArgument;
          bzero(info, sizeof(*info));
-@@ -122,7 +164,7 @@
+@@ -122,7 +175,7 @@
          return kIOReturnSuccess;
      }
      IOReturn getCurrentDisplayMode(IODisplayModeID *mode, IOIndex *depth) override {
@@ -977,7 +1357,7 @@
      }
      IOReturn getStartupDisplayMode(IODisplayModeID *mode, IOIndex *depth) override { return getCurrentDisplayMode(mode, depth); }
      /* without a timing, WindowServer shows the display at 0.00 Hz (seen with NMIntelFB) */
-@@ -151,12 +193,10 @@
+@@ -151,17 +204,31 @@
      IOItemCount getConnectionCount() override { return 1; }
      IOReturn registerForInterruptType(IOSelect type, IOFBInterruptProc proc, OSObject *target, void *ref,
                                        void **iref) override {
@@ -987,14 +1367,40 @@
 -    }
 -    IOReturn unregisterInterrupt(void *) override { return kIOReturnSuccess; }
 -    IOReturn setInterruptState(void *, UInt32) override { return kIOReturnSuccess; }
+-    IOReturn setGammaTable(UInt32, UInt32, UInt32, void *) override { return kIOReturnSuccess; }
+-    IOReturn setGammaTable(UInt32, UInt32, UInt32, void *, bool) override { return kIOReturnSuccess; }
+-    IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
+-    IOReturn setApertureEnable(IOPixelAperture, IOOptionBits) override { return kIOReturnSuccess; }
+-    IOReturn setStartupDisplayMode(IODisplayModeID, IOIndex) override { return kIOReturnSuccess; }
++        /* DRM hotplug has no IOFramebuffer notification bridge yet. Advertising
++         * a callback that is never delivered would hide that missing protocol. */
++        if (type == kIOFBConnectInterruptType) {
++            if (iref) *iref = nullptr;
++            return kIOReturnUnsupported;
++        }
 +        return fInterrupts.install(type, proc, target, ref, iref);
 +    }
 +    IOReturn unregisterInterrupt(void *reference) override { return fInterrupts.remove(reference); }
 +    IOReturn setInterruptState(void *reference, UInt32 state) override { return fInterrupts.setState(reference, state); }
-     IOReturn setGammaTable(UInt32, UInt32, UInt32, void *) override { return kIOReturnSuccess; }
-     IOReturn setGammaTable(UInt32, UInt32, UInt32, void *, bool) override { return kIOReturnSuccess; }
-     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
-@@ -171,7 +211,8 @@
++    IOReturn setGammaTable(UInt32 channels, UInt32 count, UInt32 bits, void *data) override {
++        return applyGamma(channels, count, bits, data);
++    }
++    /* DRM's blocking color commit also services callers requesting VBL sync. */
++    IOReturn setGammaTable(UInt32 channels, UInt32 count, UInt32 bits, void *data, bool) override {
++        return applyGamma(channels, count, bits, data);
++    }
++    /* The sole advertised format is direct XRGB8888, without an indexed CLUT. */
++    IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnUnsupported; }
++    IOReturn setApertureEnable(IOPixelAperture aperture, IOOptionBits) override {
++        return aperture == kIOFBSystemAperture ? kIOReturnSuccess : kIOReturnUnsupported;
++    }
++    IOReturn setStartupDisplayMode(IODisplayModeID mode, IOIndex depth) override {
++        return setDisplayMode(mode, depth);
++    }
+     /* power acknowledged at once; left to IOFramebuffer it waits on a shared thread (seen with NVRMFB) */
+     IOReturn setPowerState(unsigned long ordinal, IOService *) override {
+         handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
+@@ -171,7 +238,8 @@
          if (attribute == kIOWindowServerActiveAttribute) return kIOReturnSuccess;
          if (attribute == kIOPowerAttribute) {
              /* display sleep turns the outputs off; wake lights them again with the same buffer */
@@ -1004,7 +1410,43 @@
              if (value) {
                  IOReturn r = IOFramebuffer::setAttribute(attribute, value);
                  handleEvent(kIOFBNotifyDidPowerOn);
-@@ -218,7 +259,9 @@
+@@ -184,17 +252,30 @@
+         return IOFramebuffer::setAttribute(attribute, value);
+     }
+     IOReturn setAttributeForConnection(IOIndex idx, IOSelect attribute, uintptr_t value) override {
++        if (idx != 0) return kIOReturnBadArgument;
+         switch (attribute) {
+-        case kConnectionPower: case kConnectionColorModesSupported: case kConnectionColorDepthsSupported:
+-        case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported: case kConnectionColorMode:
++        case kConnectionPower:
++            if (value > kIODisplayPowerStateOn) return kIOReturnBadArgument;
++            return fDev && nmx_fb_power(fDev, value != kIODisplayPowerStateOff) == 0
++                ? kIOReturnSuccess : kIOReturnNotReady;
++        /* These are monitor capability hints from IOFramebuffer, not requests
++         * to change our fixed RGB/8-bit aperture. Link encoding belongs to i915. */
++        case kConnectionColorModesSupported: case kConnectionColorDepthsSupported:
++            return kIOReturnSuccess;
++        case kConnectionControllerColorDepth:
++            return value == kIODisplayRGBColorComponentBits8 ? kIOReturnSuccess : kIOReturnUnsupported;
++        case kConnectionColorMode:
++            /* RGB or automatic (which resolves to our sole RGB aperture mode). */
++            return value == 0x1 || value == 0x10000000 ? kIOReturnSuccess : kIOReturnUnsupported;
+         case kConnectionDisplayFlags: case kConnectionFlags:
+-            return kIOReturnSuccess;
++            return value == 0 ? kIOReturnSuccess : kIOReturnUnsupported;
+         default:
+             return IOFramebuffer::setAttributeForConnection(idx, attribute, value);
+         }
+     }
+-    IOReturn connectFlags(IOIndex, IODisplayModeID, IOOptionBits *flags) override {
+-        if (flags) *flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
++    IOReturn connectFlags(IOIndex index, IODisplayModeID mode, IOOptionBits *flags) override {
++        if (index != 0 || mode != 1 || !flags) return kIOReturnBadArgument;
++        *flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
+         return kIOReturnSuccess;
+     }
+     IOReturn getAttribute(IOSelect attribute, uintptr_t *value) override {
+@@ -218,7 +299,9 @@
  IOService *nmx_fb_publish(IOService *gpu, void *dev)
  {
      nmx_fb_info info;
@@ -1351,8 +1793,8 @@
 +        setProperty("nullmoth-gpu-state", "failed: no framebuffer; guard retained");
 +        pci_->removeProperty("nmxgpu-claimed");
 +        IOLog("NullMoth GPU: no framebuffer; boot guard retained for recovery\n");
-+        lifecycle_.complete(-1);
 +        nmx_gpu_stage_record("attach.no_framebuffer", -1);
++        lifecycle_.complete(-1);
 +        return;
 +    }
 +    if (abortIfStopping()) return;
@@ -1361,8 +1803,8 @@
            pci_->configRead16(kIOPCIConfigDeviceID));
      OSSynchronizeIO();
 -    attach_ = 1;
-+    lifecycle_.complete(1);
 +    nmx_gpu_stage_record("attach.complete", fb_ != nullptr ? 0 : -1);
++    lifecycle_.complete(1);
  }
  
  void NMXGPU::stop(IOService *provider)
@@ -1410,10 +1852,51 @@
  
 --- a/xnu/nmx_pci.cpp
 +++ b/xnu/nmx_pci.cpp
-@@ -221,6 +221,42 @@
+@@ -188,12 +188,27 @@
+     return kIOReturnSuccess;
+ }
+ 
+-/* the work loop gate is held while a handler runs, so taking it once waits for that handler */
++/* Called while the BSD interrupt list still owns the cookie. A retained work
++ * loop remains valid even if teardown removes/frees the IRQ after list unlock. */
++extern "C" void *nmx_xnu_pci_irq_drain_retain(void *cookie)
++{
++    NMXIrq *irq = (NMXIrq *)cookie;
++    IOWorkLoop *loop = irq ? irq->wl : nullptr;
++    if (loop) loop->retain();
++    return loop;
++}
++
++extern "C" void nmx_xnu_pci_irq_drain_release(void *handle)
++{
++    IOWorkLoop *loop = (IOWorkLoop *)handle;
++    if (!loop) return;
++    loop->runAction(drain_action, loop);
++    loop->release();
++}
++
+ extern "C" void nmx_xnu_pci_irq_drain(void *cookie)
+ {
+-    NMXIrq *irq = (NMXIrq *)cookie;
+-    if (irq != nullptr && irq->wl != nullptr)
+-        irq->wl->runAction(drain_action, irq);
++    nmx_xnu_pci_irq_drain_release(nmx_xnu_pci_irq_drain_retain(cookie));
+ }
+ 
+ extern "C" void nmx_xnu_pci_irq_enable(void *cookie, int on)
+@@ -213,6 +228,7 @@
+     if (irq == nullptr)
+         return;
+     irq->es->disable();
++    irq->wl->runAction(drain_action, irq);
+     irq->wl->removeEventSource(irq->es);
+     irq->es->release();
+     irq->wl->release();
+@@ -220,6 +236,42 @@
+ }
  
  /* ---- lookup and ROM ----------------------------------------------------------------------------------------------- */
- 
++
 +/* Same borrowed-device lifetime convention as nmx_xnu_pci_find().
 + * Enumerate real PCI services, including chipset functions not yet wrapped by
 + * newbus. The caller wraps the result with nmx_device_for_pci; no driver is
@@ -1449,7 +1932,53 @@
 +    it->release();
 +    return found;
 +}
-+
+ 
  extern "C" void *nmx_xnu_pci_find(uint32_t domain, uint8_t bus, uint8_t dev, uint8_t func)
  {
-     OSDictionary *match = IOService::serviceMatching("IOPCIDevice");
+--- a/xnu/nmx_vm.cpp
++++ b/xnu/nmx_vm.cpp
+@@ -11,6 +11,7 @@
+ #include <IOKit/IOLib.h>
+ #include <libkern/OSAtomic.h>
+ #include "nmx_xnu.h"
++#include "nmx_checked_ranges.h"
+ 
+ extern "C" {
+ extern void *kernel_pmap;
+@@ -73,9 +74,11 @@
+ 
+ extern "C" void *nmx_xnu_map_phys(uint64_t pa, size_t size, int cache, void **handle)
+ {
++    uint64_t base, span;
++    if (!handle) return nullptr;
+     *handle = nullptr;
+-    uint64_t base = pa & ~(uint64_t)PAGE_MASK;
+-    size_t len = (size_t)(((pa + size + PAGE_MASK) & ~(uint64_t)PAGE_MASK) - base);
++    if (!nmx_checked_page_span(pa, size, PAGE_SIZE, &base, &span)) return nullptr;
++    size_t len = (size_t)span;
+     IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)base, len, kIODirectionInOut);
+     if (md == nullptr)
+         return nullptr;
+@@ -89,8 +92,10 @@
+ 
+ extern "C" void *nmx_xnu_map_pages(const uint64_t *pages, size_t npages, int cache, void **handle)
+ {
++    if (!handle) return nullptr;
+     *handle = nullptr;
+-    if (npages == 0)
++    if (!pages || npages == 0 || npages > UINT32_MAX ||
++        npages > SIZE_MAX / PAGE_SIZE || npages > SIZE_MAX / sizeof(IOAddressRange))
+         return nullptr;
+     IOAddressRange *ranges = (IOAddressRange *)IOMalloc(sizeof(IOAddressRange) * npages);
+     if (ranges == nullptr)
+@@ -98,6 +103,10 @@
+     /* coalesce physically adjacent pages into one range each */
+     size_t n = 0;
+     for (size_t i = 0; i < npages; i++) {
++        if ((pages[i] & PAGE_MASK) != 0 || pages[i] > UINT64_MAX - PAGE_SIZE) {
++            IOFree(ranges, sizeof(IOAddressRange) * npages);
++            return nullptr;
++        }
+         if (n > 0 && ranges[n - 1].address + ranges[n - 1].length == pages[i]) {
+             ranges[n - 1].length += PAGE_SIZE;
+         } else {

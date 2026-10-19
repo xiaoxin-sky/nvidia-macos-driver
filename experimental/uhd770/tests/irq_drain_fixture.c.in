@@ -1,0 +1,66 @@
+/* Teardown injected immediately after releasing the real drain function's BSD
+ * list lock. A raw cookie then becomes invalid; retained work loops stay alive. */
+#include <assert.h>
+#include <stdio.h>
+struct mock_loop { unsigned references, drains; };
+struct mock_cookie { int alive; struct mock_loop *loop; };
+struct resource { int irqno; };
+struct nmx_intr { struct resource *r; void *xcookie; struct nmx_intr *next; };
+struct mock_list { struct nmx_intr *first; };
+static struct mock_list intrs;
+static int bus_mtx, tear_down;
+#define TAILQ_FOREACH(in, head, member) for ((in) = (head)->first; (in); (in) = (in)->next)
+static void mtx_lock(int *lock) { assert(!*lock); *lock = 1; }
+static void mtx_unlock(int *lock) {
+    assert(*lock); *lock = 0;
+    if (tear_down) {
+        struct nmx_intr *in;
+        TAILQ_FOREACH(in, &intrs, link) {
+            struct mock_cookie *cookie = in->xcookie;
+            if (cookie && cookie->alive) {
+                cookie->alive = 0;
+                assert(cookie->loop->references); --cookie->loop->references;
+            }
+        }
+    }
+}
+static void *nmx_xnu_pci_irq_drain_retain(void *raw) {
+    struct mock_cookie *cookie = raw;
+    assert(bus_mtx);
+    if (!cookie) return NULL;
+    assert(cookie->alive && cookie->loop->references);
+    ++cookie->loop->references;
+    return cookie->loop;
+}
+static void nmx_xnu_pci_irq_drain_release(void *handle) {
+    struct mock_loop *loop = handle;
+    assert(!bus_mtx && loop->references);
+    ++loop->drains; --loop->references;
+}
+void nmx_xnu_pci_irq_drain(void *raw) {
+    struct mock_cookie *cookie = raw;
+    assert(cookie->alive); ++cookie->loop->drains;
+}
+
+/* NMX_IRQ_DRAIN_IMPLEMENTATION */
+
+int main(void) {
+    struct mock_loop first = {1, 0}, second = {1, 0};
+    struct mock_cookie a = {1, &first}, b = {1, &second};
+    struct resource matching = {42}, other = {43};
+    struct nmx_intr two = {&other, &b, NULL};
+    struct nmx_intr one = {&matching, &a, &two};
+    intrs.first = &one;
+    _intr_drain(99);
+    assert(!first.drains && !second.drains && first.references == 1);
+    _intr_drain(42);
+    assert(first.drains == 1 && !second.drains && first.references == 1);
+    tear_down = 1;
+    _intr_drain(42);
+    assert(!a.alive && !b.alive);
+    assert(first.drains == 2 && first.references == 0 && second.references == 0);
+    intrs.first = NULL;
+    _intr_drain(42);
+    puts("IRQ drain fixture passed: filter, balanced loop references and cookie teardown after list unlock");
+    return 0;
+}

@@ -1,0 +1,68 @@
+UHD 770: display bring-up is not the complete accelerated-desktop path
+===================================================================
+
+Scope and source boundaries
+---------------------------
+This review follows the port/DRM/display/userland entry points relevant to
+Alder Lake-S. It is not a line-by-line proof of all Linux, Mesa or Apple code.
+sources.json pins the kernel inputs. Current plugin/ is the fork's public Metal
+frontend; historical gpu-port/ at 7222618 contains the AMD/Intel userland patches.
+Hardware test readiness remains false in audit.json while code blockers are open.
+
+Kernel/display path reviewed
+----------------------------
+OpenCore opt-in -> NMXGPU::probe/start -> firmware wait and attach guard ->
+nmx_port_attach/attach_on -> PCI driver/PCH/OpRegion/display/GEM initialization ->
+DRM client connector probing -> framebuffer allocation -> CPU-mappable GGTT pin ->
+physical range validation -> atomic check/commit -> client registration ->
+NMXGPUFB publication -> software VBL/gamma/power -> stop/unregister/unmap/detach.
+
+The readable patches now address the observed tunnel/PCH/vmap blockers plus
+statically identified callback, registration, retry and resource-lifetime defects.
+Host tests exercise the patched code with mocked services, not a GPU. The current
+CI builds NMXGPU only; it does not produce a complete Intel acceleration package.
+Real VBL pacing, connector/mode notifications and sleep/wake remain separate work.
+
+Public userland materials exist; installed components are a different question
+-----------------------------------------------------------------------------
+- plugin/NVMTLDevice.m and plugin/nvmtl_vk.c have Intel vendor dispatch and select
+  intel_icd.json / libvulkan_intel.dylib. It is incorrect to say the Metal plugin
+  has no public source merely because the inspected Intel package omits its bundle.
+- Historical gpu-port/README.md records Mesa bffd919 and libdrm b97cbde, with
+  gpu-port/patches/mesa-macos.patch and libdrm-macos.patch. Its mock-chip matrix is
+  device/pipeline creation through a noop shim, not evidence of real GPU execution.
+- NMXAccel is the -DNMX_ACCEL form of kexts/NVRM/accel/nvrm-accel.cpp, built using
+  build/nmxaccel_build.sh in that history. This CI neither builds nor installs it.
+- The runtime path still needs a matched ANV/libdrm/loader/translation/plugin set,
+  kernel mapping and synchronization ABI checks, and real submission/readback.
+  Kernel compilation and an installed kext do not validate that path.
+
+Explicit WindowServer restriction in current public code
+-------------------------------------------------------
+plugin/NVMTLDevice.m, nvmtl_process_is_allowed(): when the process is WindowServer
+and nvmtl_vk_vendor() != 0x10de, the function returns false. This check precedes
+NVMTL_ENABLE and the allow-list, so those settings cannot enable Intel desktop
+composition through this plugin.
+
+plugin/nvmtl_vk.c, nvmtl_gpu_headless(): non-NVIDIA vendors are treated as an
+app-only GPU. IOSurface sharing and dirty/page-off paths are disabled there and
+frames use the copy-out path. The historical gpu-port README describes the same
+app-only AMD/Intel design explicitly.
+
+Consequences and work still needed
+---------------------------------
+1. A visible desktop from NMXGPU is evidence about the display bridge. A Metal
+   app executing on ANV is a further milestone. Neither alone demonstrates
+   accelerated WindowServer desktop composition on the UHD 770.
+2. Supporting that desktop is additional implementation work: establish the
+   Intel NMXAccel/Metal/IOSurface resource, completion and presentation contracts,
+   then make WindowServer admission depend on those supported capabilities.
+   Removing the vendor check alone is not an implementation of those contracts.
+3. A complete userland build/package must have reproducible source/dependency
+   inputs and install the actual Intel components, not infer them from the NVIDIA
+   version number or from the kernel build succeeding.
+4. Native device/IOMMU behavior, actual GPU commands and visible results cannot
+   be proved by host mocks. Code review and offline checks must be completed first;
+   a later hardware gate must explicitly state what is implemented and what it tests.
+
+No new hardware test is requested by this file or by a passing CI run.

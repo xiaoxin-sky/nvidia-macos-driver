@@ -28,14 +28,19 @@ The repair batch includes:
 - real software interrupt disable/unregister and timer/target lifetime handling;
 - bounded initial-mode retries with mapping cleanup and atomic configuration checks;
 - registration-failure ownership and attach/stop/power-operation synchronization.
+- packed gamma conversion and real DRM color commits, retained IRQ-drain work
+  loops, and checked DMA/physical-map arithmetic.
 
 audit.json maps the reviewed call chain and separates hardware-proven results,
 candidate repairs, known simplified
 interfaces and unverified paths. In particular, hardware VBL pacing,
-gamma, dynamic mode/connector notification, sleep/wake and the complete
+dynamic mode/connector notification, sleep/wake and the complete
 ANV/Metal path still require work; this batch must not be advertised as a stable,
 complete graphics driver. A missing Metal plugin in the Intel test package is
 not repaired by the display mapping patch.
+ACCELERATION-GAPS.txt traces the userland boundary and the current plugin's
+explicit refusal to create an Intel WindowServer Metal device. Public plugin
+source exists; its presence and a working framebuffer do not complete that path.
 
 Validation
 ----------

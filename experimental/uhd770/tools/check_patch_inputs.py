@@ -17,6 +17,7 @@ import tempfile
 from prepare_pci_fixture import prepare
 from enable_ccache import enable
 from prepare_bridge_fixture import prepare as prepare_bridge
+from prepare_irq_fixture import prepare as prepare_irq
 
 
 def check(port, drm, package):
@@ -35,12 +36,13 @@ def check(port, drm, package):
             path = package / "patches" / patch
             subprocess.run(["git", "-C", str(tree), "apply", "--check", str(path)], check=True)
             subprocess.run(["git", "-C", str(tree), "apply", str(path)], check=True)
-        for name in ["nmx_port.h", "nmx_xnu.h"]:
+        for name in ["nmx_port.h", "nmx_xnu.h", "nmx_gamma_lut.h", "nmx_checked_ranges.h"]:
             assert (x / "bsdcompat/include" / name).read_text(encoding="utf-8") == (x / "bsdcompat/include/nmxxnu" / name).read_text(encoding="utf-8"), name
         for script in (package / "tools").glob("*.py"):
             ast.parse(script.read_text(encoding="utf-8"))
         prepare(x / "xnu/nmx_pci.cpp", package / "tests/pci_class_fixture.cpp.in", root / "pci-class-test.cpp")
         prepare_bridge(x / "override/src/nmx_fb_bridge.c", package / "tests/fb_bridge_fixture.c.in", root / "fb-bridge-test.c")
+        prepare_irq(x / "bsdcompat/src/nmx_bus.c", package / "tests/irq_drain_fixture.c.in", root / "irq-drain-test.c")
         assert (x / "xnu/nmx_fb_interrupts.h").is_file()
         assert (x / "xnu/nmx_attach_lifecycle.h").is_file()
         enable(x)

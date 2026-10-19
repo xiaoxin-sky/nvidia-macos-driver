@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nmx_port.h"
+#include "nmx_gamma_lut.h"
 
 typedef uint64_t u64;
 #define __iomem
@@ -42,7 +43,12 @@ struct drm_display_mode {
     unsigned hdisplay, vdisplay, clock, htotal, vtotal;
     unsigned hsync_start, hsync_end, vsync_start, vsync_end;
 };
-struct drm_mode_set { struct drm_display_mode *mode; struct drm_framebuffer *fb; };
+struct drm_crtc { unsigned gamma_size; };
+struct drm_mode_set {
+    struct drm_display_mode *mode;
+    struct drm_framebuffer *fb;
+    struct drm_crtc *crtc;
+};
 struct drm_client_funcs {
     void *owner;
     void (*unregister)(struct drm_client_dev *);
@@ -84,6 +90,10 @@ static int init_error, alloc_error, create_failures, create_null, missing_fb;
 static int map_error, map_failures, noncontiguous, probe_error_call, check_error_call;
 static int commit_error_call, no_output, probe_calls, check_calls, commit_calls;
 static unsigned register_width, register_height, mode_cap;
+static struct drm_crtc mock_crtc = {NMX_GAMMA_ENTRIES};
+static unsigned gamma_calls;
+static int gamma_error;
+static uint16_t gamma_store[3][NMX_GAMMA_ENTRIES];
 static struct drm_client_dev *registered[8];
 static struct drm_display_mode modes[] = {
     {3840,2160,594000,4400,2250,4016,4104,2168,2178},
@@ -116,6 +126,7 @@ static void drm_client_release(struct drm_client_dev *c) {
 }
 static int drm_client_modeset_probe(struct drm_client_dev *c, unsigned w, unsigned h) {
     ++probe_calls;
+    c->modes[0].crtc = &mock_crtc;
     if (probe_error_call == probe_calls) return -EIO;
     c->modes[0].mode = NULL;
     if (no_output) return 0;
@@ -144,6 +155,16 @@ static void drm_client_register(struct drm_client_dev *c) {
     register_width = c->modes[0].mode->hdisplay;
     register_height = c->modes[0].mode->vdisplay;
     c->funcs->hotplug(c);
+}
+int nmx_drm_gamma_set(struct drm_crtc *crtc, uint16_t *red, uint16_t *green,
+                       uint16_t *blue, unsigned size) {
+    assert(crtc == &mock_crtc && size == NMX_GAMMA_ENTRIES);
+    ++gamma_calls;
+    if (gamma_error) return -gamma_error;
+    memcpy(gamma_store[0], red, sizeof(gamma_store[0]));
+    memcpy(gamma_store[1], green, sizeof(gamma_store[1]));
+    memcpy(gamma_store[2], blue, sizeof(gamma_store[2]));
+    return 0;
 }
 static struct drm_client_buffer *drm_client_framebuffer_create(
     struct drm_client_dev *c, unsigned w, unsigned h, int format) {
@@ -206,6 +227,8 @@ static void reset(void) {
     map_error = map_failures = noncontiguous = probe_error_call = check_error_call = 0;
     commit_error_call = no_output = probe_calls = check_calls = commit_calls = 0;
     register_width = register_height = mode_cap = 0;
+    mock_crtc.gamma_size = NMX_GAMMA_ENTRIES;
+    gamma_calls = 0; gamma_error = 0;
     driver.name = "i915";
 }
 int main(void) {
@@ -224,6 +247,21 @@ int main(void) {
     assert(register_width == 3840 && register_height == 2160);
     assert(nmx_fb_open(&device, &info) == EBUSY);
     assert(!nmx_fb_power(&device, 1));
+    {
+        uint8_t ramp[NMX_GAMMA_ENTRIES];
+        for (unsigned i = 0; i < NMX_GAMMA_ENTRIES; ++i) ramp[i] = (uint8_t)i;
+        assert(!nmx_fb_gamma(&device, 1, NMX_GAMMA_ENTRIES, 8, ramp));
+        assert(gamma_calls == 1 && gamma_store[0][255] == 65535 && gamma_store[2][128] == 32896);
+        gamma_error = EIO;
+        assert(nmx_fb_gamma(&device, 1, NMX_GAMMA_ENTRIES, 8, ramp) == EIO);
+        gamma_error = 0; mock_crtc.gamma_size = 1024;
+        assert(nmx_fb_gamma(&device, 1, NMX_GAMMA_ENTRIES, 8, ramp) == EOPNOTSUPP);
+        mock_crtc.gamma_size = NMX_GAMMA_ENTRIES;
+        assert(nmx_fb_gamma(&device, 2, NMX_GAMMA_ENTRIES, 8, ramp) == EINVAL);
+        alloc_error = 1;
+        assert(nmx_fb_gamma(&device, 1, NMX_GAMMA_ENTRIES, 8, ramp) == ENOMEM);
+        alloc_error = 0;
+    }
     nmx_fb_close(&device); assert(nmx_fb_power(&device, 1) == ENODEV);
     reset(); create_failures = 1;
     assert(!nmx_fb_open(&device, &info) && info.width == 1920);
@@ -251,6 +289,6 @@ int main(void) {
     reset(); driver.name = "amdgpu";
     assert(!nmx_fb_open(&device, &info) && info.ok);
     reset();
-    puts("Framebuffer bridge fixture passed (18 scenarios): faults, mode retries, pins, registration ownership and close");
+    puts("Framebuffer bridge fixture passed: 18 display scenarios plus gamma conversion/commit/error cases");
     return 0;
 }
