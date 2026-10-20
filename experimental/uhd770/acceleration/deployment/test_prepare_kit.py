@@ -96,10 +96,13 @@ class PreparationTests(unittest.TestCase):
             self.assertFalse(plan["gpu_executed"])
             self.assertEqual((output / "Run-UHD770-Test.command").read_bytes(),
                              (source / "Run-UHD770-Test.command").read_bytes())
+            self.assertEqual((output / "Archive-UHD770-Failed.command").read_bytes(),
+                             (source / "Archive-UHD770-Failed.command").read_bytes())
             self.assertFalse((output / "tools/com.uhd770.mvp.session-user.plist").exists())
             self.assertTrue((output / "tools/com.uhd770.mvp.session-root.plist").is_file())
             manifest = (output / "SHA256SUMS").read_text(encoding="utf-8")
             self.assertIn("  Run-UHD770-Test.command\n", manifest)
+            self.assertIn("  Archive-UHD770-Failed.command\n", manifest)
             self.assertNotIn("com.uhd770.mvp.session-user.plist", manifest)
 
     def test_single_session_config_preserves_safe_bytes_and_unrelated_settings(self):

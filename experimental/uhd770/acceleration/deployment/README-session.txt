@@ -52,10 +52,30 @@ WindowServer、HiDPI 60 Hz、视频编解码、睡眠唤醒不属于本轮成功
 U 盘暂时不可用时，原件在 /Users/Shared/UHD770MVP-bootstrap.*；再次执行下面的
 export 会把这些原件纳入汇总报告，无需重跑准备来复现。
 
+bootstrap 原件是 root 专用的 700 权限目录，Finder 普通用户直接复制可能提示没有权限，
+并留下空文件夹。不要修改原件权限；复制自动导出的 session-reports 或 U 盘
+UHD770-prepare-logs 副本即可。
+
 把最新的 /Users/Shared/UHD770MVP-session-reports.* 整个文件夹带回 Windows。
 如果没有自动导出的文件夹，在正常桌面执行本包 tools/session.sh export：
 
   sudo /bin/bash -p "/实际包路径/tools/session.sh" export
+
+本次 r5 日志自检失败后换包
+-------------------------
+本次已知失败发生在驱动安装之前：采集到约 300 秒，但缺少 collector_end 收尾标记。
+修订包修复记录器正常结束和超时保护同时触发的竞态，保留独立的有限收尾保护。
+正常桌面自检的时长、结束标记、成功查询与心跳门槛均没有放宽。
+
+失败的旧暂存目录仍在，直接运行新 Start 会拒绝覆盖。先从新包显式运行：
+
+  sudo /bin/bash -p "/实际包路径/Archive-UHD770-Failed.command"
+
+它只接受干净 -nvoff 启动、未安装任何候选文件且恢复已成功的失败准备现场，
+先导出报告，停止并检查旧记录器，再将完整旧暂存目录移动到唯一的 root 专用归档。
+日志目录和启动配置不变，不删除现场，不启动测试；条件不满足会 STOP。
+看到 ARCHIVED 后，在同一次正常桌面运行新包 Start-UHD770.command。
+不需要为了归档重启；仍必须等新 Start 成功显示 PREPARED，才重启测试。
 
 如果恢复启动仍有问题，回 Windows 执行包内 Restore-UHD770.ps1：
 

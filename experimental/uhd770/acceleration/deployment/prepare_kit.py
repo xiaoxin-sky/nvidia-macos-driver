@@ -251,7 +251,8 @@ def prepare(candidate, firmware, output, source, config_backup=None, session_con
                                  "note": "Saved reference only. Compare with the actual booting EFI before any later edit."}
     if session_config:
         payload.update(session_payload(session_config.read_bytes(), volume_label))
-        for name in ("Start-UHD770.command", "Run-UHD770-Test.command", "Restore-UHD770.ps1", "README-session.txt"):
+        for name in ("Start-UHD770.command", "Run-UHD770-Test.command", "Archive-UHD770-Failed.command",
+                     "Restore-UHD770.ps1", "README-session.txt"):
             payload[name] = (source / name).read_bytes()
         plan.update({"classification": "opt-in-manual-session-candidate",
                      "driver_installation_enabled": True,

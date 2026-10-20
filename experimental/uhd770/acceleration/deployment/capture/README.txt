@@ -13,8 +13,11 @@ Fixed paths:
 The daemon runs as root when launchd loads it, including boot. It exits after
 300 seconds by default. --duration accepts only 120..600 seconds. KeepAlive is
 false, so it is not repeatedly restarted in the same boot. The independent
-watchdog allows at most three further seconds before killing a stuck parent;
-launchd's normal child-process cleanup is retained. Boot-time execution is
+watchdog allows at most three further seconds before killing a stuck parent
+that has not started cleanup. Controlled cleanup ignores repeat stop signals,
+replaces that watchdog with an independent ten-second hard limit, and writes
+the final marker before disarming its guard. This prevents the duration deadline
+from killing normal cleanup. launchd's child-process cleanup is retained. Boot-time execution is
 asynchronous and does not make login wait for collection.
 
 Permissions required before bootstrap:
@@ -61,5 +64,7 @@ Host-only fixture (Git Bash on Windows or any Bash host):
 The fixture substitutes mock commands, writes only its temporary directory,
 never accesses /Library, and neither installs launchd nor opens a GPU. It checks
 timeouts, stream-start failure, separate reports, marker order, snapshot data,
-  staged file creation, and shell syntax. Native launchd behavior and persistence
+staged file creation, and shell syntax. The companion test_capture_finish.sh
+exercises natural/deadline cleanup races and the independent cleanup hard limit.
+Native launchd behavior and persistence
 across an actual black-screen/reboot remain macOS hardware tests.

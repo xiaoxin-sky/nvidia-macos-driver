@@ -55,7 +55,7 @@ jobs:
           if os.environ.get('UHD770_TEST_SCOPE') == 'prepare':
               sys.path.insert(0, 'experimental/uhd770/acceleration/deployment')
               suite = unittest.defaultTestLoader.loadTestsFromNames([
-                  'test_prepare_kit', 'test_bootstrap',
+                  'test_prepare_kit', 'test_bootstrap', 'test_archive_failed',
                   'test_session_flow.SessionFlowTests.test_native_group_writable_var_run_is_not_a_preparation_lock_parent',
                   'test_session_flow.SessionFlowTests.test_export_preserves_early_root_bootstrap_without_prepared_plan',
               ])
@@ -75,9 +75,12 @@ jobs:
           /bin/bash -p experimental/uhd770/acceleration/deployment/session.sh --help
           /bin/bash -p experimental/uhd770/acceleration/deployment/Start-UHD770.command --help
           /bin/bash -p experimental/uhd770/acceleration/deployment/Run-UHD770-Test.command --help
+          /bin/bash -n experimental/uhd770/acceleration/deployment/Archive-UHD770-Failed.command
+          /bin/bash -p experimental/uhd770/acceleration/deployment/Archive-UHD770-Failed.command --help
       - name: Mock capture and probe supervision (never opens a GPU)
         run: |
           /bin/bash experimental/uhd770/acceleration/deployment/capture/test_capture.sh
+          /bin/bash experimental/uhd770/acceleration/deployment/capture/test_capture_finish.sh
           /bin/bash experimental/uhd770/acceleration/deployment/probes/test-runner.sh
           /bin/bash experimental/uhd770/acceleration/deployment/test_session.sh
       - name: Check launchd template without registering it

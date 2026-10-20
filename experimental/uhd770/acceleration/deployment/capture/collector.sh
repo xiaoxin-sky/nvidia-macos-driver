@@ -20,9 +20,11 @@ capture_configure() {
     C_LOG=/usr/bin/log
     C_DMESG=/sbin/dmesg
     C_IOREG=/usr/sbin/ioreg
+    CAPTURE_FINISH_BUDGET=10
     QUERY_PID=''
     STREAM_PID=''
     WATCHDOG_PID=''
+    FINISH_WATCHDOG_PID=''
     REPORT=''
     BOOTSTRAP=''
     LAST_UTC=unknown
@@ -95,10 +97,33 @@ capture_stop_child() {
     disown "$child" 2>/dev/null || :
 }
 
+# Keep cleanup independently finite after replacing the collection watchdog.
+# This runs in its own child so a blocked write/read in the parent cannot turn
+# off the final hard bound. launchd retains process-group cleanup on parent exit.
+capture_finish_guard() {
+    local owner=$1 budget=$2 timer_pid=''
+    trap - EXIT
+    trap '[ -z "$timer_pid" ] || kill -TERM "$timer_pid" 2>/dev/null || :; exit 0' TERM INT HUP
+    "$C_SLEEP" "$budget" &
+    timer_pid=$!
+    wait "$timer_pid" || return 0
+    timer_pid=''
+    kill -KILL "$owner" 2>/dev/null || :
+}
+
 capture_finish() {
+    # Natural completion and the collection deadline can coincide. Restoring
+    # TERM to its default here previously let that deadline kill normal cleanup
+    # before collector_end was written. Ignore repeat signals while a separate
+    # hard guard bounds this one cleanup attempt.
+    trap '' INT TERM HUP
+    trap - EXIT
     [ "$STOPPING" -eq 0 ] || return 0
     STOPPING=1
-    trap - INT TERM HUP EXIT
+    capture_finish_guard "$$" "$CAPTURE_FINISH_BUDGET" &
+    FINISH_WATCHDOG_PID=$!
+    capture_stop_child "$WATCHDOG_PID"
+    WATCHDOG_PID=''
     capture_stop_child "$QUERY_PID"
     QUERY_PID=''
     capture_stop_child "$STREAM_PID"
@@ -107,8 +132,8 @@ capture_finish() {
         capture_clock
         capture_marker "collector_end reason=$END_REASON gpu_executed=false"
     fi
-    capture_stop_child "$WATCHDOG_PID"
-    WATCHDOG_PID=''
+    capture_stop_child "$FINISH_WATCHDOG_PID"
+    FINISH_WATCHDOG_PID=''
 }
 
 # Called only after root-owned log storage has passed validation. The watchdog
