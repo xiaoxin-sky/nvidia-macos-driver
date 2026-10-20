@@ -1,0 +1,49 @@
+name: UHD 770 deployment tools (no GPU execution)
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/uhd770-deployment.yml'
+      - 'experimental/uhd770/acceleration/deployment/**'
+      - 'experimental/uhd770/acceleration/kit/**'
+permissions:
+  contents: read
+jobs:
+  offline-checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python preparation and archive boundary fixtures
+        run: |
+          python3 -m unittest discover -s experimental/uhd770/acceleration/kit -p 'test_*.py' -v
+          python3 -m unittest discover -s experimental/uhd770/acceleration/deployment -p 'test_*.py' -v
+      - name: Native system Bash syntax and inert command help
+        run: |
+          /bin/bash --version | head -1
+          for script in experimental/uhd770/acceleration/deployment/*.sh experimental/uhd770/acceleration/deployment/capture/*.sh experimental/uhd770/acceleration/deployment/probes/*.sh; do
+            /bin/bash -n "$script"
+          done
+          /bin/bash -p experimental/uhd770/acceleration/deployment/manage.sh --help
+          /bin/bash -p experimental/uhd770/acceleration/deployment/preflight.sh --help
+      - name: Mock capture and probe supervision (never opens a GPU)
+        run: |
+          /bin/bash experimental/uhd770/acceleration/deployment/capture/test_capture.sh
+          /bin/bash experimental/uhd770/acceleration/deployment/probes/test-runner.sh
+      - name: Check launchd template without registering it
+        run: |
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+          path = Path('experimental/uhd770/acceleration/deployment/capture/com.uhd770.mvp.capture.plist')
+          data = plistlib.loads(path.read_bytes())
+          assert data['Label'] == 'com.uhd770.mvp.capture'
+          assert data['RunAtLoad'] is True and data['KeepAlive'] is False
+          assert data['ProgramArguments'] == ['/bin/bash', '/Library/Application Support/UHD770MVP/capture/collector.sh', '--duration', '300']
+          assert data['StandardErrorPath'].startswith('/private/var/log/UHD770MVP/')
+          print('Launchd template validated only; no registration, driver load or GPU execution.')
+          PY

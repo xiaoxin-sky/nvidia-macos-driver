@@ -1,0 +1,15 @@
+{
+  "source": "https://gitlab.com/kernel-firmware/linux-firmware",
+  "commit": "afabaf773c4c2e2c841429933a6a084a5af4d14d",
+  "scope": "Pinned drm-kmod Alder Lake-S DMC, GuC and HuC names, with table fallbacks and redistribution license; presence does not prove firmware execution.",
+  "installation_path": "/Library/NullMoth/firmware",
+  "files": {
+    "i915/adls_dmc_ver2_01.bin": "96e426ed7e80f0cc6644ada1928f4d02b163ff59b14b2339aa28a374d65a5b19",
+    "i915/tgl_guc_70.bin": "2f1f57a1b23d186f2592318d1e07a1365968932841ccb3e7177c516ba006e2f6",
+    "i915/tgl_guc_70.1.1.bin": "5ab0e417fba5ec7588384e21556b30355300d450a35e06ebb94821c012611d77",
+    "i915/tgl_guc_69.0.3.bin": "2a099af887a3289402220df0aa9741948e48d641909c69a68167c49da9d62e91",
+    "i915/tgl_huc.bin": "dbb1316bac13a76427ffa7827e52b5b9affe8a4cadd23dc22e2a54e35c53bdad",
+    "i915/tgl_huc_7.9.3.bin": "dbb1316bac13a76427ffa7827e52b5b9affe8a4cadd23dc22e2a54e35c53bdad",
+    "LICENSES/LICENSE.i915": "8542aeabf2761935122d693561e16766ce1bcc2b0d003204f9040b7d6d929f2e"
+  }
+}
