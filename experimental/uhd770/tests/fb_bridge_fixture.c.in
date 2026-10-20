@@ -17,6 +17,20 @@ typedef uint64_t u64;
 #define DRM_FORMAT_XRGB8888 1
 #define DRM_MODE_DPMS_ON 0
 #define DRM_MODE_DPMS_OFF 3
+#define MODE_OK 0
+#define DRM_MODE_FLAG_INTERLACE 1u
+#define DRM_MODE_FLAG_DBLSCAN 2u
+#define DRM_MODE_FLAG_DBLCLK 4u
+#define DRM_MODE_FLAG_CLKDIV2 8u
+#define DRM_MODE_FLAG_3D_MASK 0x1f0u
+#define DRM_MODE_FLAG_PHSYNC 0x200u
+#define DRM_MODE_FLAG_PVSYNC 0x400u
+#define DRM_MODE_TYPE_PREFERRED 1u
+#define connector_status_connected 1
+struct drm_display_mode;
+struct list_head { struct drm_display_mode *first; };
+struct mode_link { struct drm_display_mode *next; };
+#define list_for_each_entry(p, list, member) for ((p) = (list)->first; (p); (p) = (p)->member.next)
 #define M_TEMP 0
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define container_of(p, t, member) ((t *)((char *)(p) - offsetof(t, member)))
@@ -29,6 +43,7 @@ typedef uint64_t u64;
 #define ERR_PTR(n) ((void *)(intptr_t)(n))
 struct mutex { unsigned depth; };
 #define DEFINE_MUTEX(name) struct mutex name = {0}
+static void mutex_init(struct mutex *m) { m->depth = 0; }
 static void mutex_lock(struct mutex *m) { assert(!m->depth); m->depth = 1; }
 static void mutex_unlock(struct mutex *m) { assert(m->depth); m->depth = 0; }
 struct drm_client_dev;
@@ -42,12 +57,22 @@ struct drm_framebuffer {
 struct drm_display_mode {
     unsigned hdisplay, vdisplay, clock, htotal, vtotal;
     unsigned hsync_start, hsync_end, vsync_start, vsync_end;
+    unsigned flags, type, status;
+    struct mode_link head;
+};
+struct drm_property_blob { void *data; size_t length; };
+struct drm_connector {
+    int status;
+    struct list_head modes;
+    struct drm_property_blob *edid_blob_ptr;
 };
 struct drm_crtc { unsigned gamma_size; };
 struct drm_mode_set {
     struct drm_display_mode *mode;
     struct drm_framebuffer *fb;
     struct drm_crtc *crtc;
+    unsigned num_connectors;
+    struct drm_connector *connectors[1];
 };
 struct drm_client_funcs {
     void *owner;
@@ -56,7 +81,10 @@ struct drm_client_funcs {
     int (*hotplug)(struct drm_client_dev *);
 };
 struct drm_driver { const char *name; };
-struct drm_device { struct drm_driver *driver; };
+struct drm_device {
+    struct drm_driver *driver;
+    struct { struct mutex mutex; } mode_config;
+};
 struct drm_client_dev {
     struct drm_device *dev;
     struct mutex modeset_mutex;
@@ -79,7 +107,7 @@ static void wmb(void) {}
     for ((ms) = (c)->modes; (ms) < (c)->modes + 1; ++(ms))
 
 static struct drm_driver driver = {"i915"};
-static struct drm_device mock_drm = {&driver};
+static struct drm_device mock_drm = {&driver, {{0}}};
 struct pci_dev { struct drm_device *drm; };
 static struct pci_dev pci = {&mock_drm};
 struct mock_device { int attached; };
@@ -96,11 +124,31 @@ static int gamma_error;
 static uint16_t gamma_store[3][NMX_GAMMA_ENTRIES];
 static struct drm_client_dev *registered[8];
 static struct drm_display_mode modes[] = {
-    {3840,2160,594000,4400,2250,4016,4104,2168,2178},
-    {1920,1080,148500,2200,1125,2008,2052,1084,1089},
-    {1280,720,74250,1650,750,1390,1430,725,730},
-    {1024,768,65000,1344,806,1048,1184,771,777}
+    {3840,2160,594000,4400,2250,4016,4104,2168,2178,0,1,0,{NULL}},
+    {1920,1080,148500,2200,1125,2008,2052,1084,1089,0,0,0,{NULL}},
+    {1280,720,74250,1650,750,1390,1430,725,730,0,0,0,{NULL}},
+    {1024,768,65000,1344,806,1048,1184,771,777,0,0,0,{NULL}}
 };
+static uint8_t edid_data[256];
+static struct drm_property_blob edid_blob = {edid_data, sizeof(edid_data)};
+static struct drm_connector mock_connector = {1, {&modes[0]}, &edid_blob};
+static int mode_allocations, duplicate_error, rollback_error_call;
+static struct drm_display_mode *drm_mode_duplicate(struct drm_device *d, const struct drm_display_mode *mode) {
+    (void)d;
+    if (duplicate_error) return NULL;
+    struct drm_display_mode *copy = malloc(sizeof(*copy)); assert(copy);
+    *copy = *mode; copy->head.next = NULL; ++mode_allocations; return copy;
+}
+static void drm_mode_destroy(struct drm_device *d, struct drm_display_mode *mode) {
+    (void)d;
+    if (mode) { assert(mode_allocations > 0); --mode_allocations; free(mode); }
+}
+static int drm_mode_equal(const struct drm_display_mode *a, const struct drm_display_mode *b) {
+    return a->hdisplay == b->hdisplay && a->vdisplay == b->vdisplay && a->clock == b->clock &&
+        a->htotal == b->htotal && a->vtotal == b->vtotal && a->hsync_start == b->hsync_start &&
+        a->hsync_end == b->hsync_end && a->vsync_start == b->vsync_start && a->vsync_end == b->vsync_end &&
+        a->flags == b->flags;
+}
 static void *kzalloc(size_t n, int unused) {
     (void)unused;
     if (alloc_error) return NULL;
@@ -122,18 +170,26 @@ static int drm_client_init(struct drm_device *d, struct drm_client_dev *c,
 }
 static void drm_client_release(struct drm_client_dev *c) {
     assert(!c->registered || unregistering);
+    drm_mode_destroy(c->dev, c->modes[0].mode);
+    c->modes[0].mode = NULL;
     assert(initialized > 0); --initialized;
 }
 static int drm_client_modeset_probe(struct drm_client_dev *c, unsigned w, unsigned h) {
     ++probe_calls;
     c->modes[0].crtc = &mock_crtc;
     if (probe_error_call == probe_calls) return -EIO;
+    drm_mode_destroy(c->dev, c->modes[0].mode);
     c->modes[0].mode = NULL;
-    if (no_output) return 0;
+    c->modes[0].num_connectors = 0;
+    if (no_output || mock_connector.status != connector_status_connected) return 0;
     for (unsigned i = 0; i < ARRAY_SIZE(modes); ++i) {
         if ((!w || modes[i].hdisplay <= w) && (!h || modes[i].vdisplay <= h) &&
             (!mode_cap || modes[i].hdisplay <= mode_cap)) {
-            c->modes[0].mode = &modes[i]; break;
+            c->modes[0].mode = drm_mode_duplicate(c->dev, &modes[i]);
+            assert(c->modes[0].mode);
+            c->modes[0].connectors[0] = &mock_connector;
+            c->modes[0].num_connectors = 1;
+            break;
         }
     }
     return 0;
@@ -142,8 +198,8 @@ static int drm_client_modeset_check(struct drm_client_dev *c) {
     (void)c; ++check_calls; return check_error_call == check_calls ? -EINVAL : 0;
 }
 static int drm_client_modeset_commit(struct drm_client_dev *c) {
-    assert(c->modes[0].fb); ++commit_calls;
-    return commit_error_call == commit_calls ? -EINVAL : 0;
+    assert(!c->modes[0].mode || c->modes[0].fb); ++commit_calls;
+    return commit_error_call == commit_calls || rollback_error_call == commit_calls ? -EINVAL : 0;
 }
 static int drm_client_modeset_dpms(struct drm_client_dev *c, int mode) {
     (void)c; (void)mode; return 0;
@@ -218,7 +274,7 @@ static void cleanup(void) {
         struct drm_client_dev *c = registered[--registered_count];
         unregistering = 1; c->funcs->unregister(c); unregistering = 0;
     }
-    assert(!initialized && !buffers && !maps && !instances);
+    assert(!initialized && !buffers && !maps && !instances && !mode_allocations);
     for (unsigned i = 0; i < MAX_FB; ++i) assert(!fbs[i].dev && !fbs[i].fb);
 }
 static void reset(void) {
@@ -230,6 +286,20 @@ static void reset(void) {
     mock_crtc.gamma_size = NMX_GAMMA_ENTRIES;
     gamma_calls = 0; gamma_error = 0;
     driver.name = "i915";
+    duplicate_error = rollback_error_call = 0;
+    mock_connector.status = connector_status_connected;
+    mock_connector.edid_blob_ptr = &edid_blob;
+    for (unsigned i = 0; i < ARRAY_SIZE(modes); ++i)
+        modes[i].head.next = i + 1 < ARRAY_SIZE(modes) ? &modes[i+1] : NULL;
+    mock_connector.modes.first = &modes[0];
+    memset(edid_data, 0, sizeof(edid_data));
+    for (unsigned i = 1; i < 7; ++i) edid_data[i] = 255;
+    edid_data[126] = 1;
+    for (unsigned block = 0; block < sizeof(edid_data); block += 128) {
+        unsigned sum = 0;
+        for (unsigned i = 0; i < 127; ++i) sum += edid_data[block+i];
+        edid_data[block+127] = (uint8_t)(0u-sum);
+    }
 }
 int main(void) {
     struct nmx_fb_info info;
@@ -265,6 +335,12 @@ int main(void) {
     nmx_fb_close(&device); assert(nmx_fb_power(&device, 1) == ENODEV);
     reset(); create_failures = 1;
     assert(!nmx_fb_open(&device, &info) && info.width == 1920);
+    {
+        struct nmx_display_state bounded;
+        assert(!nmx_fb_display_state(&device, &bounded) && bounded.mode_count == 3);
+        for (unsigned i = 0; i < bounded.mode_count; ++i)
+            assert(bounded.modes[i].width <= 1920 && bounded.modes[i].height <= 1080);
+    }
     reset(); map_failures = 1; map_error = ENOSPC;
     assert(!nmx_fb_open(&device, &info) && info.width == 1920);
     reset(); check_error_call = 1;
@@ -289,6 +365,50 @@ int main(void) {
     reset(); driver.name = "amdgpu";
     assert(!nmx_fb_open(&device, &info) && info.ok);
     reset();
-    puts("Framebuffer bridge fixture passed: 18 display scenarios plus gamma conversion/commit/error cases");
+    {
+        struct nmx_display_state state, after;
+        uint8_t block[128];
+        assert(!nmx_fb_open(&device, &info));
+        assert(!nmx_fb_display_state(&device, &state));
+        assert(state.connected && !state.error && state.mode_count == 4 && state.edid_size == 256);
+        assert(nmx_display_edid_block(&state, 2, block, sizeof(block)));
+        uint32_t smaller = state.modes[1].id, initial = state.current_mode;
+        uint64_t generation = state.generation;
+        void *mapping = fbs[0].fb->buffer->fb->data;
+        assert(!nmx_fb_set_mode(&device, smaller, &after));
+        assert(after.current_mode == smaller && after.generation > generation);
+        assert(fbs[0].fb->buffer->fb->data == mapping && maps == 1 && buffers == 1);
+        assert(nmx_fb_set_mode(&device, 9999, &after) == EINVAL);
+        duplicate_error = 1;
+        assert(nmx_fb_set_mode(&device, initial, &after) == ENOMEM);
+        duplicate_error = 0;
+        check_error_call = check_calls + 1;
+        assert(nmx_fb_set_mode(&device, initial, &after) == EINVAL);
+        assert(after.current_mode == smaller && !after.error);
+        check_error_call = 0;
+        commit_error_call = commit_calls + 1;
+        assert(nmx_fb_set_mode(&device, initial, &after) == EINVAL);
+        assert(after.current_mode == smaller && !after.error);
+        commit_error_call = 0;
+        mock_connector.status = 0;
+        assert(!bridge_hotplug(registered[0]));
+        assert(!nmx_fb_display_state(&device, &after) && !after.connected && !after.edid_size);
+        assert(nmx_fb_set_mode(&device, smaller, &after) == ENXIO);
+        mock_connector.status = connector_status_connected;
+        assert(!bridge_hotplug(registered[0]));
+        assert(!nmx_fb_display_state(&device, &after) && after.connected && after.current_mode == initial);
+        assert(nmx_display_find(&after, smaller));
+        edid_data[10] ^= 1;
+        assert(!nmx_fb_reprobe(&device));
+        assert(!nmx_fb_display_state(&device, &after) && after.connected && !after.edid_size);
+        check_error_call = check_calls + 1;
+        rollback_error_call = commit_calls + 1;
+        assert(nmx_fb_set_mode(&device, smaller, &after) == EINVAL && after.error);
+        assert(fbs[0].fb->buffer->fb->data == mapping && maps == 1);
+        nmx_fb_close(&device);
+        assert(nmx_fb_display_state(&device, &after) == ENODEV);
+    }
+    reset();
+    puts("Framebuffer bridge fixture passed: ownership faults, gamma, EDID, mode IDs, mode rollback and reconnect");
     return 0;
 }

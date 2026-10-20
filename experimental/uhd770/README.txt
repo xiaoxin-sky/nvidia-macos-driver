@@ -30,17 +30,37 @@ The repair batch includes:
 - registration-failure ownership and attach/stop/power-operation synchronization.
 - packed gamma conversion and real DRM color commits, retained IRQ-drain work
   loops, and checked DMA/physical-map arithmetic.
+- real EDID/DDC snapshots, stable progressive mode IDs, fixed-allocation mode
+  switching with atomic checks/rollback, and queued connector notifications.
 
 audit.json maps the reviewed call chain and separates hardware-proven results,
 candidate repairs, known simplified
 interfaces and unverified paths. In particular, hardware VBL pacing,
-dynamic mode/connector notification, sleep/wake and the complete
+native runtime behavior, hardware VBL pacing, sleep/wake and the complete
 ANV/Metal path still require work; this batch must not be advertised as a stable,
 complete graphics driver. A missing Metal plugin in the Intel test package is
 not repaired by the display mapping patch.
 ACCELERATION-GAPS.txt traces the userland boundary and the current plugin's
 explicit refusal to create an Intel WindowServer Metal device. Public plugin
 source exists; its presence and a working framebuffer do not complete that path.
+
+Display protocol scope
+----------------------
+The snapshot ABI supports one active connector. EDID is copied from DRM's actual
+blob only when every declared 128-byte block has a valid checksum and the complete
+blob fits 4096 bytes. Modes are progressive connector timings with stable IDs,
+bounded by the original scanout width/height. Switching preserves the physical
+mapping and pitch, atomically checks/commits the mode and restores the old mode on
+failure. Failure to restore is reported explicitly. Mode catalogs are bounded to
+64 distinct timings per framebuffer lifetime; old IDs are never reused.
+
+DRM hotplug updates the bridge snapshot. A separate native worker polls only this
+snapshot (no I2C probe in VBL), queues a connection interrupt and retains pending
+changes while that interrupt is disabled. IOFramebuffer configuration probing
+applies the new catalog, preventing asynchronous resize during mode enumeration.
+Native DDC reads use one-based EDID blocks. Multi-output, interlaced/doublescan/
+3D modes and allocation growth are explicitly unsupported by this implementation.
+These source implementations do not establish HiDPI, 4K60 or Metal acceleration.
 
 Validation
 ----------

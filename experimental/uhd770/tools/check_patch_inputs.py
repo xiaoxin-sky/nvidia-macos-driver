@@ -36,7 +36,7 @@ def check(port, drm, package):
             path = package / "patches" / patch
             subprocess.run(["git", "-C", str(tree), "apply", "--check", str(path)], check=True)
             subprocess.run(["git", "-C", str(tree), "apply", str(path)], check=True)
-        for name in ["nmx_port.h", "nmx_xnu.h", "nmx_gamma_lut.h", "nmx_checked_ranges.h"]:
+        for name in ["nmx_port.h", "nmx_xnu.h", "nmx_gamma_lut.h", "nmx_checked_ranges.h", "nmx_display_protocol.h"]:
             assert (x / "bsdcompat/include" / name).read_text(encoding="utf-8") == (x / "bsdcompat/include/nmxxnu" / name).read_text(encoding="utf-8"), name
         for script in (package / "tools").glob("*.py"):
             ast.parse(script.read_text(encoding="utf-8"))

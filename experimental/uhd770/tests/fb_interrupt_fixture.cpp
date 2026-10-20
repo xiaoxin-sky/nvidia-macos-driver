@@ -111,7 +111,13 @@ int main() {
     interrupts.end(call);
     assert(interrupts.install(kIOFBVBLInterruptType, count, &target, &calls, &reference) == kIOReturnSuccess);
     assert(interrupts.install(kIOFBConnectInterruptType, count, &target, &calls, &other) == kIOReturnSuccess);
+    assert(interrupts.beginConnect(call));
+    assert(target.references == 2);
+    call.proc(call.target, call.ref);
+    interrupts.end(call);
+    assert(!interrupts.begin(99, call));
     assert(interrupts.setState(other, 0) == kIOReturnSuccess);
+    assert(!interrupts.beginConnect(call));
     assert(interrupts.remove(other) == kIOReturnSuccess);
     interrupts.arm(nullptr, 1);
     assert(timer_arms == 1);
@@ -121,5 +127,5 @@ int main() {
     assert(interrupts.install(kIOFBConnectInterruptType, count, &target, &calls, &other) == kIOReturnNotReady);
     assert(interrupts.remove(reference) == kIOReturnSuccess);
     assert(target.references == 1);
-    std::puts("Framebuffer callback fixture passed: dispatch, disable, invalid handles, concurrent/self unregister, stop/rearm");
+    std::puts("Framebuffer callback fixture passed: VBL/connect dispatch, disable, invalid handles, concurrent/self unregister, stop/rearm");
 }

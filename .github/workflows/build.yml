@@ -145,6 +145,10 @@ jobs:
             "$GITHUB_WORKSPACE/experimental/uhd770/tests/checked_ranges_fixture.cpp" \
             -o /tmp/nmx-checked-ranges-test
           /tmp/nmx-checked-ranges-test | tee /tmp/nmx-checked-ranges-test.log
+          c++ -std=c++17 -Wall -Wextra -Werror -I"$X/bsdcompat/include/nmxxnu" \
+            "$GITHUB_WORKSPACE/experimental/uhd770/tests/display_protocol_fixture.cpp" \
+            -o /tmp/nmx-display-protocol-test
+          /tmp/nmx-display-protocol-test | tee /tmp/nmx-display-protocol-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_irq_fixture.py" \
             "$X/bsdcompat/src/nmx_bus.c" \
             "$GITHUB_WORKSPACE/experimental/uhd770/tests/irq_drain_fixture.c.in" \
@@ -232,7 +236,7 @@ jobs:
           BIN="$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU"
           xcrun nm -arch x86_64 "$BIN" > /tmp/nmxgpu-symbols.txt \
             || { echo "::error::cannot read NMXGPU symbols"; exit 1; }
-          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set; do
+          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set _nmx_fb_display_state _nmx_fb_set_mode _nmx_fb_reprobe; do
             grep -Eq "[[:space:]][TtDdSsBbRr][[:space:]]$sym$" /tmp/nmxgpu-symbols.txt \
               || { echo "::error::missing defined symbol $sym (undefined imports do not count)"; exit 1; }
           done
@@ -278,6 +282,7 @@ jobs:
           cp /tmp/nmx-attach-lifecycle-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-gamma-lut-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-checked-ranges-test.log /tmp/nmx-irq-drain-test.c /tmp/nmx-irq-drain-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-display-protocol-test.log "$X/bsdcompat/include/nmx_display_protocol.h" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/xnu/nmx_fb_interrupts.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/xnu/nmx_attach_lifecycle.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/bsdcompat/include/nmx_gamma_lut.h" "$S/kpi/drm-kmod/drivers/gpu/drm/drm_color_mgmt.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true

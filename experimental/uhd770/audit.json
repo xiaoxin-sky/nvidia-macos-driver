@@ -23,15 +23,17 @@
     "Treat CLUT as unsupported for the sole direct XRGB8888 format; validate connection/color-depth requests and report failed power changes.",
     "Only signal attach completion after its final stage logging, so stop cannot tear down shared services while attach still logs.",
     "Retain native IRQ work loops under the BSD interrupt-list lock; draining no longer dereferences a cookie that teardown can free.",
-    "Reject zero/wrapping DMA ranges, unsafe IOKit mapping spans, oversized page lists and bus-DMA total sizes before exposing an address."
+    "Reject zero/wrapping DMA ranges, unsafe IOKit mapping spans, oversized page lists and bus-DMA total sizes before exposing an address.",
+    "Copy real connector EDID and progressive timings into a stable-ID one-display snapshot; reject invalid EDID and modes outside the immutable scanout allocation.",
+    "Implement native DDC/mode enumeration, atomic interactive mode commits with rollback, and generation-based connection notifications.",
+    "Serialize hotplug, mode switch, gamma and power transactions; mode catalog replacement runs through IOFramebuffer configuration probing rather than asynchronously racing count/enumeration."
   ],
   "known_display_limitations": [
     "Software VBL callback lifetime now has a real implementation and host concurrency tests; real hardware IRQ pacing remains unverified.",
     "VBL is software timed; real display IRQ pacing is unverified.",
     "Gamma now has a DRM atomic commit implementation and host conversion/error tests; visible color behavior remains hardware-unverified. Indexed CLUT is not applicable to the advertised direct format.",
-    "Bounded initial fallback exists. Interactive mode changes and DRM connector notifications into IOFramebuffer remain incomplete; connection-interrupt registration explicitly reports unsupported.",
-    "The GGTT mapping candidate intentionally holds an awake reference; sleep/wake is not established.",
-    "The native class has no explicit DRM connector EDID-to-macOS DDC bridge; monitor identity/mode metadata and the connection-notification protocol still need integration."
+    "Single-connector dynamic modes/DDC/notification code is implemented. Only progressive modes inside the original scanout dimensions are exposed; allocation growth, multiple outputs and interlaced/doublescan/3D modes are unsupported.",
+    "The GGTT mapping candidate intentionally holds an awake reference; sleep/wake is not established."
   ],
   "acceleration_gaps": [
     "The tested install path installs the NMXGPU display/DRM layer only.",
@@ -83,13 +85,14 @@
     "limits": "These tests do not model IOKit scheduling, actual DRM locking, GPU/IOMMU transactions or visible output. macOS compilation is a separate gate.",
     "gamma": "Passed 1/3-channel 8/16-bit, interpolation, unaligned input, maximum/invalid metadata and bridge commit/error tests",
     "irq_drain": "Passed filtering, reference balancing and cookie teardown injected immediately after list unlock in the actual patched BSD drain function",
-    "mapping_arithmetic": "Passed zero, overflow, inclusive endpoint and page-span checks in the shared helper; native DMA/IOMMU transactions are not modeled"
+    "mapping_arithmetic": "Passed zero, overflow, inclusive endpoint and page-span checks in the shared helper; native DMA/IOMMU transactions are not modeled",
+    "display_protocol": "Passed actual bridge mode switch/rollback/reconnect, stable IDs, fixed-allocation limits, invalid EDID, timing bounds and one-based DDC block checks on Windows; native macOS compile/IOFramebuffer scheduling remains a CI/hardware boundary."
   },
   "hardware_test_readiness": {
     "ready": false,
     "policy": "Do not ask the user for another boot test while the source completeness review and remaining code blockers are open.",
     "remaining_code_review": [
-      "Complete DRM connector EDID/DDC, connection notification and interactive mode protocol",
+      "Verify native single-display EDID/mode/notification integration and lifecycle through CI; initial scanout allocation cannot grow dynamically",
       "Establish native sleep/wake and per-device IOMMU/resource ownership contracts for the supported configuration",
       "Build/package the matched Intel userland components and implement/test WindowServer admission, IOSurface and presentation contracts"
     ]

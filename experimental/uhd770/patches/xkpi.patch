@@ -30,6 +30,93 @@
 +}
 +#endif
 --- /dev/null
++++ b/bsdcompat/include/nmx_display_protocol.h
+@@ -0,0 +1,84 @@
++/*
++ * One-display DRM/IOFramebuffer snapshot ABI, shared by the C bridge and IOKit.
++ * Mode IDs are positive, stable for a framebuffer lifetime and never reassigned
++ * after unplug. Only progressive, validated modes inside the immutable scanout
++ * allocation can be advertised. EDID is copied; no DRM pointer crosses the ABI.
++ * Changing limits/layout requires both boundary copies and host fixtures to move
++ * together. This describes display output, not Metal or GPU command execution.
++ */
++#ifndef NMX_DISPLAY_PROTOCOL_H
++#define NMX_DISPLAY_PROTOCOL_H
++#include <stdint.h>
++#include <string.h>
++#define NMX_DISPLAY_MODES 64u
++#define NMX_DISPLAY_EDID_BYTES 4096u
++#define NMX_MODE_PREFERRED 1u
++#define NMX_MODE_HSYNC_POSITIVE 2u
++#define NMX_MODE_VSYNC_POSITIVE 4u
++struct nmx_display_mode {
++    uint32_t id, width, height, pclk_khz;
++    uint32_t htotal, vtotal, hsync_start, hsync_end, vsync_start, vsync_end;
++    uint32_t flags;
++};
++struct nmx_display_state {
++    uint64_t generation;
++    uint32_t connected, mode_count, current_mode, edid_size;
++    int32_t error;
++    struct nmx_display_mode modes[NMX_DISPLAY_MODES];
++    uint8_t edid[NMX_DISPLAY_EDID_BYTES];
++};
++
++/* Validate timings before they reach Apple timing arithmetic or fixed scanout. */
++static inline int nmx_display_mode_valid(const struct nmx_display_mode *mode,
++                                         uint32_t width, uint32_t height)
++{
++    uint64_t pixels, milli_hz;
++    if (!mode || !mode->id || !mode->width || !mode->height || !mode->pclk_khz ||
++        mode->width > width || mode->height > height ||
++        mode->width > mode->hsync_start || mode->hsync_start >= mode->hsync_end ||
++        mode->hsync_end > mode->htotal || mode->height > mode->vsync_start ||
++        mode->vsync_start >= mode->vsync_end || mode->vsync_end > mode->vtotal)
++        return 0;
++    pixels = (uint64_t)mode->htotal * mode->vtotal;
++    milli_hz = (uint64_t)mode->pclk_khz * 1000000u / pixels;
++    return milli_hz >= 20000 && milli_hz <= 500000;
++}
++
++static inline const struct nmx_display_mode *nmx_display_find(
++    const struct nmx_display_state *state, uint32_t id)
++{
++    if (!state || !id || state->mode_count > NMX_DISPLAY_MODES) return 0;
++    for (uint32_t i = 0; i < state->mode_count; i++)
++        if (state->modes[i].id == id) return &state->modes[i];
++    return 0;
++}
++
++/* Require complete, checksummed EDID including declared extension blocks.
++ * Truncated/oversized blobs are unavailable rather than silently rewritten. */
++static inline uint32_t nmx_display_edid_size(const void *bytes, uint64_t size)
++{
++    static const uint8_t header[8] = {0,255,255,255,255,255,255,0};
++    const uint8_t *data = (const uint8_t *)bytes;
++    uint32_t length;
++    if (!data || size < 128 || memcmp(data, header, sizeof(header))) return 0;
++    length = ((uint32_t)data[126] + 1) * 128u;
++    if (length > size || length > NMX_DISPLAY_EDID_BYTES) return 0;
++    for (uint32_t block = 0; block < length; block += 128) {
++        unsigned sum = 0;
++        for (unsigned i = 0; i < 128; i++) sum += data[block + i];
++        if (sum & 255u) return 0;
++    }
++    return length;
++}
++
++/* DDC uses one-based 128-byte blocks; preserve output on invalid requests. */
++static inline int nmx_display_edid_block(const struct nmx_display_state *state,
++                                         uint32_t block, void *out, uint64_t capacity)
++{
++    if (!state || !state->connected || !out || !block || capacity < 128 ||
++        state->edid_size > NMX_DISPLAY_EDID_BYTES || block > state->edid_size / 128)
++        return 0;
++    memcpy(out, state->edid + (block - 1) * 128u, 128);
++    return 1;
++}
++#endif
+--- /dev/null
 +++ b/bsdcompat/include/nmx_gamma_lut.h
 @@ -0,0 +1,50 @@
 +/*
@@ -84,12 +171,25 @@
 +#endif
 --- a/bsdcompat/include/nmx_port.h
 +++ b/bsdcompat/include/nmx_port.h
-@@ -29,6 +29,15 @@
+@@ -2,6 +2,7 @@
+ #ifndef NMX_PORT_H
+ #define NMX_PORT_H
+ #include <stdint.h>
++#include "nmx_display_protocol.h"
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -29,6 +30,20 @@
  int nmx_fb_open(void *dev, struct nmx_fb_info *out);
  void nmx_fb_close(void *dev);
  int nmx_fb_power(void *dev, int on);
 +/* Packed IOFramebuffer gamma: positive errno; synchronous DRM color commit. */
 +int nmx_fb_gamma(void *dev, unsigned channels, unsigned count, unsigned bits, const void *data);
++/* Copied single-output state and mode transaction; positive errno. Scanout's
++ * physical allocation/pitch never change. IDs are snapshot IDs, not array indices. */
++int nmx_fb_display_state(void *dev, struct nmx_display_state *out);
++int nmx_fb_reprobe(void *dev);
++int nmx_fb_set_mode(void *dev, uint32_t id, struct nmx_display_state *out);
 +
 +/* Alder Lake-S scan-out: positive errno; success transfers a pinned mapping
 + * cookie to the display bridge. Unmap before deleting its DRM framebuffer. */
@@ -150,6 +250,93 @@
 +}
 +#endif
 --- /dev/null
++++ b/bsdcompat/include/nmxxnu/nmx_display_protocol.h
+@@ -0,0 +1,84 @@
++/*
++ * One-display DRM/IOFramebuffer snapshot ABI, shared by the C bridge and IOKit.
++ * Mode IDs are positive, stable for a framebuffer lifetime and never reassigned
++ * after unplug. Only progressive, validated modes inside the immutable scanout
++ * allocation can be advertised. EDID is copied; no DRM pointer crosses the ABI.
++ * Changing limits/layout requires both boundary copies and host fixtures to move
++ * together. This describes display output, not Metal or GPU command execution.
++ */
++#ifndef NMX_DISPLAY_PROTOCOL_H
++#define NMX_DISPLAY_PROTOCOL_H
++#include <stdint.h>
++#include <string.h>
++#define NMX_DISPLAY_MODES 64u
++#define NMX_DISPLAY_EDID_BYTES 4096u
++#define NMX_MODE_PREFERRED 1u
++#define NMX_MODE_HSYNC_POSITIVE 2u
++#define NMX_MODE_VSYNC_POSITIVE 4u
++struct nmx_display_mode {
++    uint32_t id, width, height, pclk_khz;
++    uint32_t htotal, vtotal, hsync_start, hsync_end, vsync_start, vsync_end;
++    uint32_t flags;
++};
++struct nmx_display_state {
++    uint64_t generation;
++    uint32_t connected, mode_count, current_mode, edid_size;
++    int32_t error;
++    struct nmx_display_mode modes[NMX_DISPLAY_MODES];
++    uint8_t edid[NMX_DISPLAY_EDID_BYTES];
++};
++
++/* Validate timings before they reach Apple timing arithmetic or fixed scanout. */
++static inline int nmx_display_mode_valid(const struct nmx_display_mode *mode,
++                                         uint32_t width, uint32_t height)
++{
++    uint64_t pixels, milli_hz;
++    if (!mode || !mode->id || !mode->width || !mode->height || !mode->pclk_khz ||
++        mode->width > width || mode->height > height ||
++        mode->width > mode->hsync_start || mode->hsync_start >= mode->hsync_end ||
++        mode->hsync_end > mode->htotal || mode->height > mode->vsync_start ||
++        mode->vsync_start >= mode->vsync_end || mode->vsync_end > mode->vtotal)
++        return 0;
++    pixels = (uint64_t)mode->htotal * mode->vtotal;
++    milli_hz = (uint64_t)mode->pclk_khz * 1000000u / pixels;
++    return milli_hz >= 20000 && milli_hz <= 500000;
++}
++
++static inline const struct nmx_display_mode *nmx_display_find(
++    const struct nmx_display_state *state, uint32_t id)
++{
++    if (!state || !id || state->mode_count > NMX_DISPLAY_MODES) return 0;
++    for (uint32_t i = 0; i < state->mode_count; i++)
++        if (state->modes[i].id == id) return &state->modes[i];
++    return 0;
++}
++
++/* Require complete, checksummed EDID including declared extension blocks.
++ * Truncated/oversized blobs are unavailable rather than silently rewritten. */
++static inline uint32_t nmx_display_edid_size(const void *bytes, uint64_t size)
++{
++    static const uint8_t header[8] = {0,255,255,255,255,255,255,0};
++    const uint8_t *data = (const uint8_t *)bytes;
++    uint32_t length;
++    if (!data || size < 128 || memcmp(data, header, sizeof(header))) return 0;
++    length = ((uint32_t)data[126] + 1) * 128u;
++    if (length > size || length > NMX_DISPLAY_EDID_BYTES) return 0;
++    for (uint32_t block = 0; block < length; block += 128) {
++        unsigned sum = 0;
++        for (unsigned i = 0; i < 128; i++) sum += data[block + i];
++        if (sum & 255u) return 0;
++    }
++    return length;
++}
++
++/* DDC uses one-based 128-byte blocks; preserve output on invalid requests. */
++static inline int nmx_display_edid_block(const struct nmx_display_state *state,
++                                         uint32_t block, void *out, uint64_t capacity)
++{
++    if (!state || !state->connected || !out || !block || capacity < 128 ||
++        state->edid_size > NMX_DISPLAY_EDID_BYTES || block > state->edid_size / 128)
++        return 0;
++    memcpy(out, state->edid + (block - 1) * 128u, 128);
++    return 1;
++}
++#endif
+--- /dev/null
 +++ b/bsdcompat/include/nmxxnu/nmx_gamma_lut.h
 @@ -0,0 +1,50 @@
 +/*
@@ -204,12 +391,25 @@
 +#endif
 --- a/bsdcompat/include/nmxxnu/nmx_port.h
 +++ b/bsdcompat/include/nmxxnu/nmx_port.h
-@@ -29,6 +29,15 @@
+@@ -2,6 +2,7 @@
+ #ifndef NMX_PORT_H
+ #define NMX_PORT_H
+ #include <stdint.h>
++#include "nmx_display_protocol.h"
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -29,6 +30,20 @@
  int nmx_fb_open(void *dev, struct nmx_fb_info *out);
  void nmx_fb_close(void *dev);
  int nmx_fb_power(void *dev, int on);
 +/* Packed IOFramebuffer gamma: positive errno; synchronous DRM color commit. */
 +int nmx_fb_gamma(void *dev, unsigned channels, unsigned count, unsigned bits, const void *data);
++/* Copied single-output state and mode transaction; positive errno. Scanout's
++ * physical allocation/pitch never change. IDs are snapshot IDs, not array indices. */
++int nmx_fb_display_state(void *dev, struct nmx_display_state *out);
++int nmx_fb_reprobe(void *dev);
++int nmx_fb_set_mode(void *dev, uint32_t id, struct nmx_display_state *out);
 +
 +/* Alder Lake-S scan-out: positive errno; success transfers a pinned mapping
 + * cookie to the display bridge. Unmap before deleting its DRM framebuffer. */
@@ -408,7 +608,7 @@
  # nmxxnu/ holds the two boundary headers for the IOKit side (which must not see the FreeBSD include tree); they are
  # copies of bsdcompat/include's, refreshed here so a declaration added there always reaches the C++ side
 -cp -p $X/bsdcompat/include/nmx_port.h $X/bsdcompat/include/nmx_xnu.h $X/bsdcompat/include/nmxxnu/
-+cp -p $X/bsdcompat/include/nmx_port.h $X/bsdcompat/include/nmx_xnu.h $X/bsdcompat/include/nmx_gamma_lut.h $X/bsdcompat/include/nmx_checked_ranges.h $X/bsdcompat/include/nmxxnu/
++cp -p $X/bsdcompat/include/nmx_port.h $X/bsdcompat/include/nmx_xnu.h $X/bsdcompat/include/nmx_gamma_lut.h $X/bsdcompat/include/nmx_checked_ranges.h $X/bsdcompat/include/nmx_display_protocol.h $X/bsdcompat/include/nmxxnu/
  exec xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -ffile-prefix-map=/Volumes/MiniData/build/gpu-src=/src -mkernel -fapple-kext -nostdinc -isysroot "$SDK" -I"$KF" \
    -I$X/bsdcompat/include/nmxxnu -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
    -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -O2 -g0 -Wall -Wno-unused-parameter \
@@ -576,9 +776,14 @@
  	}
 --- a/override/src/nmx_fb_bridge.c
 +++ b/override/src/nmx_fb_bridge.c
-@@ -7,15 +7,21 @@
+@@ -5,38 +5,62 @@
+  * output's preferred mode, create one XRGB8888 buffer as large as the largest mode, point every lit CRTC at it and
+  * commit. The buffer's CPU view is the GPU aperture (a CPU-visible, contiguous VRAM buffer read through the BAR), so
   * the kext publishes its physical range as the IOFramebuffer's VRAM and WindowServer draws straight into what the
-  * display engine scans out. Smaller outputs show the top-left of the buffer (mirrored), as fbdev does.
+- * display engine scans out. Smaller outputs show the top-left of the buffer (mirrored), as fbdev does.
++ * display engine scans out. This snapshot ABI supports one active connector.
++ * Multiple active outputs are rejected rather than merged into one inaccurate
++ * macOS display. Interactive changes stay inside the immutable buffer bounds.
   *
 - * Any step that fails leaves no client behind and reports why; the kext then publishes no framebuffer.
 + * Failures before registration release all resources. After registration DRM owns
@@ -599,7 +804,11 @@
  #include <drm/drm_fourcc.h>
  #include <drm/drm_framebuffer.h>
  #include <drm/drm_modes.h>
-@@ -25,18 +31,26 @@
+ #include <drm/drm_crtc.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_property.h>
+ 
+ #include <sys/bus.h>
  
  #include "nmx_xnu.h"
  #include "nmx_port.h"
@@ -617,6 +826,12 @@
 +    int hotplug_error;
 +    void *intel_scanout;
      struct nmx_fb_info info;
++    /* Serialize DRM client transactions; native callers hold fbs_mutex first,
++     * hotplug owns its DRM client and takes only this operation mutex. */
++    struct mutex operation_mutex;
++    struct nmx_display_state display;
++    struct drm_display_mode *catalog[NMX_DISPLAY_MODES];
++    unsigned catalog_count;
  };
  
  /* one bridge per PCI function the port drives */
@@ -626,11 +841,98 @@
  
  /*
   * amdgpu may put scan-out buffers in system memory on APUs (scatter-gather display); the bridge needs them in
-@@ -68,22 +82,38 @@
+@@ -68,22 +92,135 @@
      return drm;
  }
  
 -/* a monitor plugged or unplugged: probe again and light what is there now with the same buffer */
++/* Snapshot IDs survive connector reprobes: never reuse a catalog entry for a
++ * different timing while macOS may still have an outstanding mode ID. */
++static int bridge_export_mode(struct nmx_fb *fb, const struct drm_display_mode *mode,
++                              struct nmx_display_state *state)
++{
++    struct nmx_display_mode value = {0};
++    unsigned index;
++    if (mode->status != MODE_OK || mode->flags & (DRM_MODE_FLAG_INTERLACE |
++        DRM_MODE_FLAG_DBLSCAN | DRM_MODE_FLAG_DBLCLK | DRM_MODE_FLAG_CLKDIV2 | DRM_MODE_FLAG_3D_MASK))
++        return 0;
++    value.id = 1;
++    value.width = mode->hdisplay; value.height = mode->vdisplay;
++    value.pclk_khz = mode->clock;
++    value.htotal = mode->htotal; value.vtotal = mode->vtotal;
++    value.hsync_start = mode->hsync_start; value.hsync_end = mode->hsync_end;
++    value.vsync_start = mode->vsync_start; value.vsync_end = mode->vsync_end;
++    if (!nmx_display_mode_valid(&value, fb->info.width, fb->info.height)) return 0;
++    for (index = 0; index < fb->catalog_count; index++)
++        if (drm_mode_equal(fb->catalog[index], mode)) break;
++    if (index == NMX_DISPLAY_MODES) return 0;
++    if (index == fb->catalog_count) {
++        fb->catalog[index] = drm_mode_duplicate(fb->client.dev, mode);
++        if (!fb->catalog[index]) return -ENOMEM;
++        fb->catalog_count++;
++    }
++    value.id = index + 1;
++    if (mode->type & DRM_MODE_TYPE_PREFERRED) value.flags |= NMX_MODE_PREFERRED;
++    if (mode->flags & DRM_MODE_FLAG_PHSYNC) value.flags |= NMX_MODE_HSYNC_POSITIVE;
++    if (mode->flags & DRM_MODE_FLAG_PVSYNC) value.flags |= NMX_MODE_VSYNC_POSITIVE;
++    if (!nmx_display_find(state, value.id) && state->mode_count < NMX_DISPLAY_MODES)
++        state->modes[state->mode_count++] = value;
++    return (int)value.id;
++}
++
++/* Called with operation_mutex. Match DRM's client->mode_config lock ordering.
++ * No connector/blob pointer escapes; allocate the large temporary off-stack. */
++static int bridge_snapshot(struct nmx_fb *fb, int error)
++{
++    struct nmx_display_state *next = kzalloc(sizeof(*next), GFP_KERNEL);
++    struct drm_mode_set *ms, *selected = NULL;
++    struct drm_connector *connector;
++    struct drm_display_mode *mode;
++    unsigned active = 0;
++    int id, ret = 0;
++    if (!next) return -ENOMEM;
++    next->error = error;
++    mutex_lock(&fb->client.modeset_mutex);
++    drm_client_for_each_modeset(ms, &fb->client) {
++        if (!ms->mode || !ms->num_connectors) continue;
++        active += ms->num_connectors;
++        selected = ms;
++    }
++    if (active > 1) { ret = -EOPNOTSUPP; goto unlock; }
++    if (!selected) goto publish;
++    connector = selected->connectors[0];
++    mutex_lock(&fb->client.dev->mode_config.mutex);
++    if (connector->status != connector_status_connected) goto connector_done;
++    next->connected = 1;
++    id = bridge_export_mode(fb, selected->mode, next);
++    if (id <= 0) { ret = id ? id : -EINVAL; goto connector_done; }
++    next->current_mode = (uint32_t)id;
++    list_for_each_entry(mode, &connector->modes, head) {
++        id = bridge_export_mode(fb, mode, next);
++        if (id < 0) { ret = id; goto connector_done; }
++    }
++    if (connector->edid_blob_ptr) {
++        next->edid_size = nmx_display_edid_size(connector->edid_blob_ptr->data,
++                                               connector->edid_blob_ptr->length);
++        if (next->edid_size)
++            memcpy(next->edid, connector->edid_blob_ptr->data, next->edid_size);
++    }
++connector_done:
++    mutex_unlock(&fb->client.dev->mode_config.mutex);
++publish:
++    if (!ret) {
++        next->generation = fb->display.generation;
++        if (memcmp(next, &fb->display, sizeof(*next))) {
++            next->generation++;
++            fb->display = *next;
++        }
++    }
++unlock:
++    mutex_unlock(&fb->client.modeset_mutex);
++    kfree(next);
++    return ret;
++}
++
 +/* Registration calls this synchronously, too. info must already describe the
 + * allocated buffer; probe bounds prevent later modes from exceeding its size. */
  static int bridge_hotplug(struct drm_client_dev *client)
@@ -639,10 +941,13 @@
      struct drm_mode_set *ms;
 -    if (fb->buffer == NULL)
 +    int ret = 0;
-+    if (READ_ONCE(fb->closed) || !fb->buffer)
++    mutex_lock(&fb->operation_mutex);
++    if (READ_ONCE(fb->closed) || !fb->buffer) {
++        mutex_unlock(&fb->operation_mutex);
          return 0;
 -    if (drm_client_modeset_probe(client, fb->info.width, fb->info.height) != 0)
 -        return 0;
++    }
 +    if (!fb->info.width || !fb->info.height) {
 +        ret = -EINVAL;
 +        goto done;
@@ -667,18 +972,29 @@
 +        nmx_gpu_stage_record("fb.hotplug.commit.after", ret);
 +    }
 +done:
++    if (!ret) ret = bridge_snapshot(fb, 0);
 +    fb->hotplug_error = ret;
++    if (ret) {
++        /* Do not present an uncommitted reprobed timing as the active display. */
++        fb->display.error = ret;
++        fb->display.generation++;
++    }
++    mutex_unlock(&fb->operation_mutex);
 +    return ret;
  }
  
  static void bridge_free(struct nmx_fb *fb);
-@@ -91,21 +121,30 @@
+@@ -91,21 +228,34 @@
  /* a userland KMS client (a DRM master) closed: put our scan-out back on the outputs */
  static int bridge_restore(struct drm_client_dev *client)
  {
 -    return drm_client_modeset_commit(client);
 +    struct nmx_fb *fb = container_of(client, struct nmx_fb, client);
-+    return READ_ONCE(fb->closed) ? -ENODEV : drm_client_modeset_commit(client);
++    int ret;
++    mutex_lock(&fb->operation_mutex);
++    ret = READ_ONCE(fb->closed) ? -ENODEV : drm_client_modeset_commit(client);
++    mutex_unlock(&fb->operation_mutex);
++    return ret;
  }
  
  /*
@@ -708,7 +1024,7 @@
      bridge_free(fb);
  }
  
-@@ -116,45 +155,50 @@
+@@ -116,52 +266,63 @@
      .hotplug = bridge_hotplug,
  };
  
@@ -740,6 +1056,8 @@
 -    if (fb->buffer != NULL)
 -        drm_client_framebuffer_delete(fb->buffer);
 +    bridge_release_buffer(fb);
++    for (unsigned i = 0; i < fb->catalog_count; i++)
++        drm_mode_destroy(fb->client.dev, fb->catalog[i]);
      drm_client_release(&fb->client);
      kfree(fb);
  }
@@ -758,6 +1076,7 @@
      const struct drm_display_mode *best = NULL;
 -    int slot = -1, err;
 -
++    unsigned connectors = 0;
 +    int err;
      memset(out, 0, sizeof(*out));
 -    if (drm == NULL)
@@ -787,7 +1106,24 @@
      }
      /* the buffer is as large as the largest mode any connected output asked for */
      mutex_lock(&fb->client.modeset_mutex);
-@@ -177,69 +221,186 @@
+-    drm_client_for_each_modeset(ms, &fb->client)
+-        if (ms->mode != NULL && (best == NULL ||
+-            (u64)ms->mode->hdisplay * ms->mode->vdisplay > (u64)best->hdisplay * best->vdisplay))
++    drm_client_for_each_modeset(ms, &fb->client) {
++        if (!ms->mode) continue;
++        connectors += ms->num_connectors;
++        if (best == NULL || (u64)ms->mode->hdisplay * ms->mode->vdisplay >
++                            (u64)best->hdisplay * best->vdisplay)
+             best = ms->mode;
++    }
+     if (best != NULL) {
+         out->width = best->hdisplay;
+         out->height = best->vdisplay;
+@@ -174,72 +335,191 @@
+         out->vsync_end = best->vsync_end;
+     }
+     mutex_unlock(&fb->client.modeset_mutex);
++    if (connectors > 1) return EOPNOTSUPP;
      if (best == NULL) {
          printf("NullMoth display: no output is connected\n");
          err = ENXIO;
@@ -926,6 +1262,7 @@
 +    fb = kzalloc(sizeof(*fb), GFP_KERNEL);
 +    if (!fb)
 +        return ENOMEM;
++    mutex_init(&fb->operation_mutex);
 +    mutex_lock(&fbs_mutex);
 +    for (int i = 0; i < MAX_FB; i++) {
 +        if (fbs[i].dev == devp) {
@@ -1004,7 +1341,7 @@
  }
  
  /*
-@@ -248,16 +409,79 @@
+@@ -248,16 +528,193 @@
   */
  void nmx_fb_close(void *dev)
  {
@@ -1018,11 +1355,13 @@
 +    for (int i = 0; i < MAX_FB; i++) {
 +        struct nmx_fb *fb = fbs[i].fb;
 +        if (fbs[i].dev == dev && fb) {
++            mutex_lock(&fb->operation_mutex);
 +            WRITE_ONCE(fb->closed, 1);
 +            if (fb->buffer) {
 +                int ret = drm_client_modeset_dpms(&fb->client, DRM_MODE_DPMS_OFF);
 +                nmx_gpu_stage_record("fb.close.dpms", ret);
 +            }
++            mutex_unlock(&fb->operation_mutex);
 +        }
 +    }
 +    mutex_unlock(&fbs_mutex);
@@ -1042,7 +1381,9 @@
 +    for (int i = 0; i < MAX_FB; i++) {
 +        struct nmx_fb *fb = fbs[i].fb;
 +        if (fbs[i].dev == dev && fb && fb->published && !READ_ONCE(fb->closed)) {
++            mutex_lock(&fb->operation_mutex);
 +            err = -drm_client_modeset_dpms(&fb->client, on ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF);
++            mutex_unlock(&fb->operation_mutex);
 +            break;
 +        }
 +    }
@@ -1072,6 +1413,7 @@
 +        struct drm_mode_set *ms;
 +        if (fbs[i].dev != dev || !fb || !fb->published || READ_ONCE(fb->closed))
 +            continue;
++        mutex_lock(&fb->operation_mutex);
 +        err = ENXIO;
 +        mutex_lock(&fb->client.modeset_mutex);
 +        drm_client_for_each_modeset(ms, &fb->client) {
@@ -1089,11 +1431,120 @@
 +                break;
 +        }
 +        mutex_unlock(&fb->client.modeset_mutex);
++        mutex_unlock(&fb->operation_mutex);
 +        break;
 +    }
 +    mutex_unlock(&fbs_mutex);
 +    kfree(lut);
 +    return err;
++}
++
++/* Lookup stays protected until the copied snapshot or transaction completes;
++ * unregister removes the slot under the same mutex before releasing resources. */
++int nmx_fb_display_state(void *dev, struct nmx_display_state *out)
++{
++    int err = ENODEV;
++    if (!dev || !out) return EINVAL;
++    memset(out, 0, sizeof(*out));
++    mutex_lock(&fbs_mutex);
++    for (int i = 0; i < MAX_FB; i++) {
++        struct nmx_fb *fb = fbs[i].fb;
++        if (fbs[i].dev != dev || !fb || !fb->published || READ_ONCE(fb->closed)) continue;
++        mutex_lock(&fb->operation_mutex);
++        *out = fb->display;
++        mutex_unlock(&fb->operation_mutex);
++        err = 0;
++        break;
++    }
++    mutex_unlock(&fbs_mutex);
++    return err;
++}
++
++int nmx_fb_reprobe(void *dev)
++{
++    int err = ENODEV;
++    mutex_lock(&fbs_mutex);
++    for (int i = 0; i < MAX_FB; i++) {
++        struct nmx_fb *fb = fbs[i].fb;
++        if (fbs[i].dev == dev && fb && fb->published && !READ_ONCE(fb->closed)) {
++            err = -bridge_hotplug(&fb->client);
++            break;
++        }
++    }
++    mutex_unlock(&fbs_mutex);
++    return err;
++}
++
++/* One active connector, immutable allocation. Only replace the owned DRM mode;
++ * never release pages/macOS mappings on a mode change. Roll back both software
++ * mode and hardware commit on any failure, and surface failed rollback explicitly. */
++int nmx_fb_set_mode(void *dev, uint32_t id, struct nmx_display_state *out)
++{
++    int ret = -ENODEV;
++    if (!dev || !out || !id) return EINVAL;
++    memset(out, 0, sizeof(*out));
++    mutex_lock(&fbs_mutex);
++    for (int i = 0; i < MAX_FB; i++) {
++        struct nmx_fb *fb = fbs[i].fb;
++        struct drm_mode_set *ms, *selected = NULL;
++        struct drm_display_mode *old, *replacement;
++        unsigned connectors = 0;
++        int rollback;
++        if (fbs[i].dev != dev || !fb || !fb->published || READ_ONCE(fb->closed)) continue;
++        mutex_lock(&fb->operation_mutex);
++        if (!fb->display.connected || fb->display.error) { ret = -ENXIO; goto done; }
++        if (!nmx_display_find(&fb->display, id) || id > fb->catalog_count) { ret = -EINVAL; goto done; }
++        if (fb->display.current_mode == id) { ret = 0; goto done; }
++        mutex_lock(&fb->client.modeset_mutex);
++        drm_client_for_each_modeset(ms, &fb->client) {
++            if (!ms->mode || !ms->num_connectors) continue;
++            selected = ms;
++            connectors += ms->num_connectors;
++        }
++        if (connectors != 1 || !selected) {
++            mutex_unlock(&fb->client.modeset_mutex);
++            ret = -EOPNOTSUPP;
++            goto done;
++        }
++        replacement = drm_mode_duplicate(fb->client.dev, fb->catalog[id - 1]);
++        if (!replacement) {
++            mutex_unlock(&fb->client.modeset_mutex);
++            ret = -ENOMEM;
++            goto done;
++        }
++        old = selected->mode;
++        selected->mode = replacement;
++        mutex_unlock(&fb->client.modeset_mutex);
++        nmx_gpu_stage_record("fb.switch.check.before", (int)id);
++        ret = drm_client_modeset_check(&fb->client);
++        nmx_gpu_stage_record("fb.switch.check.after", ret);
++        if (!ret) {
++            ret = drm_client_modeset_commit(&fb->client);
++            nmx_gpu_stage_record("fb.switch.commit.after", ret);
++        }
++        if (!ret) ret = bridge_snapshot(fb, 0);
++        if (ret) {
++            mutex_lock(&fb->client.modeset_mutex);
++            selected->mode = old;
++            mutex_unlock(&fb->client.modeset_mutex);
++            rollback = drm_client_modeset_commit(&fb->client);
++            nmx_gpu_stage_record("fb.switch.rollback", rollback);
++            drm_mode_destroy(fb->client.dev, replacement);
++            if (rollback) {
++                fb->display.error = rollback;
++                fb->display.generation++;
++                ret = rollback;
++            }
++        } else {
++            drm_mode_destroy(fb->client.dev, old);
++        }
++done:
++        *out = fb->display;
++        mutex_unlock(&fb->operation_mutex);
++        break;
++    }
++    mutex_unlock(&fbs_mutex);
++    return -ret;
 +}
 --- /dev/null
 +++ b/xnu/nmx_attach_lifecycle.h
@@ -1204,8 +1655,20 @@
          cmd->release();
 --- a/xnu/nmx_fb.cpp
 +++ b/xnu/nmx_fb.cpp
-@@ -8,10 +8,15 @@
-  * same WindowServer.
+@@ -1,17 +1,23 @@
+ /*
+  * The display bridge, IOKit side: an IOFramebuffer whose VRAM is the scan-out buffer the DRM side lit
+  * (override/src/nmx_fb_bridge.c). WindowServer draws into it and the GPU's display engine scans it out; there is no
+- * copy. One mode (the largest connected output's), XRGB8888.
++ * copy. One connected output, bounded progressive modes, XRGB8888.
+  *
+- * The IOFramebuffer behaviour (one fixed mode, timing, power acknowledged at once, the colour answers WindowServer
+- * asks, a 60 Hz timer as the VBL until the display interrupt is wired) is the same as NMIntelFB's, which met the
+- * same WindowServer.
++ * The physical allocation and pitch stay fixed. Native modes, timing and DDC
++ * come from copied DRM snapshots; mode commits preserve allocation ownership.
++ * A separate connector worker queues notifications and applies catalogs only
++ * through IOFramebuffer's configuration probe. VBL remains software-timed.
   */
  #include <IOKit/IOLib.h>
 +#include <IOKit/IOLocks.h>
@@ -1220,15 +1683,22 @@
  
  #define FBLOG(fmt, ...) IOLog("NullMoth display: " fmt "\n", ##__VA_ARGS__)
  
-@@ -26,26 +31,60 @@
+@@ -24,64 +30,195 @@
+     OSDeclareDefaultStructors(NMXGPUFB)
+     void *fDev = nullptr;
      nmx_fb_info fInfo = {};
-     uint32_t fRefresh16 = 60 << 16;
+-    uint32_t fRefresh16 = 60 << 16;
      uint64_t fFrameNs = 16666667ull;
 -    struct Irq { IOFBInterruptProc proc = nullptr; OSObject *target = nullptr; void *ref = nullptr; };
 -    Irq fVbl, fConnect;
 +    IOLock *fIrqLock = nullptr;
 +    NmxFbInterrupts fInterrupts;
      thread_call_t fVblTimer = nullptr;
++    thread_call_t fConnectTimer = nullptr;
++    IOLock *fDisplayLock = nullptr;
++    nmx_display_state *fDisplay = nullptr;
++    nmx_display_state *fPollState = nullptr;
++    uint64_t fPendingGeneration = 0;
      uint64_t fVblNext = 0;
 -    volatile bool fStopping = false;
  
@@ -1242,24 +1712,93 @@
 +            me->fInterrupts.end(call);
 +        }
          uint64_t period;
++        IOLockLock(me->fDisplayLock);
          nanoseconds_to_absolutetime(me->fFrameNs, &period);
++        IOLockUnlock(me->fDisplayLock);
          uint64_t now = mach_absolute_time();
          me->fVblNext = (me->fVblNext && me->fVblNext + period > now) ? me->fVblNext + period : now + period;
 -        thread_call_enter_delayed(me->fVblTimer, me->fVblNext);
 +        me->fInterrupts.arm(me->fVblTimer, me->fVblNext);
 +    }
 +
-+    /* No timer can be rearmed after stop(): cancellation/drain finishes before
-+     * IOFramebuffer frees the state that its VBL callback may still access. */
-+    void stopTimer() {
-+        fInterrupts.stop();
-+        if (!fVblTimer) return;
-+        thread_call_cancel(fVblTimer);
-+        while (!thread_call_free(fVblTimer)) {
-+            thread_call_cancel(fVblTimer);
++    // The connector worker only reads the DRM snapshot; hardware reprobes stay
++    // on DRM's hotplug path. Never delay VBL with mode_config or I2C locks.
++    static void connectFire(thread_call_param_t p0, thread_call_param_t) {
++        NMXGPUFB *me = (NMXGPUFB *)p0;
++        if (nmx_fb_display_state(me->fDev, me->fPollState) == 0) {
++            // Publish a connection interrupt first. Mode-list replacement is
++            // applied by kConnectionProbe under IOFramebuffer's configuration
++            // gate, so getDisplayModeCount/getDisplayModes cannot race a resize.
++            IOLockLock(me->fDisplayLock);
++            if (me->fPollState->generation > me->fDisplay->generation)
++                me->fPendingGeneration = me->fPollState->generation;
++            IOLockUnlock(me->fDisplayLock);
++        }
++        IOLockLock(me->fDisplayLock);
++        uint64_t pending = me->fPendingGeneration;
++        IOLockUnlock(me->fDisplayLock);
++        NmxFbInterrupts::Call call;
++        if (pending && me->fInterrupts.beginConnect(call)) {
++            IOLockLock(me->fDisplayLock);
++            if (me->fPendingGeneration == pending) me->fPendingGeneration = 0;
++            IOLockUnlock(me->fDisplayLock);
++            call.proc(call.target, call.ref);
++            me->fInterrupts.end(call);
++        }
++        uint64_t deadline;
++        clock_interval_to_deadline(1, kSecondScale, &deadline);
++        me->fInterrupts.arm(me->fConnectTimer, deadline);
++    }
++
++    // All native getters use a copied, bounded state. Ignore an older worker
++    // snapshot that raced a successful synchronous mode-switch transaction.
++    void acceptState(const nmx_display_state &state) {
++        if (state.mode_count > NMX_DISPLAY_MODES || state.edid_size > NMX_DISPLAY_EDID_BYTES) return;
++        IOLockLock(fDisplayLock);
++        if (state.generation >= fDisplay->generation) {
++            if (state.connected != fDisplay->connected || state.mode_count != fDisplay->mode_count ||
++                state.edid_size != fDisplay->edid_size || state.error != fDisplay->error ||
++                memcmp(state.edid, fDisplay->edid, sizeof(state.edid)) ||
++                memcmp(state.modes, fDisplay->modes, sizeof(state.modes)))
++                fPendingGeneration = state.generation;
++            *fDisplay = state;
++            const nmx_display_mode *mode = nmx_display_find(fDisplay, state.current_mode);
++            if (mode && nmx_display_mode_valid(mode, fInfo.width, fInfo.height))
++                fFrameNs = (uint64_t)mode->htotal * mode->vtotal * 1000000ull / mode->pclk_khz;
++        }
++        IOLockUnlock(fDisplayLock);
++    }
++
++    bool copyMode(IODisplayModeID id, nmx_display_mode &out) {
++        bool found = false;
++        IOLockLock(fDisplayLock);
++        const nmx_display_mode *mode = id > 0 ? nmx_display_find(fDisplay, (uint32_t)id) : nullptr;
++        if (mode) { out = *mode; found = true; }
++        IOLockUnlock(fDisplayLock);
++        return found;
++    }
++
++    static uint32_t refresh16(const nmx_display_mode &mode) {
++        uint64_t pixels = (uint64_t)mode.htotal * mode.vtotal;
++        return pixels ? (uint32_t)(((uint64_t)mode.pclk_khz * 1000ull << 16) / pixels) : 0;
++    }
++
++    static void drainTimer(thread_call_t &timer) {
++        if (!timer) return;
++        thread_call_cancel(timer);
++        while (!thread_call_free(timer)) {
++            thread_call_cancel(timer);
 +            IOSleep(5);
 +        }
-+        fVblTimer = nullptr;
++        timer = nullptr;
++    }
++
++    // Stop/rearm is serialized inside the callback manager. Drain both workers
++    // before IOFramebuffer frees callback targets or the parent detaches DRM.
++    void stopTimer() {
++        fInterrupts.stop();
++        drainTimer(fConnectTimer);
++        drainTimer(fVblTimer);
 +    }
 +
 +    IOReturn applyGamma(UInt32 channels, UInt32 count, UInt32 bits, void *data) {
@@ -1286,13 +1825,33 @@
 +        fInterrupts.initialize(fIrqLock);
          fDev = dev;
          fInfo = info;
-         if (info.pclk_khz && info.htotal && info.vtotal) {
-@@ -61,27 +100,41 @@
+-        if (info.pclk_khz && info.htotal && info.vtotal) {
+-            uint64_t mhz = (uint64_t)info.pclk_khz * 1000000ull / ((uint64_t)info.htotal * info.vtotal);   /* milli-Hz */
+-            if (mhz >= 20000 && mhz <= 500000) {
+-                fRefresh16 = (uint32_t)((mhz << 16) / 1000);
+-                fFrameNs = 1000000000000ull / mhz;
+-            }
+-        }
++        fDisplayLock = IOLockAlloc();
++        fDisplay = (nmx_display_state *)IOMalloc(sizeof(*fDisplay));
++        fPollState = (nmx_display_state *)IOMalloc(sizeof(*fPollState));
++        if (!fDisplayLock || !fDisplay || !fPollState) return false;
++        bzero(fDisplay, sizeof(*fDisplay));
++        bzero(fPollState, sizeof(*fPollState));
++        if (nmx_fb_display_state(dev, fDisplay) || !fDisplay->connected || fDisplay->error ||
++            !nmx_display_find(fDisplay, fDisplay->current_mode)) return false;
++        acceptState(*fDisplay);
++        fPendingGeneration = 0;
+         return true;
+     }
+ 
      bool start(IOService *provider) override {
          if (!IOFramebuffer::start(provider)) return false;
          fVblTimer = thread_call_allocate(vblFire, this);
-+        if (!fVblTimer) {
-+            FBLOG("VBL timer allocation failed");
++        fConnectTimer = thread_call_allocate(connectFire, this);
++        if (!fVblTimer || !fConnectTimer) {
++            FBLOG("display worker allocation failed");
++            stopTimer();
 +            IOFramebuffer::stop(provider);
 +            return false;
 +        }
@@ -1303,6 +1862,8 @@
 -            thread_call_enter_delayed(fVblTimer, d);
 -        }
 -        registerPowerDriver(this, kFbPowerStates, 2);
+-        FBLOG("framebuffer %ux%u at %u.%02u Hz", fInfo.width, fInfo.height, fRefresh16 >> 16,
+-              ((fRefresh16 & 0xFFFF) * 100) >> 16);
 +            fInterrupts.arm(fVblTimer, d);
 +        }
 +        IOReturn power = registerPowerDriver(this, kFbPowerStates, 2);
@@ -1311,8 +1872,10 @@
 +            IOFramebuffer::stop(provider);
 +            return false;
 +        }
-         FBLOG("framebuffer %ux%u at %u.%02u Hz", fInfo.width, fInfo.height, fRefresh16 >> 16,
-               ((fRefresh16 & 0xFFFF) * 100) >> 16);
++        uint64_t deadline;
++        clock_interval_to_deadline(1, kSecondScale, &deadline);
++        fInterrupts.arm(fConnectTimer, deadline);
++        FBLOG("scanout allocation %ux%u; DRM mode catalog and EDID enabled", fInfo.width, fInfo.height);
          return true;
      }
  
@@ -1331,6 +1894,9 @@
 +
 +    void free() override {
 +        stopTimer();
++        if (fDisplay) { IOFree(fDisplay, sizeof(*fDisplay)); fDisplay = nullptr; }
++        if (fPollState) { IOFree(fPollState, sizeof(*fPollState)); fPollState = nullptr; }
++        if (fDisplayLock) { IOLockFree(fDisplayLock); fDisplayLock = nullptr; }
 +        if (fIrqLock) {
 +            IOLockFree(fIrqLock);
 +            fIrqLock = nullptr;
@@ -1339,26 +1905,129 @@
      }
  
      IOReturn enableController() override { return kIOReturnSuccess; }
-@@ -93,7 +146,7 @@
+@@ -92,21 +229,36 @@
+     }
      IODeviceMemory *getVRAMRange() override { return IODeviceMemory::withRange(fInfo.phys, fInfo.size); }
      const char *getPixelFormats() override { return IO32BitDirectPixels "\0"; }
-     IOItemCount getDisplayModeCount() override { return 1; }
+-    IOItemCount getDisplayModeCount() override { return 1; }
 -    IOReturn getDisplayModes(IODisplayModeID *modes) override { modes[0] = 1; return kIOReturnSuccess; }
-+    IOReturn getDisplayModes(IODisplayModeID *modes) override { if (!modes) return kIOReturnBadArgument; modes[0] = 1; return kIOReturnSuccess; }
-     IOReturn getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info) override {
-         if (mode != 1 || !info) return kIOReturnBadArgument;
+-    IOReturn getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info) override {
+-        if (mode != 1 || !info) return kIOReturnBadArgument;
++    IOItemCount getDisplayModeCount() override {
++        IOLockLock(fDisplayLock);
++        IOItemCount count = fDisplay->mode_count;
++        IOLockUnlock(fDisplayLock);
++        return count;
++    }
++    IOReturn getDisplayModes(IODisplayModeID *modes) override {
++        if (!modes) return kIOReturnBadArgument;
++        IOLockLock(fDisplayLock);
++        for (uint32_t i = 0; i < fDisplay->mode_count; i++) modes[i] = fDisplay->modes[i].id;
++        IOLockUnlock(fDisplayLock);
++        return kIOReturnSuccess;
++    }
++    IOReturn getInformationForDisplayMode(IODisplayModeID id, IODisplayModeInformation *info) override {
++        nmx_display_mode mode;
++        if (!info || !copyMode(id, mode)) return kIOReturnBadArgument;
          bzero(info, sizeof(*info));
-@@ -122,7 +175,7 @@
+-        info->nominalWidth = fInfo.width;
+-        info->nominalHeight = fInfo.height;
+-        info->refreshRate = fRefresh16;
+-        info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
++        info->nominalWidth = mode.width;
++        info->nominalHeight = mode.height;
++        info->refreshRate = refresh16(mode);
++        info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag;
++        if (mode.flags & NMX_MODE_PREFERRED) info->flags |= kDisplayModeDefaultFlag;
+         return kIOReturnSuccess;
+     }
+     UInt64 getPixelFormatsForDisplayMode(IODisplayModeID, IOIndex) override { return 0; }
+     IOReturn getPixelInformation(IODisplayModeID mode, IOIndex depth, IOPixelAperture aperture,
+                                  IOPixelInformation *pi) override {
+-        if (mode != 1 || depth != 0 || aperture != kIOFBSystemAperture || !pi) return kIOReturnUnsupportedMode;
++        nmx_display_mode timing;
++        if (depth != 0 || aperture != kIOFBSystemAperture || !pi || !copyMode(mode, timing))
++            return kIOReturnUnsupportedMode;
+         bzero(pi, sizeof(*pi));
+         pi->bytesPerRow = fInfo.pitch;
+         pi->bitsPerPixel = 32;
+@@ -117,21 +269,25 @@
+         pi->componentMasks[1] = 0x0000FF00;
+         pi->componentMasks[2] = 0x000000FF;
+         strlcpy(pi->pixelFormat, IO32BitDirectPixels, sizeof(pi->pixelFormat));
+-        pi->activeWidth = fInfo.width;
+-        pi->activeHeight = fInfo.height;
++        pi->activeWidth = timing.width;
++        pi->activeHeight = timing.height;
          return kIOReturnSuccess;
      }
      IOReturn getCurrentDisplayMode(IODisplayModeID *mode, IOIndex *depth) override {
 -        *mode = 1; *depth = 0; return kIOReturnSuccess;
-+        if (mode) *mode = 1; if (depth) *depth = 0; return kIOReturnSuccess;
++        IOLockLock(fDisplayLock);
++        if (mode) *mode = fDisplay->current_mode;
++        if (depth) *depth = 0;
++        bool online = fDisplay->connected && !fDisplay->error;
++        IOLockUnlock(fDisplayLock);
++        return online ? kIOReturnSuccess : kIOReturnNotReady;
      }
      IOReturn getStartupDisplayMode(IODisplayModeID *mode, IOIndex *depth) override { return getCurrentDisplayMode(mode, depth); }
      /* without a timing, WindowServer shows the display at 0.00 Hz (seen with NMIntelFB) */
-@@ -151,17 +204,31 @@
+     IOReturn getTimingInfoForDisplayMode(IODisplayModeID mode, IOTimingInformation *info) override {
+-        if (mode != 1 || !info) return kIOReturnUnsupportedMode;
++        nmx_display_mode t;
++        if (!info || !copyMode(mode, t)) return kIOReturnUnsupportedMode;
+         bzero(info, sizeof(*info));
+         info->appleTimingID = kIOTimingIDInvalid;
+-        const nmx_fb_info &t = fInfo;
+-        if (!t.pclk_khz || t.htotal <= t.width || t.vtotal <= t.height) return kIOReturnSuccess;
+         IODetailedTimingInformationV2 &d = info->detailedInfo.v2;
+         d.pixelClock = d.minPixelClock = d.maxPixelClock = (uint64_t)t.pclk_khz * 1000;
+         d.horizontalActive = t.width;
+@@ -142,26 +298,67 @@
+         d.verticalBlanking = t.vtotal - t.height;
+         d.verticalSyncOffset = t.vsync_start > t.height ? t.vsync_start - t.height : 0;
+         d.verticalSyncPulseWidth = t.vsync_end > t.vsync_start ? t.vsync_end - t.vsync_start : 0;
++        d.horizontalSyncConfig = t.flags & NMX_MODE_HSYNC_POSITIVE ? kIOSyncPositivePolarity : 0;
++        d.verticalSyncConfig = t.flags & NMX_MODE_VSYNC_POSITIVE ? kIOSyncPositivePolarity : 0;
+         info->flags = kIODetailedTimingValid;
+         return kIOReturnSuccess;
+     }
+     IOReturn setDisplayMode(IODisplayModeID mode, IOIndex depth) override {
+-        return (mode == 1 && depth == 0) ? kIOReturnSuccess : kIOReturnUnsupported;
++        nmx_display_mode timing;
++        if (depth != 0 || !copyMode(mode, timing) || !fDev) return kIOReturnUnsupportedMode;
++        nmx_display_state *state = (nmx_display_state *)IOMalloc(sizeof(*state));
++        if (!state) return kIOReturnNoMemory;
++        int err = nmx_fb_set_mode(fDev, (uint32_t)mode, state);
++        if (state->generation) {
++            acceptState(*state);
++            IOLockLock(fDisplayLock);
++            fPendingGeneration = 0;
++            IOLockUnlock(fDisplayLock);
++        }
++        IOFree(state, sizeof(*state));
++        return !err ? kIOReturnSuccess : err == ENOMEM ? kIOReturnNoMemory : kIOReturnError;
+     }
      IOItemCount getConnectionCount() override { return 1; }
++    bool hasDDCConnect(IOIndex index) override {
++        if (index != 0) return false;
++        IOLockLock(fDisplayLock);
++        bool available = fDisplay->connected && !fDisplay->error && fDisplay->edid_size != 0;
++        IOLockUnlock(fDisplayLock);
++        return available;
++    }
++    IOReturn getDDCBlock(IOIndex index, UInt32 block, IOSelect type, IOOptionBits options,
++                         UInt8 *data, IOByteCount *length) override {
++        if (index != 0 || type != kIODDCBlockTypeEDID || options || !data || !length)
++            return kIOReturnBadArgument;
++        if (*length < 128) { *length = 128; return kIOReturnNoSpace; }
++        IOLockLock(fDisplayLock);
++        bool copied = !fDisplay->error && nmx_display_edid_block(fDisplay, block, data, *length);
++        IOLockUnlock(fDisplayLock);
++        *length = copied ? 128 : 0;
++        return copied ? kIOReturnSuccess : kIOReturnUnsupported;
++    }
++
      IOReturn registerForInterruptType(IOSelect type, IOFBInterruptProc proc, OSObject *target, void *ref,
                                        void **iref) override {
 -        if (type == kIOFBVBLInterruptType) { fVbl = { proc, target, ref }; if (iref) *iref = &fVbl; return kIOReturnSuccess; }
@@ -1372,12 +2041,6 @@
 -    IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
 -    IOReturn setApertureEnable(IOPixelAperture, IOOptionBits) override { return kIOReturnSuccess; }
 -    IOReturn setStartupDisplayMode(IODisplayModeID, IOIndex) override { return kIOReturnSuccess; }
-+        /* DRM hotplug has no IOFramebuffer notification bridge yet. Advertising
-+         * a callback that is never delivered would hide that missing protocol. */
-+        if (type == kIOFBConnectInterruptType) {
-+            if (iref) *iref = nullptr;
-+            return kIOReturnUnsupported;
-+        }
 +        return fInterrupts.install(type, proc, target, ref, iref);
 +    }
 +    IOReturn unregisterInterrupt(void *reference) override { return fInterrupts.remove(reference); }
@@ -1400,7 +2063,7 @@
      /* power acknowledged at once; left to IOFramebuffer it waits on a shared thread (seen with NVRMFB) */
      IOReturn setPowerState(unsigned long ordinal, IOService *) override {
          handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
-@@ -171,7 +238,8 @@
+@@ -171,7 +368,8 @@
          if (attribute == kIOWindowServerActiveAttribute) return kIOReturnSuccess;
          if (attribute == kIOPowerAttribute) {
              /* display sleep turns the outputs off; wake lights them again with the same buffer */
@@ -1410,7 +2073,7 @@
              if (value) {
                  IOReturn r = IOFramebuffer::setAttribute(attribute, value);
                  handleEvent(kIOFBNotifyDidPowerOn);
-@@ -184,17 +252,30 @@
+@@ -184,17 +382,44 @@
          return IOFramebuffer::setAttribute(attribute, value);
      }
      IOReturn setAttributeForConnection(IOIndex idx, IOSelect attribute, uintptr_t value) override {
@@ -1418,6 +2081,19 @@
          switch (attribute) {
 -        case kConnectionPower: case kConnectionColorModesSupported: case kConnectionColorDepthsSupported:
 -        case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported: case kConnectionColorMode:
++        case kConnectionProbe: {
++            nmx_display_state *state = (nmx_display_state *)IOMalloc(sizeof(*state));
++            if (!state) return kIOReturnNoMemory;
++            int err = fDev ? nmx_fb_display_state(fDev, state) : ENODEV;
++            if (!err) {
++                acceptState(*state);
++                IOLockLock(fDisplayLock);
++                fPendingGeneration = 0;
++                IOLockUnlock(fDisplayLock);
++            }
++            IOFree(state, sizeof(*state));
++            return err ? kIOReturnNotReady : kIOReturnSuccess;
++        }
 +        case kConnectionPower:
 +            if (value > kIODisplayPowerStateOn) return kIOReturnBadArgument;
 +            return fDev && nmx_fb_power(fDev, value != kIODisplayPowerStateOff) == 0
@@ -1441,12 +2117,28 @@
 -    IOReturn connectFlags(IOIndex, IODisplayModeID, IOOptionBits *flags) override {
 -        if (flags) *flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
 +    IOReturn connectFlags(IOIndex index, IODisplayModeID mode, IOOptionBits *flags) override {
-+        if (index != 0 || mode != 1 || !flags) return kIOReturnBadArgument;
++        nmx_display_mode timing;
++        if (index != 0 || !flags || !copyMode(mode, timing)) return kIOReturnBadArgument;
 +        *flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
          return kIOReturnSuccess;
      }
      IOReturn getAttribute(IOSelect attribute, uintptr_t *value) override {
-@@ -218,7 +299,9 @@
+@@ -204,7 +429,13 @@
+     IOReturn getAttributeForConnection(IOIndex idx, IOSelect attr, uintptr_t *value) override {
+         if (idx != 0 || !value) return kIOReturnBadArgument;
+         switch (attr) {
+-        case kConnectionEnable: case kConnectionCheckEnable: *value = 1; return kIOReturnSuccess;
++        case kConnectionEnable: case kConnectionCheckEnable:
++            IOLockLock(fDisplayLock);
++            *value = fDisplay->connected && !fDisplay->error;
++            IOLockUnlock(fDisplayLock);
++            return kIOReturnSuccess;
++        case kConnectionSupportsHLDDCSense:
++            return hasDDCConnect(idx) ? kIOReturnSuccess : kIOReturnUnsupported;
+         case kConnectionColorModesSupported: case kConnectionColorMode: *value = 0x00000001; return kIOReturnSuccess;
+         case kConnectionColorDepthsSupported: case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported:
+             *value = 0x00000002; return kIOReturnSuccess;
+@@ -218,7 +449,9 @@
  IOService *nmx_fb_publish(IOService *gpu, void *dev)
  {
      nmx_fb_info info;
@@ -1458,7 +2150,7 @@
          return nullptr;
 --- /dev/null
 +++ b/xnu/nmx_fb_interrupts.h
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,135 @@
 +/*
 + * Callback lifetime for the software IOFramebuffer interrupt source. The caller
 + * supplies IOKit/thread declarations and owns the lock and timer. Callback code
@@ -1549,18 +2241,23 @@
 +        return ret;
 +    }
 +
-+    bool beginVbl(Call &call) {
++    bool begin(IOSelect type, Call &call) {
++        Slot *slot = type == kIOFBVBLInterruptType ? &fVbl :
++                     type == kIOFBConnectInterruptType ? &fConnect : nullptr;
++        if (!slot) return false;
 +        IOLockLock(fLock);
-+        bool ready = !fStopping && fVbl.enabled && fVbl.proc && !fVbl.active;
++        bool ready = !fStopping && slot->enabled && slot->proc && !slot->active;
 +        if (ready) {
-+            fVbl.active = true;
-+            fVbl.running = current_thread();
-+            call = {fVbl.proc, fVbl.target, fVbl.ref, &fVbl};
++            slot->active = true;
++            slot->running = current_thread();
++            call = {slot->proc, slot->target, slot->ref, slot};
 +            if (call.target) call.target->retain();
 +        }
 +        IOLockUnlock(fLock);
 +        return ready;
 +    }
++    bool beginVbl(Call &call) { return begin(kIOFBVBLInterruptType, call); }
++    bool beginConnect(Call &call) { return begin(kIOFBConnectInterruptType, call); }
 +
 +    void end(Call &call) {
 +        Slot *slot = lookup(call.slot);

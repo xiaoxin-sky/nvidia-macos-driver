@@ -21,11 +21,11 @@ The readable patches now address the observed tunnel/PCH/vmap blockers plus
 statically identified callback, registration, retry and resource-lifetime defects.
 Host tests exercise the patched code with mocked services, not a GPU. The current
 CI builds NMXGPU only; it does not produce a complete Intel acceleration package.
-Real VBL pacing, connector/mode notifications and sleep/wake remain separate work.
-The native class also has no explicit bridge from the Linux connector's EDID to
-the macOS DDC interface. Generic framebuffer output and complete monitor/mode
-integration must be distinguished; do not infer HiDPI or refresh support from
-the framebuffer being allocated successfully.
+Real VBL pacing and sleep/wake remain separate work. The following display batch
+implements single-connector EDID/DDC, bounded progressive modes, mode rollback and
+queued connection notification. The physical allocation stays fixed; multihead,
+allocation growth and non-progressive modes are unsupported. Source implementation
+and host checks do not establish native output, HiDPI or a particular refresh rate.
 
 Verified code/build checkpoint
 ------------------------------
