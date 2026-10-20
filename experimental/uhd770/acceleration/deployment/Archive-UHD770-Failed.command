@@ -200,19 +200,27 @@ if [ "$JOURNAL_ENTRIES" -gt 0 ]; then
     printf 'Restoration receipts and current presence/types were checked. Original byte hashes were not recorded; byte equality cannot be verified.\n'
 fi
 /bin/bash -p "$ROOT/incoming/tools/session.sh" export
-/bin/bash -p "$ROOT/incoming/tools/manage.sh" remove-recorder
-launchctl print system >/dev/null || stop 'Cannot verify launchd after recorder removal.'
-if launchctl print "system/$CAPTURE" >/dev/null 2>&1; then stop 'Recorder is still registered; stage preserved.'; fi
-absent "/Library/LaunchDaemons/$CAPTURE.plist" || stop 'Recorder registration file remains; stage preserved.'
-count=0
-while :; do
-    processes=$(ps -axo command=) || stop 'Cannot verify recorder process termination.'
-    case "$processes" in *"$ROOT/capture/collector.sh"*)
-        [ "$count" -lt 10 ] || stop 'Recorder process has not stopped; stage preserved.'
-        sleep 1; count=$((count + 1)) ;;
-        *) break ;;
-    esac
-done
+# Use the current kit's corrected stop contract, never the old staged manager
+# that could swallow bootout errors and remove the still-registered job's plist.
+current_kit=$(cd "$(dirname "$0")" && pwd -P)
+library="$current_kit/tools/session-lib.sh"
+[ -f "$library" ] && [ ! -L "$library" ] || stop 'Current kit session helper is missing/linked.'
+. "$library"
+declare -F session_stop_recorder >/dev/null || stop 'Current kit lacks the verified recorder-stop helper.'
+trusted_path /Library/LaunchDaemons
+stop_report=$(mktemp -d /Users/Shared/UHD770MVP-recorder-stop.XXXXXX)
+printf 'Recorder stop diagnostics: %s\n' "$stop_report"
+stop_code=0
+session_stop_recorder "$CAPTURE" "/Library/LaunchDaemons/$CAPTURE.plist" \
+    "$ROOT/capture/collector.sh" "$stop_report" || stop_code=$?
+printf 'helper_exit=%s\n' "$stop_code" > "$stop_report/helper-exit.txt"
+# The current exporter includes these new stop diagnostics; the old stage's
+# exporter predates them. Export before reporting failure or moving the stage.
+if [ -f "$current_kit/tools/session.sh" ] && [ ! -L "$current_kit/tools/session.sh" ]; then
+    /bin/bash -p "$current_kit/tools/session.sh" export || printf 'Stop diagnostic export failed; original: %s\n' "$stop_report" >&2
+fi
+[ "$stop_code" -eq 0 ] || stop "Recorder stop was not verified. Stage and diagnostics preserved: $stop_report"
+printf 'Recorder stop verified; no driver, firmware, KC or EFI was changed.\n'
 # Same-filesystem rename into a newly created root-only parent never overwrites
 # another archive and keeps the old journal, scripts and signatures together.
 archive=$(mktemp -d "$PARENT/UHD770MVP-retired.XXXXXX")

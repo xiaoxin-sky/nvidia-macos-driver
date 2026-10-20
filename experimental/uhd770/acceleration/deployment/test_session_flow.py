@@ -39,6 +39,7 @@ elif name == 'stat':
     if args[1] == '%u':
         print('501' if '/Users/fixture' in str(path) or
               (failure == 'authorization-owner' and path.name.startswith('manual-authorization-')) else '0')
+    elif args[1] == '%u %Lp': print('0 ' + ('700' if path.is_dir() else '600'))
     elif args[1] == '%z': print(path.lstat().st_size)
     elif args[1] == '%Lp':
         print(os.environ['SESSION_VAR_RUN_MODE'] if path == root / 'mac/private/var/run' and
@@ -60,7 +61,11 @@ elif name == 'diskutil':
         'VolumeUUID': 'FIXTURE-UUID', 'VolumeName': '1401', 'BusProtocol': 'USB'}))
 elif name == 'plutil':
     path = pathlib.Path(args[-1]); data = plistlib.loads(path.read_bytes())
-    if args[0] == '-extract': print(data[args[1]])
+    if args[0] == '-extract':
+        value = data
+        for part in args[1].split('.'):
+            value = value[int(part)] if isinstance(value, list) else value[part]
+        print(value)
     elif args[0] == '-insert':
         data[args[1]] = int(args[3]) if args[2] == '-integer' else args[3]
         path.write_bytes(plistlib.dumps(data))
@@ -78,8 +83,17 @@ elif name == 'launchctl':
     with (root / 'launchctl-calls').open('a') as stream: stream.write(' '.join(args) + '\n')
     registered = root / 'root-job-registered'
     if args == ['print', 'system']: sys.exit(0)
+    if args == ['print', 'gui/501']: sys.exit(0)
+    if args == ['print', 'gui/501/com.uhd770.mvp.session']:
+        print('Could not find service "com.uhd770.mvp.session" in domain for gui/501', file=sys.stderr)
+        sys.exit(113)
     if args == ['print', 'system/com.uhd770.mvp.session']:
-        sys.exit(0 if registered.exists() else 113)
+        if not registered.exists():
+            print('Could not find service "com.uhd770.mvp.session" in domain for system', file=sys.stderr)
+            sys.exit(113)
+        script = root / 'mac/Library/Application Support/UHD770MVP/incoming/tools/session.sh'
+        print('program = /bin/bash\narguments = {\n/bin/bash\n-p\n' + str(script) + '\nboot\n}')
+        sys.exit(0)
     if args == ['bootout', 'system/com.uhd770.mvp.session']:
         if registered.exists(): registered.unlink()
     if args[0] == 'bootstrap':
@@ -119,6 +133,7 @@ elif name == 'sudo':
     # Native macOS may legitimately take longer than Linux for many short mocks.
     sys.exit(subprocess.run(args[3:], timeout=30).returncode)
 elif name == 'dmesg': print('fixture final kernel snapshot')
+elif name == 'ps': print('')
 elif name == 'codesign':
     if failure == 'signature': sys.exit(27)
 elif name == 'chmod':
@@ -156,6 +171,8 @@ case "$1" in
    cp -R "$SESSION_FIXTURE/seed" "$root"
    mkdir "$root/incoming"
    cp -R "$SESSION_FIXTURE/kit/." "$root/incoming/"
+   (cd "$root/components" && find -P Library/GPUBundles -type f -exec /usr/bin/shasum -a 256 '{}' +) \
+       > "$root/incoming/runtime-SHA256SUMS"
    ;;
  install-recorder)
    report="$base/private/var/log/UHD770MVP/session-fixture"
@@ -201,7 +218,7 @@ class SessionFlowTests(unittest.TestCase):
         dispatcher.chmod(0o700)
         for name in ("uname", "sw_vers", "id", "dscl", "sysctl", "stat", "csrutil", "nvram", "ioreg",
                      "diskutil", "plutil", "ditto", "kmutil", "launchctl", "codesign", "sync", "sleep",
-                     "chown", "chmod", "PlistBuddy", "sudo", "dmesg", "mv"):
+                     "chown", "chmod", "PlistBuddy", "sudo", "dmesg", "mv", "ps"):
             (mock / name).symlink_to(dispatcher)
         # Pure no-op adapters need no interpreter startup. Retain a short real
         # polling tick so a bounded read can schedule its sibling mock process;
@@ -212,6 +229,16 @@ class SessionFlowTests(unittest.TestCase):
             path.write_text("#!/bin/sh\n" + ("exec /bin/sleep 0.01\n" if name == "sleep" else "exit 0\n"), encoding="utf-8")
             path.chmod(0o700)
         shutil.copytree(source, self.kit / "tools", ignore=shutil.ignore_patterns("__pycache__"))
+        # Preserve the native plist protocol while redirecting its absolute
+        # launchd arguments once; the temporary root may itself start /private.
+        template = self.kit / "tools/com.uhd770.mvp.session-root.plist"
+        job = plistlib.loads(template.read_bytes())
+        for key in ("ProgramArguments", "StandardOutPath", "StandardErrorPath"):
+            values = job[key] if isinstance(job[key], list) else [job[key]]
+            redirected = [re.sub(r"^/(Library|private|System|Volumes|Users)(?=/|$)",
+                                 lambda match: str(self.mac / match[1]), value) for value in values]
+            job[key] = redirected if isinstance(job[key], list) else redirected[0]
+        template.write_bytes(plistlib.dumps(job))
         # Only platform adapters differ in these copies. All literal filesystem
         # destinations, including rollback, are verified below to stay here.
         for name in ("session.sh", "session-user.sh"):

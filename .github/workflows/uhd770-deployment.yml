@@ -62,6 +62,7 @@ jobs:
                   'test_session_flow.SessionFlowTests.test_late_permission_failure_occurs_before_any_live_replacement',
                   'test_session_flow.SessionFlowTests.test_refused_existing_stage_cannot_roll_back_an_older_plan',
                   'test_session_flow.SessionFlowTests.test_prepare_and_next_boot_restore_use_actual_flow',
+                  'test_session_flow.SessionFlowTests.test_failures_before_and_after_live_writes_restore_originals',
               ])
           else:
               suite = unittest.defaultTestLoader.discover('experimental/uhd770/acceleration/deployment', pattern='test_*.py')
@@ -121,12 +122,40 @@ jobs:
           code=$?
           cat "$RUNNER_TEMP/uhd770-native-permissions.log"
           if [ "$code" -ne 0 ]; then
+            fixture=$(sed -n 's/^Native permission evidence retained: //p' "$RUNNER_TEMP/uhd770-native-permissions.log")
+            if [ -n "$fixture" ] && [ -d "$fixture/prepared/Library/GPUBundles/NVMTLDriver.bundle" ]; then
+              {
+                echo 'diagnostic=ordinary-bundle-seal'
+                /usr/bin/codesign --verify "$fixture/prepared/Library/GPUBundles/NVMTLDriver.bundle"
+                echo "diagnostic_bundle_verify_exit=$?"
+                echo 'diagnostic=strict-executable-signature'
+                /usr/bin/codesign --verify --strict "$fixture/prepared/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver"
+                echo "diagnostic_executable_strict_exit=$?"
+              } >> "$RUNNER_TEMP/uhd770-native-permissions.log" 2>&1
+            fi
             python3 - <<'PY'
           import os
           from pathlib import Path
           message = (Path(os.environ['RUNNER_TEMP']) / 'uhd770-native-permissions.log').read_text(errors='replace')[-6000:]
           message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
           print(f'::error title=Native macOS permissions::{message}')
+          PY
+          fi
+          exit "$code"
+      - name: Real launchd recorder stop and delayed-exit regression
+        if: always()
+        run: |
+          set +e
+          sudo -n /bin/bash -p experimental/uhd770/acceleration/deployment/test_recorder_macos.sh > "$RUNNER_TEMP/uhd770-native-recorder.log" 2>&1
+          code=$?
+          cat "$RUNNER_TEMP/uhd770-native-recorder.log"
+          if [ "$code" -ne 0 ]; then
+            python3 - <<'PY'
+          import os
+          from pathlib import Path
+          message = (Path(os.environ['RUNNER_TEMP']) / 'uhd770-native-recorder.log').read_text(errors='replace')[-6000:]
+          message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print(f'::error title=Native macOS recorder::{message}')
           PY
           fi
           exit "$code"

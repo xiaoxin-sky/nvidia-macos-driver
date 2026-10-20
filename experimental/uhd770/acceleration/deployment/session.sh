@@ -91,9 +91,44 @@ prepared_path() {
 # Check only the two candidate trees, allowing unrelated system GPUBundles.
 # Modes/ACLs may change; the signed symlink text and code signatures may not.
 check_runtime() {
-    local bundles=$1 report=$2 entry magic
+    local bundles=$1 report=$2 entry magic line relative manifest="$ROOT/incoming/runtime-SHA256SUMS" owner mode
     [ -d "$bundles/nvmtl" ] && [ ! -L "$bundles/nvmtl" ] || return 64
     [ -d "$bundles/NVMTLDriver.bundle" ] && [ ! -L "$bundles/NVMTLDriver.bundle" ] || return 64
+    # The original resource seal covers the relative link text, not bytes in
+    # its sibling runtime. Verify that entire external closure against the
+    # digest-checked, root-protected candidate manifest in both private/live
+    # layouts. Ad-hoc signature validity alone does not establish provenance.
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 64
+    owner=$(stat -f '%u' "$manifest"); mode=$(stat -f '%Lp' "$manifest")
+    [ "$owner" = 0 ] && [ $((8#$mode & 0022)) -eq 0 ] || return 64
+    : > "$report.manifest.txt" || return 74
+    : > "$report.expected-pending.txt" || return 74
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[0-9a-f]{64}\ \ [A-Za-z0-9_./+-]+$ ]] || return 64
+        relative=${line:66}
+        case "$relative" in
+            Library/GPUBundles/nvmtl/*|Library/GPUBundles/NVMTLDriver.bundle/*) ;;
+            *) continue ;;
+        esac
+        relative=${relative#Library/GPUBundles/}
+        case "/$relative/" in *'/../'*|*'/./'*|*'//'*) return 64 ;; esac
+        printf '%s  %s\n' "${line:0:64}" "$relative" >> "$report.manifest.txt" || return 74
+        printf '%s\n' "$relative" >> "$report.expected-pending.txt" || return 74
+    done < "$manifest"
+    [ -s "$report.manifest.txt" ] || return 64
+    LC_ALL=C sort "$report.expected-pending.txt" > "$report.expected-files.txt" || return 74
+    uniq -d "$report.expected-files.txt" > "$report.duplicates.txt" || return 74
+    [ ! -s "$report.duplicates.txt" ] || return 64
+    find -P "$bundles/nvmtl" "$bundles/NVMTLDriver.bundle" -type f -print > "$report.files.txt" || return 74
+    : > "$report.actual-pending.txt" || return 74
+    while IFS= read -r entry; do
+        printf '%s\n' "${entry#"$bundles/"}" >> "$report.actual-pending.txt" || return 74
+    done < "$report.files.txt"
+    LC_ALL=C sort "$report.actual-pending.txt" > "$report.actual-files.txt" || return 74
+    cmp -s "$report.expected-files.txt" "$report.actual-files.txt" || return 64
+    find -P "$bundles/nvmtl" "$bundles/NVMTLDriver.bundle" ! \( -type d -o -type f -o -type l \) -print > "$report.unsupported.txt" || return 74
+    [ ! -s "$report.unsupported.txt" ] || return 64
+    (cd "$bundles" && session_bounded 60 "$report.hashes.txt" /usr/bin/shasum -a 256 --strict -c "$report.manifest.txt") || return 1
     [ "$(readlink "$bundles/nvmtl/libvulkan.dylib")" = libvulkan.1.dylib ] || return 64
     [ "$(readlink "$bundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime")" = ../../../nvmtl ] || return 64
     [ -f "$bundles/nvmtl/libvulkan.dylib" ] && [ -d "$bundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime" ] || return 64
@@ -107,9 +142,13 @@ check_runtime() {
     for entry in libvulkan.1.dylib libvulkan_intel.dylib libnvmtl_translate.dylib air-opt NVMTLDriver; do
         [ -f "$bundles/nvmtl/$entry" ] && [ ! -L "$bundles/nvmtl/$entry" ] || return 64
     done
-    session_bounded 20 "$report.bundle.txt" codesign --verify --strict "$bundles/NVMTLDriver.bundle" || return 1
-    find -P "$bundles/nvmtl" -type f -print > "$report.files.txt" || return 74
+    # --strict adds an in-bundle destination policy that this intentionally
+    # shared relative runtime cannot satisfy. Ordinary bundle verification
+    # still validates its code/resource seal and exact signed symlink text;
+    # the manifest above closes the separately stored runtime's byte identity.
+    session_bounded 20 "$report.bundle.txt" codesign --verify "$bundles/NVMTLDriver.bundle" || return 1
     while IFS= read -r entry; do
+        case "$entry" in "$bundles/nvmtl/"*) ;; *) continue ;; esac
         magic=$(od -An -tu4 -N4 "$entry" | tr -d '[:space:]') || return 74
         [ "$magic" = 4277009103 ] || continue
         printf 'verifying=%s\n' "$entry" >> "$report.signatures.txt" || return 74
@@ -122,9 +161,23 @@ check_runtime() {
 # proved the label absent and attempted its own bootstrap can call this helper.
 stop_owned_root_job() {
     [ "$ROOT_JOB_OWNED" -eq 1 ] || return 0
-    session_bounded 20 "$PRIVATE/root-job-stop.txt" launchctl bootout "system/$LABEL" || :
-    session_bounded 5 "$PRIVATE/root-job-domain.txt" launchctl print system || return 1
-    if session_bounded 5 "$PRIVATE/root-job-final.txt" launchctl print "system/$LABEL"; then return 1; fi
+    local report state=0 bootout=not-run
+    report=$(mktemp -d "$PRIVATE/root-job-stop.XXXXXX") || return 1
+    session_bounded 2 "$report/domain-before.txt" launchctl print system || return 1
+    session_launchd_state "$LABEL" "$report/label-before.txt" || state=$?
+    [ "$state" -ne 2 ] || return 1
+    awk '/^[[:space:]]*pid = [0-9]+[[:space:]]*$/ {print $3}' "$report/label-before.txt" > "$report/original-pids.txt"
+    if [ "$state" -eq 0 ]; then
+        bootout=0
+        session_bounded 5 "$report/bootout.txt" launchctl bootout "system/$LABEL" || bootout=$?
+    else
+        printf 'bootout=not-needed-label-already-absent\n' > "$report/bootout.txt"
+    fi
+    printf 'bootout_exit=%s\n' "$bootout" > "$report/bootout-status.txt"
+    # The root launch job shares session.sh with this preparation process.
+    # Wait for only its captured label/PIDs, not every process using that file.
+    session_wait_launchd_stopped "$LABEL" '' "$report/original-pids.txt" "$report" 20 || return 1
+    printf 'stop=verified\nbootout_exit=%s\n' "$bootout" > "$report/result.txt"
     ROOT_JOB_OWNED=0
 }
 
@@ -139,6 +192,28 @@ prepare_parent() {
         current="$current/$part"
         if [ ! -e "$current" ] && [ ! -L "$current" ]; then mkdir -m 755 "$current"; fi
         safe_directory "$current"
+    done
+}
+
+# Include only protected stop reports created by this tool, with a finite copy
+# budget. Originals remain root-only; export_all later gives the aggregate copy
+# to the selected user so Finder can retrieve failures without changing modes.
+export_stop_reports() {
+    local output=$1 source owner mode invalid count blocks
+    for source in /Users/Shared/UHD770MVP-recorder-stop.* "$ROOT"/recorder-stop.* \
+        "$PRIVATE"/root-job-stop.* "$PRIVATE"/restore-job-stop.*; do
+        [ -d "$source" ] && [ ! -L "$source" ] || continue
+        owner=$(stat -f '%u' "$source") || continue
+        mode=$(stat -f '%Lp' "$source") || continue
+        [ "$owner" = 0 ] && [ $((8#$mode & 0022)) -eq 0 ] || continue
+        invalid=$(find -P "$source" ! \( -type d -o -type f \) -print -quit) || continue
+        [ -z "$invalid" ] || continue
+        count=$(find -P "$source" -type f -print | wc -l | tr -d ' ')
+        blocks=$(du -sk "$source" | awk '{print $1}')
+        case "$count:$blocks" in *[!0-9:]*|:*|*:) continue ;; esac
+        [ "$count" -le 512 ] && [ "$blocks" -le 65536 ] || continue
+        mkdir -p "$output/recorder-stop"
+        ditto "$source" "$output/recorder-stop/$(basename "$source")"
     done
 }
 
@@ -192,6 +267,7 @@ export_all() {
         mkdir -p "$output/bootstrap"
         ditto "$bootstrap" "$output/bootstrap/$(basename "$bootstrap")"
     done
+    export_stop_reports "$output"
     if [ -f "$PLAN" ] && [ ! -L "$PLAN" ]; then
         uid=$(property user_uid)
         case "$uid" in ''|*[!0-9]*) die 'Invalid selected-user identity.' ;; esac
@@ -659,10 +735,26 @@ case "$MODE" in
     restore)
         safe_directory "$ROOT"; safe_directory "$PRIVATE"
         restore_optout
-        launchctl bootout "system/$LABEL" 2>/dev/null || :
-        # Remove the loaded agent in the selected login domain, if any. Do not
-        # touch other users or unload an active GPU driver in this boot.
-        launchctl bootout "gui/$(property user_uid)/$LABEL" 2>/dev/null || :
+        restore_report=$(mktemp -d "$PRIVATE/restore-job-stop.XXXXXX")
+        printf 'Restore job-stop diagnostics: %s\n' "$restore_report"
+        # New manual sessions install no user agent. A legacy registration must
+        # be reviewed explicitly rather than silently left running during replay.
+        [ ! -e "/Library/LaunchAgents/$LABEL.plist" ] && [ ! -L "/Library/LaunchAgents/$LABEL.plist" ] || \
+            die 'A legacy user-session plist is installed; recovery evidence preserved before file replay.'
+        restore_uid=$(property user_uid)
+        case "$restore_uid" in ''|*[!0-9]*) die 'Invalid selected-user identity.' ;; esac
+        session_bounded 2 "$restore_report/gui-domain.txt" launchctl print "gui/$restore_uid" || \
+            die 'Cannot verify the selected login domain; no original files were replayed.'
+        restore_gui_code=0
+        session_bounded 2 "$restore_report/gui-session.txt" launchctl print "gui/$restore_uid/$LABEL" || restore_gui_code=$?
+        [ "$restore_gui_code" -ne 0 ] && [ "$restore_gui_code" -ne 124 ] && \
+            grep -Fq "Could not find service \"$LABEL\" in domain" "$restore_report/gui-session.txt" || \
+            die 'A legacy user-session job is present or unknown; no original files were replayed.'
+        restore_stop_code=0
+        session_stop_recorder "$LABEL" "/Library/LaunchDaemons/$LABEL.plist" \
+            "$ROOT/incoming/tools/session.sh" "$restore_report" || restore_stop_code=$?
+        printf 'helper_exit=%s\n' "$restore_stop_code" > "$restore_report/helper-exit.txt"
+        [ "$restore_stop_code" -eq 0 ] || die 'Root recovery job stop was not verified; no original files were replayed.'
         restore_files
         printf 'restored\n' > "$PUBLIC/state.txt"
         sync

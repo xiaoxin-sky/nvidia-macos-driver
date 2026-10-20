@@ -35,6 +35,9 @@ case "$name" in
  nvram) printf 'data was not found\n' >&2; exit 1 ;;
  plutil)
    case "$2" in
+     Label) printf 'com.uhd770.mvp.capture\n' ;;
+     ProgramArguments.0) printf '/bin/bash\n' ;;
+     ProgramArguments.1) printf '%s/mac/Library/Application Support/UHD770MVP/capture/collector.sh\n' "$base" ;;
      user_uid) printf '501\n' ;;
      volume_uuid|VolumeUUID) printf 'FIXTURE-UUID\n' ;;
      safe_hash) printf '%s\n' "$ARCHIVE_SAFE" ;;
@@ -49,7 +52,19 @@ case "$name" in
  launchctl)
    printf '%s\n' "$*" >> "$base/launchctl-calls"
    [ "$*" != 'print system' ] || exit 0
-   if [ "$*" = 'print system/com.uhd770.mvp.capture' ] && [ -f "$base/capture-active" ]; then exit 0; fi
+   if [ "$*" = 'bootout system/com.uhd770.mvp.capture' ]; then
+     printf 'remove-recorder\n' >> "$base/events"
+     [ "${ARCHIVE_RECORDER_STUCK:-0}" != 1 ] || exit 5
+     rm -f "$base/capture-active"
+     exit 0
+   fi
+   if [ "$*" = 'print system/com.uhd770.mvp.capture' ] && [ -f "$base/capture-active" ]; then
+     printf 'program = /bin/bash\narguments = {\n/bin/bash\n%s/mac/Library/Application Support/UHD770MVP/capture/collector.sh\n}\n' "$base"
+     exit 0
+   fi
+   case "$*" in 'print system/'*)
+     printf 'Could not find service "%s" in domain for system\n' "${2#system/}" >&2 ;;
+   esac
    exit 113 ;;
  ps) printf '\n' ;;
  *) exit 92 ;;
@@ -138,13 +153,20 @@ class ArchiveFailedTests(unittest.TestCase):
         text = source.read_text(encoding="utf-8")
         # Darwin temporary roots themselves start with /private. Rewrite only
         # original source tokens once, never rescan a previously inserted root.
-        text = re.sub(r"(?<![A-Za-z0-9_$])/(Library|Volumes|private)(?=/|[ \t'\";]|$)",
+        text = re.sub(r"(?<![A-Za-z0-9_$])/(Library|Volumes|private|Users)(?=/|[ \t'\";]|$)",
                       lambda match: self.posix + "/mac/" + match[1], text)
         text = text.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin",
                             f"PATH={self.posix}/mock-bin:/usr/bin:/bin:/usr/sbin:/sbin")
         text = re.sub(r"\$EUID\b", "0", text)
         self.wrapper = self.root / "Archive-UHD770-Failed.command"
         self.wrapper.write_text(text, encoding="utf-8", newline="\n")
+        current_tools = self.root / "tools"
+        current_tools.mkdir()
+        library = pathlib.Path(__file__).with_name("session-lib.sh").read_text(encoding="utf-8")
+        # Only the simulated service's wait budget is compressed; genuine
+        # Darwin launchd timing is covered by test_recorder_macos.sh.
+        library = library.replace("wait_limit=${5:-20}", "wait_limit=${5:-5}")
+        (current_tools / "session-lib.sh").write_text(library, encoding="utf-8", newline="\n")
         self.env = dict(os.environ, ARCHIVE_FIXTURE=self.posix, ARCHIVE_SAFE=self.safe)
 
     def run_helper(self, *arguments, **changes):
@@ -354,8 +376,11 @@ class ArchiveFailedTests(unittest.TestCase):
     def test_recorder_that_remains_registered_prevents_rename(self):
         result = self.run_helper(ARCHIVE_RECORDER_STUCK="1")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("still registered", result.stderr)
+        self.assertIn("Recorder stop was not verified", result.stderr)
         self.assertTrue(self.stage.exists())
+        self.assertTrue(self.daemon.exists())
+        self.assertTrue((self.root / "capture-active").exists())
+        self.assertEqual(list(self.stage.parent.glob("UHD770MVP-retired.*")), [])
         self.assertTrue((self.mac / "Users/Shared/exported/report").is_file())
 
     def test_existing_lock_is_preserved(self):

@@ -235,9 +235,15 @@ case "$1" in
     install-recorder) install_recorder ;;
     recorder-status) launchctl print "system/$LABEL" ;;
     remove-recorder)
-        [ ! -L "$PLIST" ] || die 'Unexpected recorder plist symlink.'
-        launchctl bootout "system/$LABEL" || :
-        if [ -f "$PLIST" ]; then rm -f "$PLIST"; fi
-        printf 'Recorder unregistered. Logs and drivers unchanged.\n' ;;
+        load_staged_helpers
+        safe_directory /Library/LaunchDaemons
+        declare -F session_stop_recorder >/dev/null || die 'The stage lacks the verified recorder-stop helper.'
+        stop_report=$(mktemp -d "$ROOT/recorder-stop.XXXXXX")
+        printf 'Recorder stop diagnostics: %s\n' "$stop_report"
+        stop_code=0
+        session_stop_recorder "$LABEL" "$PLIST" "$ROOT/capture/collector.sh" "$stop_report" || stop_code=$?
+        printf 'helper_exit=%s\n' "$stop_code" > "$stop_report/helper-exit.txt"
+        [ "$stop_code" -eq 0 ] || die "Recorder stop was not verified; registration and logs preserved: $stop_report"
+        printf 'Recorder stop verified. Logs and drivers unchanged.\n' ;;
     export) export_reports ;;
 esac

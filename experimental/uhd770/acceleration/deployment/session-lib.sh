@@ -116,6 +116,173 @@ session_bounded() {
     return "$code"
 }
 
+# A nonzero launchctl exit is not proof of absence. Only the system domain's
+# explicit missing-service diagnostic is accepted; permission/query errors stay
+# unknown. Return 0=present, 1=confirmed absent, 2=unknown, retaining raw output.
+session_launchd_state() {
+    local label=$1 output=$2 limit=${3:-2} code=0
+    session_bounded "$limit" "$output" launchctl print "system/$label" || code=$?
+    [ "$code" -ne 0 ] || return 0
+    if [ "$code" -ne 124 ] && grep -Fq "Could not find service \"$label\" in domain for system" "$output"; then
+        return 1
+    fi
+    return 2
+}
+
+# Match only a collector used as bash's script argument, not an arbitrary path
+# mentioned in another command's arguments. This also handles spaces in the
+# protected script path without parsing unquoted ps text into shell arguments.
+session_collector_pids() {
+    local snapshot=$1 script=$2 output=$3
+    awk -v script="$script" '
+      $1 ~ /^[0-9]+$/ {
+        pid=$1; line=$0; sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", line)
+        prefixes[1]="/bin/bash " script; prefixes[2]="/bin/bash -p " script
+        prefixes[3]="bash " script; prefixes[4]="bash -p " script
+        for (i=1;i<=4;i++) if (line==prefixes[i] || index(line,prefixes[i] " ")==1) {
+          print pid; break
+        }
+      }
+    ' "$snapshot" > "$output"
+}
+
+# Wait after a caller-owned bootout. The caller supplies protected evidence
+# storage and original numeric PIDs from its own label. Empty script skips the
+# collector scan (the root session job shares its script with preparation).
+# No signal other than existence-probe signal 0 is sent to any process.
+session_wait_launchd_stopped() {
+    local label=$1 script=$2 originals=$3 report=$4 limit=${5:-20}
+    local start=$SECONDS tick=0 left budget state pid gone script_gone
+    while [ $((SECONDS - start)) -lt "$limit" ]; do
+        left=$((limit - (SECONDS - start))); budget=2
+        [ "$left" -ge 2 ] || budget=$left
+        state=0
+        session_launchd_state "$label" "$report/label-wait-$tick.txt" "$budget" || state=$?
+        [ "$state" -ne 2 ] || return 66
+        gone=1
+        while IFS= read -r pid; do
+            case "$pid" in ''|*[!0-9]*) return 65 ;; esac
+            [ "$pid" -gt 1 ] || return 65
+            if kill -0 "$pid" 2>/dev/null; then gone=0; fi
+        done < "$originals"
+        script_gone=1
+        if [ -n "$script" ]; then
+            left=$((limit - (SECONDS - start))); budget=2
+            [ "$left" -gt 0 ] || return 124
+            [ "$left" -ge 2 ] || budget=$left
+            session_bounded "$budget" "$report/process-wait-$tick.txt" ps -axww -o pid=,command= || return 66
+            session_collector_pids "$report/process-wait-$tick.txt" "$script" "$report/script-pids-wait-$tick.txt" || return 74
+            [ ! -s "$report/script-pids-wait-$tick.txt" ] || script_gone=0
+        fi
+        if [ "$state" -eq 1 ] && [ "$gone" -eq 1 ] && [ "$script_gone" -eq 1 ]; then
+            session_bounded 2 "$report/domain-after.txt" launchctl print system || return 66
+            return 0
+        fi
+        sleep 0.2; tick=$((tick + 1))
+    done
+    return 124
+}
+
+# Stop only a caller-validated capture or fixed root-session registration.
+# Production supplies fixed label/plist/script; native CI uses a unique capture
+# fixture label. Preserve the plist on uncertainty and never kill a job process.
+# All evidence stays in a fresh root-owned directory created by the caller.
+session_stop_recorder() {
+    local label=$1 plist=$2 script=$3 report=$4 state=0 bootout=not-run
+    local value interpreter argument offset=1 had_plist=0 code=0 wait_limit=${5:-20}
+    local metadata owner mode scan_script=$script
+    case "$label" in
+        com.uhd770.mvp.capture|com.uhd770.mvp.capture.fixture.*) ;;
+        com.uhd770.mvp.session) scan_script='' ;;
+        *) return 64 ;;
+    esac
+    case "$label" in *[!a-zA-Z0-9._-]*) return 64 ;; esac
+    case "$plist:$script:$report" in /*:/*:/*) ;; *) return 64 ;; esac
+    case "$wait_limit" in ''|*[!0-9]*) return 64 ;; esac
+    [ "$wait_limit" -ge 1 ] && [ "$wait_limit" -le 20 ] || return 64
+    [ -d "$report" ] && [ ! -L "$report" ] || return 64
+    printf 'label=%s\nplist=%s\nscript=%s\nno_collector_kill=true\n' "$label" "$plist" "$script" > "$report/request.txt" || return 74
+    if [ -e "$plist" ] || [ -L "$plist" ]; then
+        [ -f "$plist" ] && [ ! -L "$plist" ] || { printf 'stop=invalid-plist\n' > "$report/result.txt"; return 65; }
+        metadata=$(stat -f '%u %Lp' "$plist") || return 65
+        IFS=' ' read -r owner mode <<< "$metadata" || return 65
+        case "$owner:$mode" in *[!0-7:]*|:*|*:) return 65 ;; esac
+        [ "$owner" = 0 ] && [ $((8#$mode & 0022)) -eq 0 ] || return 65
+        cp -p "$plist" "$report/plist.before.plist" || return 74
+        session_bounded 2 "$report/plist-label.txt" plutil -extract Label raw -o - "$report/plist.before.plist" || return 65
+        IFS= read -r value < "$report/plist-label.txt" || return 65
+        [ "$value" = "$label" ] || { printf 'stop=label-mismatch\n' > "$report/result.txt"; return 65; }
+        session_bounded 2 "$report/plist-interpreter.txt" plutil -extract ProgramArguments.0 raw -o - "$report/plist.before.plist" || return 65
+        IFS= read -r interpreter < "$report/plist-interpreter.txt" || return 65
+        [ "$interpreter" = /bin/bash ] || { printf 'stop=interpreter-mismatch\n' > "$report/result.txt"; return 65; }
+        session_bounded 2 "$report/plist-argument.txt" plutil -extract ProgramArguments.1 raw -o - "$report/plist.before.plist" || return 65
+        IFS= read -r argument < "$report/plist-argument.txt" || return 65
+        if [ "$argument" = -p ]; then
+            offset=2
+            session_bounded 2 "$report/plist-script.txt" plutil -extract ProgramArguments.2 raw -o - "$report/plist.before.plist" || return 65
+            IFS= read -r argument < "$report/plist-script.txt" || return 65
+        fi
+        [ "$argument" = "$script" ] || { printf 'stop=script-mismatch\n' > "$report/result.txt"; return 65; }
+        printf 'identity=matched\nscript_argument=%s\n' "$offset" > "$report/plist-identity.txt"
+        had_plist=1
+    fi
+    session_bounded 2 "$report/domain-before.txt" launchctl print system || return 66
+    session_launchd_state "$label" "$report/label-before.txt" || state=$?
+    [ "$state" -ne 2 ] || { printf 'stop=unknown-label-state\n' > "$report/result.txt"; return 66; }
+    if [ "$state" -eq 0 ] && [ "$had_plist" -eq 0 ]; then
+        # Older removal scripts deleted the plist even when bootout failed.
+        # Validate the surviving registration itself instead of requiring that
+        # missing file or deleting a different job by label alone.
+        awk '
+          /^[[:space:]]*arguments = \{$/ {blocks++; inside=1; next}
+          inside && /^[[:space:]]*\}$/ {inside=0; next}
+          inside {sub(/^[[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); print}
+          END {if (blocks!=1 || inside) exit 1}
+        ' "$report/label-before.txt" > "$report/live-arguments.txt" || return 65
+        interpreter=$(sed -n '1p' "$report/live-arguments.txt")
+        argument=$(sed -n '2p' "$report/live-arguments.txt")
+        if [ "$argument" = -p ]; then argument=$(sed -n '3p' "$report/live-arguments.txt"); fi
+        if [ "$interpreter" != /bin/bash ] || [ "$argument" != "$script" ] || \
+            ! grep -Eq '^[[:space:]]*program = /bin/bash[[:space:]]*$' "$report/label-before.txt"; then
+            printf 'stop=live-registration-identity-mismatch\nplist_was_absent=true\n' > "$report/result.txt"; return 65
+        fi
+        printf 'identity=matched-live-registration\nplist_was_absent=true\n' > "$report/plist-identity.txt"
+    fi
+    awk '/^[[:space:]]*pid = [0-9]+[[:space:]]*$/ {print $3}' "$report/label-before.txt" > "$report/original-pids.txt"
+    session_bounded 2 "$report/process-before.txt" ps -axww -o pid=,command= || return 66
+    : > "$report/script-pids-before.txt"
+    if [ -n "$scan_script" ]; then
+        session_collector_pids "$report/process-before.txt" "$scan_script" "$report/script-pids-before.txt" || return 74
+    fi
+    cat "$report/script-pids-before.txt" >> "$report/original-pids.txt"
+    if [ "$state" -eq 0 ]; then
+        bootout=0
+        session_bounded 5 "$report/bootout.txt" launchctl bootout "system/$label" || bootout=$?
+    else
+        printf 'bootout=not-needed-label-already-absent\n' > "$report/bootout.txt"
+    fi
+    printf 'bootout_exit=%s\n' "$bootout" > "$report/bootout-status.txt"
+    session_wait_launchd_stopped "$label" "$scan_script" "$report/original-pids.txt" "$report" "$wait_limit" || code=$?
+    if [ "$code" -ne 0 ]; then
+        printf 'stop=not-confirmed\nwait_exit=%s\nbootout_exit=%s\nplist_preserved=true\n' "$code" "$bootout" > "$report/result.txt"
+        return "$code"
+    fi
+    if [ "$had_plist" -eq 1 ]; then
+        [ -f "$plist" ] && [ ! -L "$plist" ] && cmp -s "$report/plist.before.plist" "$plist" || {
+            printf 'stop=plist-changed\nplist_preserved=true\n' > "$report/result.txt"; return 65;
+        }
+        rm -f "$plist" || return 74
+    elif [ -e "$plist" ] || [ -L "$plist" ]; then
+        printf 'stop=plist-appeared\nplist_preserved=true\n' > "$report/result.txt"; return 65
+    fi
+    printf 'stop=verified\nlabel_absent=true\noriginal_pids_gone=true\nplist_absent=true\nbootout_exit=%s\n' "$bootout" > "$report/result.txt"
+    if [ -n "$scan_script" ]; then
+        printf 'matching_script_processes=0\n' >> "$report/result.txt"
+    else
+        printf 'script_scan=skipped-shared-session-entrypoint\n' >> "$report/result.txt"
+    fi
+}
+
 # A manually started coordinator gets its own session/process group so Ctrl-C
 # in the root terminal can stop its helpers/probes before closing evidence.
 # Perl/POSIX is provided with the system (also used by macOS shasum).
