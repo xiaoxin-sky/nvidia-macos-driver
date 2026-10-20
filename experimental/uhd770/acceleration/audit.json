@@ -111,6 +111,15 @@
     "checks": "Seven assembler and six preparation Python fixtures, system Bash syntax/help, mocked persistent-capture/probe lifecycle/timeout/UUID fixtures and launchd plist structure. No job registered, driver installed/loaded or GPU accessed.",
     "implementation": "Pinned minimal firmware payload+license, read-only target inventory, root-owned private staging and isolated target KC preflight, bounded boot recorder, explicit separate compute runners.",
     "limits": "Read-only target preflight completed. The new opt-in session installer journals whitelisted live files/KC, resolves a hash-matched USB, restores its next-boot opt-out and chains guarded probes only after preceding success. Its production installation, launchd and recovery behavior still require target validation; fixtures do not establish that behavior.",
+    "single_session_validation": {
+      "source_commit": "7297acabbeeb40bb8ed36e4b9a879d76f5132019",
+      "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39375396965",
+      "result": "success on ubuntu-latest, macos-15-intel and windows-latest",
+      "checks": "Actual production preparation/EXIT recovery/root-job/user-job flow with fake macOS services; atomic file backup, interrupted recovery, recorder and readiness predicates; probe failure sequencing; native Bash syntax, capture/probe supervision, Windows recovery on a temporary fake USB and launchd template structure.",
+      "target_gate": "One preparation invocation checks actual target KC, selected USB UUID/config, signing policy, complete normal-desktop recorder and both real launch entry points before arming. These gates have not yet run on this machine.",
+      "gpu_executed": false,
+      "desktop_acceleration_verified": false
+    },
     "hardware_ready": false
   }
 }
