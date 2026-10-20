@@ -136,8 +136,21 @@
       "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39385895208",
       "result": "success on ubuntu-latest, macos-15-intel and windows-latest",
       "checks": "Actual copied preparation/boot/manual/restore flow with fake OS services; no compute on boot/login; explicit root-authorized fresh capture; ordinary-user sequential readback runners; budget-zero refusal before fork; real isolated process-group timeout/abort/orphan cleanup; transcript failure gates; package has no user LaunchAgent.",
-      "target_execution": "User has not run old preparation. Manual ZIP was copied to the USB and full readback SHA256 verified after a transient USB disconnect; EFI hash unchanged. Actual Mac preparation and GPU execution remain pending.",
+      "target_execution": "r4 preparation stopped before staging with STOP Unsafe owner/mode: /private/var/run. The returned export contained no preparation transcript; the user supplied the full error. No new GPU execution is established.",
       "login_compute_enabled": false,
+      "gpu_executed": false,
+      "hardware_ready": false
+    },
+    "preparation_lock_fix": {
+      "source_commit": "c5a8e3b5148f37be2ce5b082d5664ad2a18b06a1",
+      "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39405370279",
+      "result": "success on Intel macOS, Ubuntu and Windows; targeted preparation/bootstrap/archive fixtures plus native Bash/lifecycle/group checks",
+      "reported_error": "STOP: Unsafe owner/mode: /private/var/run",
+      "finding": "The system runtime parent was checked before staging. Its actual uid/mode was not captured; the bootstrap export had only two marker files. The guard location was inappropriate for this lock.",
+      "fix": "Use protected AppSupport sibling lock without changing system runtime permissions; persist earliest full stdout/stderr and child/tee status; copy a completed report to one hash-matched volume and include root bootstrap originals in later export.",
+      "targeted_regression": "Group-writable root:775 runtime directory accepted without touching it; pipeline failure code preserved, USB copies unique/no overwrite, bootstrap available before PLAN.",
+      "delivery": "r5 verified on USB; original three component archives and active EFI bytes unchanged.",
+      "target_preparation_verified": false,
       "gpu_executed": false,
       "hardware_ready": false
     }
