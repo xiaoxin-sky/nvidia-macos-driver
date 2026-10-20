@@ -130,6 +130,16 @@
         "target_runtime_verified": false
       }
     },
-    "hardware_ready": false
+    "hardware_ready": false,
+    "manual_validation": {
+      "source_commit": "bb9c27d4f0ae3f1b8e7d03568691fecf78a52dd3",
+      "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39385895208",
+      "result": "success on ubuntu-latest, macos-15-intel and windows-latest",
+      "checks": "Actual copied preparation/boot/manual/restore flow with fake OS services; no compute on boot/login; explicit root-authorized fresh capture; ordinary-user sequential readback runners; budget-zero refusal before fork; real isolated process-group timeout/abort/orphan cleanup; transcript failure gates; package has no user LaunchAgent.",
+      "target_execution": "User has not run the old preparation entry. Manual ZIP was copied and checksum-verified on the USB; actual target preparation and GPU execution remain pending.",
+      "login_compute_enabled": false,
+      "gpu_executed": false,
+      "hardware_ready": false
+    }
   }
 }
