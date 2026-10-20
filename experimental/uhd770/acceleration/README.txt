@@ -29,6 +29,13 @@ hardware VBL delivery, full sleep/wake and video codecs are outside this first
 application MVP. No claim of working Metal, desktop acceleration or 4K60 follows
 from a successful component build.
 
+The ordinary Metal buffer/texture/compute path uses ANV allocations. NMXAccel's
+inherited family GPUVA/VRAM callbacks still depend on NVIDIA RM and are not an
+Intel allocation implementation. Hardware resource pools, cross-process shared
+texture handles and family-managed presentation are outside this MVP. Apple's
+private MTLIOAccelDevice initialization remains a separate native runtime gate;
+source compilation cannot prove that it avoids those unsupported callbacks.
+
 Artifacts contain diagnostic files, not an installation command. Do not combine
 arbitrary older kernel/userland versions. A later reviewed test kit must record
 all source/binary identities, recovery steps and the exact test scope.

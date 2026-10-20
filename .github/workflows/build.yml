@@ -166,6 +166,13 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror /tmp/nmx-i915-mmap-test.c -o /tmp/nmx-i915-mmap-test \
             2>&1 | tee /tmp/nmx-i915-mmap-compile.log
           /tmp/nmx-i915-mmap-test | tee /tmp/nmx-i915-mmap-test.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/acceleration/workqueue-tests/prepare_fixture.py" \
+            --port "$X" \
+            --template "$GITHUB_WORKSPACE/experimental/uhd770/acceleration/workqueue-tests/taskqueue_fixture.cpp.in" \
+            --output /tmp/nmx-taskqueue-test.cpp
+          c++ -std=c++20 -Wall -Wextra -Werror -pthread /tmp/nmx-taskqueue-test.cpp \
+            -o /tmp/nmx-taskqueue-test 2>&1 | tee /tmp/nmx-taskqueue-compile.log
+          /tmp/nmx-taskqueue-test | tee /tmp/nmx-taskqueue-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_irq_fixture.py" \
             "$X/bsdcompat/src/nmx_bus.c" \
             "$GITHUB_WORKSPACE/experimental/uhd770/tests/irq_drain_fixture.c.in" \
@@ -302,6 +309,8 @@ jobs:
           cp /tmp/nmx-display-protocol-test.log "$X/bsdcompat/include/nmx_display_protocol.h" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-native-display-test.cpp /tmp/nmx-native-display-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-i915-mmap-test.c /tmp/nmx-i915-mmap-test.log /tmp/nmx-i915-mmap-compile.log /tmp/nmx-i915-mman-generated.c "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-taskqueue-test.cpp /tmp/nmx-taskqueue-test.log /tmp/nmx-taskqueue-compile.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp "$X/bsdcompat/src/nmx_task.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/xnu/nmx_fb_interrupts.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/xnu/nmx_attach_lifecycle.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/bsdcompat/include/nmx_gamma_lut.h" "$S/kpi/drm-kmod/drivers/gpu/drm/drm_color_mgmt.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true

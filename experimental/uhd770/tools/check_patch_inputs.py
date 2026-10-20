@@ -45,6 +45,14 @@ def check(port, drm, package):
         prepare_bridge(x / "override/src/nmx_fb_bridge.c", package / "tests/fb_bridge_fixture.c.in", root / "fb-bridge-test.c")
         prepare_irq(x / "bsdcompat/src/nmx_bus.c", package / "tests/irq_drain_fixture.c.in", root / "irq-drain-test.c")
         prepare_native_display(x / "xnu/nmx_fb.cpp", package / "tests/native_display_fixture.cpp.in", root / "native-display-test.cpp")
+        for folder, template, output in [
+            ("kernel-tests", "mmap_fixture.c.in", "i915-mmap-test.c"),
+            ("workqueue-tests", "taskqueue_fixture.cpp.in", "taskqueue-test.cpp"),
+        ]:
+            directory = package / "acceleration" / folder
+            generator = "prepare_mmap_fixture.py" if folder == "kernel-tests" else "prepare_fixture.py"
+            subprocess.run([sys.executable, str(directory / generator), "--port", str(x),
+                            "--template", str(directory / template), "--output", str(root / output)], check=True)
         assert (x / "xnu/nmx_fb_interrupts.h").is_file()
         assert (x / "xnu/nmx_attach_lifecycle.h").is_file()
         enable(x)

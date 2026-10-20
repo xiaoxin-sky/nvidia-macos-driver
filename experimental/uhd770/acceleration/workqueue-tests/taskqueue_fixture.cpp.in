@@ -1,0 +1,342 @@
+/* The actual NMX taskqueue runs against real host mutexes and threads. Tests
+ * establish callback/wait barriers before checking cancel/drain/free ordering;
+ * no fixed sleeps are used to infer that a callback has started or stopped.
+ */
+#include <atomic>
+#include <cassert>
+#include <cerrno>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+
+using namespace std::chrono_literals;
+using u_int = unsigned int;
+using wait_result_t = int;
+using thread_t = std::thread::id;
+using taskqueue_enqueue_fn = void (*)(void *);
+using task_fn_t = void(void *, int);
+struct mtx { std::mutex native; };
+static void mtx_lock(mtx *lock) { lock->native.lock(); }
+static void mtx_unlock(mtx *lock) { lock->native.unlock(); }
+static void mtx_destroy(mtx *) {}
+
+/* Storage-only equivalents of FreeBSD's STAILQ primitives. Scheduling and
+ * lifetime decisions below are extracted from nmx_task.c, not recreated here.
+ */
+#ifdef STAILQ_HEAD
+#undef STAILQ_HEAD
+#endif
+#ifdef STAILQ_ENTRY
+#undef STAILQ_ENTRY
+#endif
+#ifdef STAILQ_FIRST
+#undef STAILQ_FIRST
+#endif
+#ifdef STAILQ_EMPTY
+#undef STAILQ_EMPTY
+#endif
+#ifdef STAILQ_INIT
+#undef STAILQ_INIT
+#endif
+#ifdef STAILQ_FOREACH
+#undef STAILQ_FOREACH
+#endif
+#ifdef STAILQ_INSERT_HEAD
+#undef STAILQ_INSERT_HEAD
+#endif
+#ifdef STAILQ_INSERT_AFTER
+#undef STAILQ_INSERT_AFTER
+#endif
+#ifdef STAILQ_REMOVE
+#undef STAILQ_REMOVE
+#endif
+#define STAILQ_HEAD(name, type) struct name { type *stqh_first; type **stqh_last; }
+#define STAILQ_ENTRY(type) struct { type *stqe_next; }
+#define STAILQ_FIRST(head) ((head)->stqh_first)
+#define STAILQ_EMPTY(head) (STAILQ_FIRST(head) == nullptr)
+#define STAILQ_INIT(head) do { (head)->stqh_first = nullptr; \
+   (head)->stqh_last = &(head)->stqh_first; } while (0)
+#define STAILQ_FOREACH(var, head, field) \
+   for ((var) = STAILQ_FIRST(head); (var); (var) = (var)->field.stqe_next)
+#define STAILQ_INSERT_HEAD(head, entry, field) do { \
+   if (((entry)->field.stqe_next = (head)->stqh_first) == nullptr) \
+      (head)->stqh_last = &(entry)->field.stqe_next; \
+   (head)->stqh_first = (entry); } while (0)
+#define STAILQ_INSERT_AFTER(head, prev, entry, field) do { \
+   if (((entry)->field.stqe_next = (prev)->field.stqe_next) == nullptr) \
+      (head)->stqh_last = &(entry)->field.stqe_next; \
+   (prev)->field.stqe_next = (entry); } while (0)
+#define STAILQ_REMOVE(head, entry, type, field) do { \
+   type **cursor = &(head)->stqh_first; \
+   while (*cursor != (entry)) cursor = &(*cursor)->field.stqe_next; \
+   if ((*cursor = (entry)->field.stqe_next) == nullptr) (head)->stqh_last = cursor; \
+} while (0)
+
+constexpr int TASK_ENQUEUED = 1, TASK_NOENQUEUE = 2;
+constexpr unsigned TASKQUEUE_FAIL_IF_PENDING = 1, TASKQUEUE_FAIL_IF_CANCELING = 2;
+constexpr unsigned TQ_EXITING = 1;
+constexpr int M_TASKQUEUE = 0;
+
+struct WaitChannel {
+   std::mutex mutex;
+   std::condition_variable condition, state_changed;
+   unsigned waiters = 0;
+   uint64_t generation = 0;
+};
+static std::mutex channels_mutex;
+static std::unordered_map<const void *, std::shared_ptr<WaitChannel>> channels;
+static std::shared_ptr<WaitChannel> channel_for(const void *address) {
+   std::lock_guard<std::mutex> guard(channels_mutex);
+   auto &channel = channels[address];
+   if (!channel) channel = std::make_shared<WaitChannel>();
+   return channel;
+}
+static int msleep(const void *address, mtx *lock, int, const char *, int) {
+   auto channel = channel_for(address);
+   std::unique_lock<std::mutex> guard(channel->mutex);
+   const uint64_t generation = channel->generation;
+   ++channel->waiters;
+   channel->state_changed.notify_all();
+   mtx_unlock(lock);
+   const bool woke = channel->condition.wait_for(guard, 5s, [&] {
+      return channel->generation != generation;
+   });
+   assert(woke && "fixture wait timed out");
+   --channel->waiters;
+   guard.unlock();
+   mtx_lock(lock);
+   return 0;
+}
+static void wakeup(const void *address) {
+   auto channel = channel_for(address);
+   std::lock_guard<std::mutex> guard(channel->mutex);
+   ++channel->generation;
+   channel->condition.notify_all();
+}
+static void wait_sleeping(const void *address) {
+   auto channel = channel_for(address);
+   std::unique_lock<std::mutex> guard(channel->mutex);
+   assert(channel->state_changed.wait_for(guard, 5s, [&] {
+      return channel->waiters != 0;
+   }));
+}
+static std::atomic<unsigned> cleanups{0}, deallocations{0}, active_callbacks{0};
+static void nmx_thread_exit_cleanup() { ++cleanups; }
+static thread_t current_thread() { return std::this_thread::get_id(); }
+static void thread_terminate(thread_t) {}
+static void fixture_free(void *);
+#ifdef free
+#undef free
+#endif
+#define free(pointer, tag) ((void)(tag), fixture_free(pointer))
+
+/* NMX_ACTUAL_TASKQUEUE_IMPLEMENTATION */
+
+#undef free
+static void fixture_free(void *pointer) {
+   auto *queue = static_cast<taskqueue *>(pointer);
+   assert(queue->tq_alive == 0);
+   assert(queue->tq_running_n == 0 && queue->tq_active == nullptr);
+   assert(active_callbacks == 0);
+   ++deallocations;
+   delete queue;
+}
+
+struct Gate {
+   std::mutex mutex;
+   std::condition_variable condition;
+   bool entered = false, open = false;
+   void block() {
+      std::unique_lock<std::mutex> guard(mutex);
+      entered = true;
+      condition.notify_all();
+      assert(condition.wait_for(guard, 5s, [&] { return open; }));
+   }
+   void wait_entered() {
+      std::unique_lock<std::mutex> guard(mutex);
+      assert(condition.wait_for(guard, 5s, [&] { return entered; }));
+   }
+   void release() {
+      std::lock_guard<std::mutex> guard(mutex);
+      open = true;
+      condition.notify_all();
+   }
+};
+struct HeldTask {
+   Gate gate;
+   std::atomic<unsigned> calls{0}, simultaneous{0}, max_simultaneous{0};
+   taskqueue *queue = nullptr;
+   task *item = nullptr;
+   bool self_cancel = false;
+};
+static void held_callback(void *argument, int pending) {
+   auto *held = static_cast<HeldTask *>(argument);
+   assert(pending >= 1);
+   ++active_callbacks;
+   ++held->calls;
+   const unsigned active = ++held->simultaneous;
+   unsigned maximum = held->max_simultaneous;
+   while (maximum < active &&
+          !held->max_simultaneous.compare_exchange_weak(maximum, active)) {}
+   if (held->self_cancel)
+      assert(taskqueue_cancel(held->queue, held->item, nullptr) == EBUSY);
+   held->gate.block();
+   --held->simultaneous;
+   --active_callbacks;
+}
+static void initialize(taskqueue &queue) { STAILQ_INIT(&queue.tq_queue); }
+static void initialize(task &item, HeldTask &held, taskqueue &queue) {
+   item.ta_func = held_callback;
+   item.ta_context = &held;
+   held.queue = &queue;
+   held.item = &item;
+}
+
+static void test_two_active_and_drains() {
+   taskqueue queue{};
+   initialize(queue);
+   task a{}, b{};
+   HeldTask first, second;
+   initialize(a, first, queue);
+   initialize(b, second, queue);
+   first.self_cancel = true;
+   assert(taskqueue_enqueue(&queue, &a) == 0);
+   std::thread worker_a([&] { taskqueue_run(&queue); });
+   first.gate.wait_entered();
+   assert(taskqueue_enqueue(&queue, &b) == 0);
+   std::thread worker_b([&] { taskqueue_run(&queue); });
+   second.gate.wait_entered();
+   assert(taskqueue_poll_is_busy(&queue, &a) && taskqueue_poll_is_busy(&queue, &b));
+   unsigned pending = 99;
+   assert(taskqueue_cancel(&queue, &a, &pending) == EBUSY && pending == 0);
+   auto drain_a = std::async(std::launch::async, [&] { taskqueue_drain(&queue, &a); });
+   wait_sleeping(&a);
+   auto drain_all = std::async(std::launch::async, [&] { taskqueue_drain_all(&queue); });
+   wait_sleeping(&queue);
+   second.gate.release();
+   worker_b.join();
+   assert(taskqueue_poll_is_busy(&queue, &a));
+   assert(!taskqueue_poll_is_busy(&queue, &b));
+   assert(drain_a.wait_for(0s) == std::future_status::timeout);
+   assert(drain_all.wait_for(0s) == std::future_status::timeout);
+   first.gate.release();
+   worker_a.join();
+   assert(drain_a.wait_for(5s) == std::future_status::ready);
+   drain_a.get();
+   assert(drain_all.wait_for(5s) == std::future_status::ready);
+   drain_all.get();
+   assert(!taskqueue_poll_is_busy(&queue, &a));
+   assert(queue.tq_active == nullptr && queue.tq_running_n == 0);
+}
+
+static void test_requeue_skips_active_and_preserves_pending() {
+   taskqueue queue{};
+   initialize(queue);
+   task a{}, b{};
+   HeldTask first, second;
+   initialize(a, first, queue);
+   initialize(b, second, queue);
+   second.gate.release();
+   assert(taskqueue_enqueue(&queue, &a) == 0);
+   std::thread worker_a([&] { taskqueue_run(&queue); });
+   first.gate.wait_entered();
+   assert(taskqueue_enqueue(&queue, &a) == 0);
+   assert(taskqueue_enqueue(&queue, &a) == 0);
+   assert(taskqueue_enqueue_flags(&queue, &a, TASKQUEUE_FAIL_IF_PENDING) == EEXIST);
+   assert(taskqueue_enqueue(&queue, &b) == 0);
+   std::thread worker_b([&] { taskqueue_run(&queue); });
+   worker_b.join();
+   assert(first.calls == 1 && second.calls == 1);
+   assert(taskqueue_poll_is_busy(&queue, &a));
+   first.gate.release();
+   worker_a.join();
+   assert(first.calls == 2 && first.max_simultaneous == 1);
+   assert(STAILQ_EMPTY(&queue.tq_queue));
+}
+
+static void test_cancel_pending_wakes_all_drains() {
+   taskqueue queue{};
+   initialize(queue);
+   queue.tq_blocked = 1;
+   task item{};
+   HeldTask held;
+   initialize(item, held, queue);
+   assert(taskqueue_enqueue(&queue, &item) == 0);
+   auto drain = std::async(std::launch::async, [&] { taskqueue_drain(&queue, &item); });
+   wait_sleeping(&item);
+   auto drain_all = std::async(std::launch::async, [&] { taskqueue_drain_all(&queue); });
+   wait_sleeping(&queue);
+   unsigned pending = 0;
+   assert(taskqueue_cancel(&queue, &item, &pending) == 0 && pending == 1);
+   assert(drain.wait_for(5s) == std::future_status::ready);
+   drain.get();
+   assert(drain_all.wait_for(5s) == std::future_status::ready);
+   drain_all.get();
+   assert(held.calls == 0);
+}
+
+static void test_free_waits_for_all_worker_callbacks() {
+   auto *queue = new taskqueue{};
+   initialize(*queue);
+   queue->tq_alive = 2;
+   task a{}, b{};
+   HeldTask first, second;
+   initialize(a, first, *queue);
+   initialize(b, second, *queue);
+   assert(taskqueue_enqueue(queue, &a) == 0);
+   std::thread worker_a([&] { taskqueue_thread_loop(queue, 0); });
+   first.gate.wait_entered();
+   assert(taskqueue_enqueue(queue, &b) == 0);
+   std::thread worker_b([&] { taskqueue_thread_loop(queue, 0); });
+   second.gate.wait_entered();
+   auto release = std::async(std::launch::async, [&] { taskqueue_free(queue); });
+   wait_sleeping(queue);
+   second.gate.release();
+   worker_b.join();
+   assert(release.wait_for(0s) == std::future_status::timeout);
+   assert(deallocations == 0);
+   first.gate.release();
+   worker_a.join();
+   assert(release.wait_for(5s) == std::future_status::ready);
+   release.get();
+   assert(deallocations == 1 && cleanups == 2);
+}
+
+static void test_free_waits_for_external_runner() {
+   auto *queue = new taskqueue{};
+   initialize(*queue);
+   task item{};
+   HeldTask held;
+   initialize(item, held, *queue);
+   assert(taskqueue_enqueue(queue, &item) == 0);
+   std::thread runner([&] { taskqueue_run(queue); });
+   held.gate.wait_entered();
+   /* External taskqueue_run calls do not contribute to tq_alive. */
+   assert(queue->tq_alive == 0);
+   const unsigned before = deallocations;
+   auto release = std::async(std::launch::async, [&] { taskqueue_free(queue); });
+   wait_sleeping(queue);
+   assert(release.wait_for(0s) == std::future_status::timeout);
+   assert(deallocations == before);
+   held.gate.release();
+   runner.join();
+   assert(release.wait_for(5s) == std::future_status::ready);
+   release.get();
+   assert(deallocations == before + 1);
+}
+
+int main() {
+   test_two_active_and_drains();
+   test_requeue_skips_active_and_preserves_pending();
+   test_cancel_pending_wakes_all_drains();
+   test_free_waits_for_all_worker_callbacks();
+   test_free_waits_for_external_runner();
+   std::puts("actual taskqueue concurrency, requeue, cancel, drain and worker free passed");
+}

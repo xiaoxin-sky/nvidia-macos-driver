@@ -62,7 +62,9 @@ xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundle -fobjc-arc -O1 \
   -Werror=unguarded-availability-new -I"$S/vulkan-headers/include" \
   -o "$ROOT/build/NVMTLDriver" "$S/plugin/NVMTLDevice.m" \
   -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation
-cp "$LLVM_PREFIX/bin/opt" "$ROOT/build/air-opt"
+xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -std=c11 -Wall -Wextra -Werror \
+  -I"$LLVM_PREFIX/include" "$REPO/experimental/uhd770/acceleration/compiler-smoke/air_reader.c" \
+  "$LLVM_PREFIX/lib/libLLVM.dylib" -Wl,-headerpad_max_install_names -o "$ROOT/build/air-opt"
 python3 "$REPO/experimental/uhd770/acceleration/relocate.py" \
   --destination "$OUT/Library/GPUBundles/nvmtl" --search "${LLVM_PREFIX:?}/lib" \
   --report dependency-closure-metal.json \
@@ -90,6 +92,13 @@ python3 "$SMOKE/translate.py" \
   --library "$OUT/Library/GPUBundles/nvmtl/libnvmtl_translate.dylib" \
   --input "$ROOT/build/apple.ll" --output "$ROOT/build/apple-air.spv" --kind decoded-apple-air \
   2>&1 | tee "$OUT/logs/apple-air-smoke.txt"
+mkdir -p "$OUT/probe"
+xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -std=c++17 \
+  -fobjc-arc -fobjc-arc-exceptions -Wall -Wextra -Werror \
+  "$REPO/experimental/uhd770/acceleration/metal-probe/main.mm" \
+  -framework Foundation -framework Metal -framework IOKit -framework CoreFoundation \
+  -o "$OUT/probe/uhd770-metal-probe"
+xcrun --sdk macosx metallib "$ROOT/build/apple.air" -o "$OUT/probe/smoke.metallib"
 cp "$ROOT/sources.json" "$OUT/logs/acceleration-sources.json"
 
 echo "Intel accelerator, translator and Metal frontend compiled; nothing installed or loaded."

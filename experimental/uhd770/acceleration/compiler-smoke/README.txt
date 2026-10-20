@@ -36,6 +36,11 @@ not an unrelated system LLVM. Keep compiler versions and all three intermediates
 as evidence. This covers the opt-based fallback reader; an in-process libLLVM
 smoke check remains distinct.
 
+air_reader.c supplies the frontend's air-opt CLI contract through LLVM's C
+bitcode reader/printer. Stock LLVM opt attempts to create an air64 target machine
+and rejects that architecture even when it has decoded the bitcode. This helper
+creates no target machine and preserves the original AIR triple/address spaces.
+
 Some Xcode runner images have a metal stub without the downloadable Metal
 Toolchain. --find alone is not proof of availability: the compile command must
 succeed. If unavailable, explicitly mark the Apple AIR step unverified, or make

@@ -601,6 +601,159 @@
      int nmax = dmat->nsegments > 64 ? 64 : dmat->nsegments;
      bus_dma_segment_t *segs = malloc(sizeof(*segs) * (size_t)nmax, M_BUSDMA, flags & BUS_DMA_NOWAIT ? M_NOWAIT : M_WAITOK);
      if (segs == NULL)
+--- a/bsdcompat/src/nmx_task.c
++++ b/bsdcompat/src/nmx_task.c
+@@ -219,11 +219,20 @@
+ 
+ /* ---- taskqueue ---------------------------------------------------------------------------------------------------- */
+ 
++/* A callback's stack record remains linked until that callback returns. The
++ * queue mutex protects this list, so a drain sees every worker, and requeueing
++ * a task cannot run a second copy of it concurrently on another worker.
++ */
++struct nmx_taskqueue_active {
++    struct nmx_taskqueue_active *next;
++    struct task *task;
++};
++
+ struct taskqueue {
+     STAILQ_HEAD(, task) tq_queue;
+     struct mtx tq_mutex;
+     const char *tq_name;
+-    struct task *tq_running;        /* task whose function is executing now (one per thread; see tq_running_n) */
++    struct nmx_taskqueue_active *tq_active;
+     int tq_running_n;
+     int tq_tcount;                  /* threads started */
+     int tq_alive;                   /* threads still running */
+@@ -269,19 +278,37 @@
+ static void taskqueue_run_locked(struct taskqueue *q)
+ {
+     struct task *t;
+-    while (!q->tq_blocked && (t = STAILQ_FIRST(&q->tq_queue)) != NULL) {
+-        STAILQ_REMOVE_HEAD(&q->tq_queue, ta_link);
++    while (!q->tq_blocked) {
++        /* A pending invocation of an active task stays queued. Other tasks
++         * behind it remain runnable; the active worker wakes the queue when
++         * it finishes, including when no other runnable task was available.
++         */
++        STAILQ_FOREACH(t, &q->tq_queue, ta_link) {
++            struct nmx_taskqueue_active *active;
++            for (active = q->tq_active; active && active->task != t; active = active->next)
++                ;
++            if (active == NULL)
++                break;
++        }
++        if (t == NULL)
++            break;
++        STAILQ_REMOVE(&q->tq_queue, t, task, ta_link);
+         int pending = t->ta_pending;
+         t->ta_pending = 0;
+         t->ta_flags &= ~TASK_ENQUEUED;
+-        q->tq_running = t;
++        struct nmx_taskqueue_active active = { .next = q->tq_active, .task = t };
++        q->tq_active = &active;
+         q->tq_running_n++;
+         mtx_unlock(&q->tq_mutex);
+         t->ta_func(t->ta_context, pending);
+         mtx_lock(&q->tq_mutex);
++        struct nmx_taskqueue_active **cursor = &q->tq_active;
++        while (*cursor != &active)
++            cursor = &(*cursor)->next;
++        *cursor = active.next;
+         q->tq_running_n--;
+-        q->tq_running = NULL;
+         wakeup(t);
++        wakeup(q);
+     }
+ }
+ 
+@@ -294,7 +321,8 @@
+ 
+ static void taskqueue_thread_loop(void *arg, wait_result_t wr)
+ {
+-    struct taskqueue *q = arg;
++    (void)wr;
++    struct taskqueue *q = (struct taskqueue *)arg;
+     mtx_lock(&q->tq_mutex);
+     while (!(q->tq_flags & TQ_EXITING)) {
+         taskqueue_run_locked(q);
+@@ -305,6 +333,7 @@
+     taskqueue_run_locked(q);
+     q->tq_alive--;
+     wakeup(&q->tq_alive);
++    wakeup(q);
+     mtx_unlock(&q->tq_mutex);
+     nmx_thread_exit_cleanup();
+     thread_terminate(current_thread());
+@@ -407,7 +436,11 @@
+ 
+ static int task_is_running(struct taskqueue *q, struct task *t)
+ {
+-    return q->tq_running == t;
++    struct nmx_taskqueue_active *active;
++    for (active = q->tq_active; active; active = active->next)
++        if (active->task == t)
++            return 1;
++    return 0;
+ }
+ 
+ int taskqueue_poll_is_busy(struct taskqueue *q, struct task *t)
+@@ -427,6 +460,9 @@
+         pending = t->ta_pending;
+         t->ta_pending = 0;
+         t->ta_flags &= ~TASK_ENQUEUED;
++        /* A drain may already be sleeping for this pending invocation. */
++        wakeup(t);
++        wakeup(q);
+     }
+     int busy = task_is_running(q, t);
+     mtx_unlock(&q->tq_mutex);
+@@ -447,6 +483,9 @@
+ 
+ void taskqueue_drain(struct taskqueue *q, struct task *t)
+ {
++    /* A worker must not drain its own active task: that would wait for the
++     * callback currently making this call, as with FreeBSD taskqueue_drain.
++     */
+     mtx_lock(&q->tq_mutex);
+     while ((t->ta_flags & TASK_ENQUEUED) || task_is_running(q, t))
+         msleep(t, &q->tq_mutex, 0, "tqdrain", 0);
+@@ -462,13 +501,8 @@
+ void taskqueue_drain_all(struct taskqueue *q)
+ {
+     mtx_lock(&q->tq_mutex);
+-    while (!STAILQ_EMPTY(&q->tq_queue) || q->tq_running_n > 0) {
+-        struct task *last = STAILQ_LAST(&q->tq_queue, task, ta_link);
+-        if (last)
+-            msleep(last, &q->tq_mutex, 0, "tqdrainall", 0);
+-        else
+-            msleep(q->tq_running, &q->tq_mutex, 0, "tqdrainall", 1);
+-    }
++    while (!STAILQ_EMPTY(&q->tq_queue) || q->tq_running_n > 0)
++        msleep(q, &q->tq_mutex, 0, "tqdrainall", 0);
+     mtx_unlock(&q->tq_mutex);
+ }
+ 
+@@ -508,12 +542,17 @@
+ 
+ void taskqueue_free(struct taskqueue *q)
+ {
++    /* As on FreeBSD, callers first stop external producers/new run calls and do not free
++     * a queue from one of its own workers. The last worker drops tq_alive
++     * under this mutex after removing its active record; after unlocking it
++     * performs only per-thread cleanup and never touches the queue again.
++     */
+     mtx_lock(&q->tq_mutex);
+     q->tq_flags |= TQ_EXITING;
+     wakeup(q);
+-    while (q->tq_alive > 0) {
++    while (q->tq_alive > 0 || q->tq_running_n > 0) {
+         wakeup(q);
+-        msleep(&q->tq_alive, &q->tq_mutex, 0, "tqfree", 0);
++        msleep(q, &q->tq_mutex, 0, "tqfree", 0);
+     }
+     mtx_unlock(&q->tq_mutex);
+     mtx_destroy(&q->tq_mutex);
 --- a/ccxx.sh
 +++ b/ccxx.sh
 @@ -6,7 +6,7 @@
