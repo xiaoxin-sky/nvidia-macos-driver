@@ -330,7 +330,7 @@ prepare() {
 
 boot() {
     safe_directory "$ROOT"; safe_directory "$PRIVATE"; safe_directory "$PUBLIC"
-    local current prepare_boot args
+    local current prepare_boot args attempt recovered=0
     current=$(sysctl -n kern.bootsessionuuid); prepare_boot=$(property preparation_boot)
     if [ "$current" = "$prepare_boot" ]; then
         printf 'root_job_entrypoint=passed\nboot=%s\n' "$current" > "$PUBLIC/root-preflight-$current.txt"
@@ -338,7 +338,13 @@ boot() {
         exit 0
     fi
     # Restore the persistent USB opt-out first, even on an aborted test boot.
-    if restore_optout; then
+    # Disk Arbitration/USB publication can lag the root launchd domain. Retry
+    # finite reads/mounts before giving up; never overwrite a changed config.
+    for attempt in 1 2 3; do
+        if restore_optout; then recovered=1; break; fi
+        sleep 2
+    done
+    if [ "$recovered" -eq 1 ]; then
         printf 'next_boot_optout=verified\nboot=%s\n' "$current" > "$PUBLIC/recovery-$current.txt"
     else
         printf 'next_boot_optout=NOT_VERIFIED\nboot=%s\n' "$current" > "$PUBLIC/recovery-$current.txt"

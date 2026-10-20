@@ -118,6 +118,16 @@ session_recorder_valid() {
     grep -q 'collector_command_exit=0' "$report/ioreg-NMXAccel-0.txt" || return 1
 }
 
+# PM callbacks can overwrite the last attach checkpoint after successful
+# lifecycle completion. In that case require the published framebuffer plus a
+# successful completed PM callback; a claim or framebuffer alone is insufficient.
+session_registry_ready() {
+    local report=$1
+    grep -Eq 'failed:|parked:|cancelled:|attach.no_framebuffer' "$report" && return 1
+    grep -q 'class NMXGPUFB' "$report" || return 1
+    grep -Eq '(attach.complete|pm.callback.after) ret=0(["[:space:]]|$)' "$report"
+}
+
 # Run the two diagnostics in order only when the preceding command actually
 # returned success. The production probe independently requires its own exact
 # readback marker, deadline and candidate UUID; callers cannot skip that gate.

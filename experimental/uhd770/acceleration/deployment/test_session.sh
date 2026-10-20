@@ -81,6 +81,15 @@ session_recorder_valid "$TASK_TMP/report" CURRENT
 if session_recorder_valid "$TASK_TMP/report" OLD; then exit 1; fi
 printf 'stage=kernel-stream startup_failed status=42\n' >> "$TASK_TMP/report/stages.txt"
 if session_recorder_valid "$TASK_TMP/report" CURRENT; then exit 1; fi
+
+printf 'class NMXGPUFB\n"nmxdiag-stage" = "attach.complete ret=0"\n' > "$TASK_TMP/registry"
+session_registry_ready "$TASK_TMP/registry"
+printf 'class NMXGPUFB\n"nmxdiag-stage" = "pm.callback.after ret=0"\n' > "$TASK_TMP/registry"
+session_registry_ready "$TASK_TMP/registry"
+printf '"nullmoth-gpu-state" = "failed: port attach; guard retained"\n' >> "$TASK_TMP/registry"
+if session_registry_ready "$TASK_TMP/registry"; then exit 1; fi
+printf '"nmxdiag-stage" = "attach.complete ret=0"\n' > "$TASK_TMP/registry"
+if session_registry_ready "$TASK_TMP/registry"; then exit 1; fi
 sed '/startup_failed/d' "$TASK_TMP/report/stages.txt" > "$TASK_TMP/stages"
 command mv "$TASK_TMP/stages" "$TASK_TMP/report/stages.txt"
 printf 'collector_command_exit=124\n' > "$TASK_TMP/report/dmesg-0.txt"

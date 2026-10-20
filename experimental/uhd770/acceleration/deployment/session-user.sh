@@ -50,7 +50,7 @@ while [ "$elapsed" -lt 330 ]; do
     fi
     if [ -f "$recovery" ] && grep -qx 'next_boot_optout=verified' "$recovery"; then
         if session_bounded 3 "$SESSION/registry-latest.txt" ioreg -r -c NMXGPU -l -w0; then
-            if grep -q 'attach.complete ret=0' "$SESSION/registry-latest.txt"; then ready=1; break; fi
+            if session_registry_ready "$SESSION/registry-latest.txt"; then ready=1; break; fi
             if grep -q 'failed:.*guard retained\|attach.no_framebuffer' "$SESSION/registry-latest.txt"; then
                 printf 'Driver initialization failed; no compute probe started.\n'
                 exit 66

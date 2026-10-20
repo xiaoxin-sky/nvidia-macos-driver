@@ -42,7 +42,7 @@ elif name == 'nvram':
 elif name == 'ioreg':
     if 'IGPU' in args: print('"device-id" = <80460000>\n"vendor-id" = <86800000>')
     elif os.environ.get('SESSION_BOOT') == 'TEST':
-        print('"nmxdiag-stage" = "attach.complete ret=0"')
+        print('"nmxdiag-stage" = "attach.complete ret=0"\nclass NMXGPUFB')
 elif name == 'diskutil':
     sys.stdout.buffer.write(plistlib.dumps({'MountPoint': str(root / 'mac/Volumes/1401'),
         'VolumeUUID': 'FIXTURE-UUID', 'VolumeName': '1401', 'BusProtocol': 'USB'}))
