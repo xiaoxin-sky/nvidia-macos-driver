@@ -63,13 +63,20 @@
     "Acceleration package boundary: NMXGPU display publication is separate from NMXAccel, ANV/libdrm, the missing Metal frontend and real GPU execution. This is not a full Mesa or memory/IRQ-shim audit."
   ],
   "compilation_evidence": {
-    "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39352787219",
-    "commit": "04376398fa08845ade3825e77a26e60aeace1bac",
-    "result": "900 DRM/AMD + 274 i915 + 76 runtime units compiled, host fixtures passed, required symbol definitions verified, temporary native auxiliary kernel collection created and inspected successfully. This evidence covers the first display-protocol commit; subsequent gated-resense/resource fixes require their own CI. No driver was installed/loaded and no hardware was tested.",
+    "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39354221123",
+    "commit": "758dc75025811e133e346fb585c11a4c2d5ca501",
+    "result": "900 DRM/AMD + 274 i915 + 76 runtime units compiled, all host fixtures including actual extracted native display methods passed, required symbol definitions verified, temporary native auxiliary kernel collection created and inspected successfully. Covers gated resense, operation-lock cleanup, hotplug recovery and preferred-mode flags. No driver was installed/loaded and no hardware was tested.",
+    "verified_artifact": {
+      "id": 12234628592,
+      "name": "nmxgpu-build",
+      "zip_bytes": 25276517,
+      "sha256": "917eaa1fb2774c763784cfb8201b35ec19c7fc18c92dc4e49c95be29b839a601",
+      "verification": "Downloaded ZIP matched GitHub's artifact digest; native-display/bridge fixture logs, source-count logs and native KC preflight result inspected."
+    },
     "compiler_cache": {
       "cacheable_calls": 1251,
-      "hits": 1244,
-      "hit_rate_percent": 99.44
+      "hits": 1249,
+      "hit_rate_percent": 99.84
     }
   },
   "validation_order": [
@@ -96,7 +103,7 @@
     "ready": false,
     "policy": "Do not ask the user for another boot test while the source completeness review and remaining code blockers are open.",
     "remaining_code_review": [
-      "Verify native single-display EDID/mode/notification integration and lifecycle through CI; initial scanout allocation cannot grow dynamically",
+      "Implement native hardware-VBL delivery; the current callback source is software timed",
       "Establish native sleep/wake and per-device IOMMU/resource ownership contracts for the supported configuration",
       "Build/package the matched Intel userland components and implement/test WindowServer admission, IOSurface and presentation contracts"
     ]

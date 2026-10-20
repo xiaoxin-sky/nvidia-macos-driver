@@ -29,11 +29,14 @@ and host checks do not establish native output, HiDPI or a particular refresh ra
 
 Verified code/build checkpoint
 ------------------------------
-Actions run 39271960508 at 211ce2a compiled all 1,250 kernel translation units,
+Actions run 39354221123 at 758dc75 compiled all 1,250 kernel translation units,
 passed the host behavior/concurrency/fault fixtures and required-symbol definition
 checks, and created/inspected a temporary auxiliary kernel collection against the
 runner's real kernel providers. Nothing was installed or loaded. Compiler cache
-hits were 1,228 of 1,251 cacheable calls (98.16%). These results are source/build
+hits were 1,249 of 1,251 cacheable calls (99.84%). The native mode/DDC/connection
+fixture and bridge recovery/ownership checks passed on macOS. The downloaded
+artifact ZIP matched GitHub's SHA256 digest (recorded in audit.json).
+These results are source/build
 evidence, not visible-output, GPU-command or acceleration evidence.
 
 Public userland materials exist; installed components are a different question

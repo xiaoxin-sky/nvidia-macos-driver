@@ -85,6 +85,12 @@ flags. The bridge fixture accounts for operation-lock destruction on failure and
 unregister, and for failed-then-successful event delivery under DRM's latch rule.
 Windows host checks do not replace macOS compilation.
 
+Verified checkpoint: Actions run 39354221123, source commit 758dc75, passed all
+1,250 kernel units, host fixtures (including native display APIs), required-symbol
+checks and the temporary native KC preflight. Compiler-cache hits: 1249/1251
+(99.84%). The downloaded artifact ZIP matches GitHub's SHA256; audit.json records
+its identity. This evidence does not reopen the hardware gate or prove GPU output.
+
 Build caches
 ------------
 The dependency cache contains a checksum-verified drm-kmod archive and a clean
