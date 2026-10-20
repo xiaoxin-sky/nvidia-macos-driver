@@ -6,7 +6,7 @@ on:
         type: choice
         description: Targeted preparation regressions or the complete deployment flow
         default: all
-        options: [all, prepare]
+        options: [all, prepare, supervision]
   push:
     paths:
       - '.github/workflows/uhd770-deployment.yml'
@@ -25,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Python preparation and archive boundary fixtures
+        if: inputs.scope != 'supervision' && !contains(github.event.head_commit.message, '[supervision-only]')
         env:
           # Deliberate narrow regression selection for prepare/bootstrap-only
           # fixes; ordinary pushes and dispatches retain the complete suite.
@@ -84,10 +85,27 @@ jobs:
           /bin/bash -p experimental/uhd770/acceleration/deployment/Archive-UHD770-Failed.command --help
       - name: Mock capture and probe supervision (never opens a GPU)
         run: |
-          /bin/bash experimental/uhd770/acceleration/deployment/capture/test_capture.sh
-          /bin/bash experimental/uhd770/acceleration/deployment/capture/test_capture_finish.sh
-          /bin/bash experimental/uhd770/acceleration/deployment/probes/test-runner.sh
-          /bin/bash experimental/uhd770/acceleration/deployment/test_session.sh
+          set +e
+          overall=0
+          for script in experimental/uhd770/acceleration/deployment/capture/test_capture.sh experimental/uhd770/acceleration/deployment/capture/test_capture_finish.sh experimental/uhd770/acceleration/deployment/probes/test-runner.sh experimental/uhd770/acceleration/deployment/test_session.sh; do
+            output="$RUNNER_TEMP/uhd770-$(basename "$script").log"
+            printf 'Running %s\n' "$script"
+            /bin/bash "$script" > "$output" 2>&1
+            code=$?
+            cat "$output"
+            printf 'Script exit=%s: %s\n' "$code" "$script"
+            if [ "$code" -ne 0 ]; then
+              overall=1
+              TASK_SCRIPT="$script" TASK_LOG="$output" python3 - <<'PY'
+          import os
+          from pathlib import Path
+          message = Path(os.environ['TASK_LOG']).read_text(errors='replace')[-6000:]
+          message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print(f'::error title=Shell fixture {os.environ["TASK_SCRIPT"]}::{message}')
+          PY
+            fi
+          done
+          exit "$overall"
       - name: Check launchd template without registering it
         run: |
           python3 - <<'PY'

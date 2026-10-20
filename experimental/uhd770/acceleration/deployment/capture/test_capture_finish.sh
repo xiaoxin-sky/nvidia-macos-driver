@@ -51,6 +51,7 @@ capture_configure
 ulimit() { return 0; }
 CAPTURE_ROOT="$FIXTURE/$MODE/reports"
 CAPTURE_DURATION=2
+if [ "$MODE" = natural ]; then CAPTURE_DURATION=30; fi
 CAPTURE_FINISH_BUDGET=3
 if [ "$MODE" != finish-hung ]; then CAPTURE_FINISH_BUDGET=10; fi
 C_DATE="$FIXTURE/mock/date"
@@ -61,15 +62,16 @@ C_LOG="$FIXTURE/mock/log"
 C_DMESG="$FIXTURE/mock/dmesg"
 C_IOREG="$FIXTURE/mock/ioreg"
 
-# The original collection watchdog keeps its real two-second deadline. Fast
-# ordinary reads let count-based natural completion start first. Cleanup polls
-# then take 1.2 seconds each and final date/sync reads take 0.2 seconds, so
-# cleanup necessarily crosses that original deadline. In the TERM-first case
-# the metadata read is still pending when the real watchdog interrupts it.
+# Natural completion gets a generous collection budget so process startup is
+# not the trigger. An independent fixture sender injects an in-flight TERM only
+# after real cleanup starts; production cannot disarm that sender. TERM-first
+# retains its real two-second watchdog with a pending metadata read. Slow final
+# polls/clock/sync still exercise the original cleanup race and hard guard.
 fixture_sleep() {
     if [ "$1" = 0.1 ]; then
         if [ "$STOPPING" -eq 1 ]; then
             if [ ! -f "$FIXTURE/$MODE/finish-begun" ]; then
+                printf 'finish_start\n' >> "$FIXTURE/$MODE/events.txt"
                 printf '%s\n' "$SECONDS" > "$FIXTURE/$MODE/finish-begun"
             fi
             if [ "$MODE" = finish-hung ]; then /bin/sleep 30; else /bin/sleep 1.2; fi
@@ -85,20 +87,48 @@ fixture_sleep() {
     fi
 }
 C_SLEEP=fixture_sleep
+printf '%s\n' "$CAPTURE_DURATION" > "$FIXTURE/$MODE/collection-budget"
+INJECTOR_PID=''
+if [ "$MODE" = natural ]; then
+    owner=$$
+    (
+        ticks=0
+        while [ ! -s "$FIXTURE/$MODE/finish-begun" ] && [ "$ticks" -lt 1500 ]; do
+            /bin/sleep 0.01; ticks=$((ticks + 1))
+        done
+        [ -s "$FIXTURE/$MODE/finish-begun" ] || exit 91
+        /bin/sleep 0.05
+        printf 'signal_send\n' >> "$FIXTURE/$MODE/events.txt"
+        if kill -TERM "$owner"; then
+            printf 'signal_exit=0\n' >> "$FIXTURE/$MODE/events.txt"
+        else
+            printf 'signal_exit=1\n' >> "$FIXTURE/$MODE/events.txt"
+            exit 92
+        fi
+    ) &
+    INJECTOR_PID=$!
+fi
 capture_run
+if [ -n "$INJECTOR_PID" ]; then wait "$INJECTOR_PID" || exit 93; fi
+printf 'collector_return\n' >> "$FIXTURE/$MODE/events.txt"
 RUN
 
 failed=0
 for mode in natural term-first finish-hung; do
     mkdir -p "$FIXTURE/$mode/reports"
     started=$SECONDS
+    # The natural case's outer fixture guard covers its 30-second collection
+    # budget, 10-second production cleanup guard and five seconds of margin.
+    # Other cases retain their existing 15-second fixture bound.
+    outer_limit=15
+    if [ "$mode" = natural ]; then outer_limit=$((30 + 10 + 5)); fi
     # Isolate and clean the fixture's entire harmless process tree even when
     # the old collector is killed before it can stop its own watchdog/stream.
     /usr/bin/perl -MPOSIX -e 'my $sid=POSIX::setsid(); die "setsid failed" unless defined($sid) && $sid>=0; exec @ARGV; die "exec failed";' \
         -- /bin/bash "$FIXTURE/run.sh" "$mode" > "$FIXTURE/$mode/console.txt" 2>&1 &
     child=$!
     ticks=0
-    while kill -0 "$child" 2>/dev/null && [ "$ticks" -lt 150 ]; do /bin/sleep 0.1; ticks=$((ticks + 1)); done
+    while kill -0 "$child" 2>/dev/null && [ "$ticks" -lt $((outer_limit * 10)) ]; do /bin/sleep 0.1; ticks=$((ticks + 1)); done
     if kill -0 "$child" 2>/dev/null; then
         kill -KILL -- "-$child" 2>/dev/null || :
         code=124
@@ -120,11 +150,23 @@ for mode in natural term-first finish-hung; do
     fi
     case "$mode" in
         natural)
+            ordered=0
+            if awk '
+                $0=="finish_start" { finish=NR; finishes++ }
+                $0=="signal_send" { signal=NR; signals++ }
+                $0=="signal_exit=0" { delivered=NR; deliveries++ }
+                $0=="collector_return" { ended=NR; ends++ }
+                END { exit !(finishes==1 && signals==1 && deliveries==1 && ends==1 && finish<signal && signal<delivered && delivered<ended) }
+            ' "$FIXTURE/$mode/events.txt"; then ordered=1; fi
+            began=$(cat "$FIXTURE/$mode/finish-begun")
+            budget=$(cat "$FIXTURE/$mode/collection-budget")
             if [ "$code" -ne 0 ] || ! grep -q 'collector_end reason=duration_complete' "$report/stages.txt" ||
-               [ "$(cat "$FIXTURE/$mode/finish-begun")" -ge 2 ]; then
-                printf 'FAIL finish natural: exit=%s end_marker=%s elapsed=%s\n' "$code" "$(grep -c collector_end "$report/stages.txt" || :)" "$elapsed"
+               [ "$began" -ge "$budget" ] || [ "$ordered" -ne 1 ]; then
+                printf 'FAIL finish natural: exit=%s finish_begin=%s collection_budget=%s ordered=%s end_marker=%s elapsed=%s\n' "$code" "$began" "$budget" "$ordered" "$(grep -c collector_end "$report/stages.txt" || :)" "$elapsed"
+                grep collector_end "$report/stages.txt" || :
+                cat "$FIXTURE/$mode/events.txt"
                 failed=1
-            else printf 'PASS finish natural: cleanup crosses collection deadline; exit=0 elapsed=%s\n' "$elapsed"; fi
+            else printf 'PASS finish natural: finish_start < delivered TERM < collector_return; duration_complete exit=0 finish_begin=%s elapsed=%s\n' "$began" "$elapsed"; fi
             ;;
         term-first)
             if [ "$code" -ne 0 ] || ! grep -q 'collector_end reason=deadline_or_termination' "$report/stages.txt"; then
