@@ -128,15 +128,83 @@ session_registry_ready() {
     grep -Eq '(attach.complete|pm.callback.after) ret=0(["[:space:]]|$)' "$report"
 }
 
+# Publish only that the ordinary-user coordinator exited. This notification is
+# not a GPU verdict; the guarded probe logs remain the readback evidence. Rename
+# last so root cannot mistake partially written fields for a completed session.
+session_write_terminal() (
+    umask 077
+    local session=$1 boot=$2 uid=$3 code=$4
+    case "$boot" in ''|*[!a-zA-Z0-9-]*) return 64 ;; esac
+    case "$uid" in ''|*[!0-9]*) return 64 ;; esac
+    case "$code" in ''|*[!0-9]*) return 64 ;; esac
+    [ "$code" -le 255 ] && [ -d "$session" ] && [ ! -L "$session" ] || return 64
+    printf 'terminal_version=1\nboot=%s\nuid=%s\ncoordinator_exit=%s\n' \
+        "$boot" "$uid" "$code" > "$session/terminal.pending" || return 74
+    mv -f "$session/terminal.pending" "$session/terminal.txt"
+)
+
+# Validate a bounded private snapshot, never source a user-supplied notification.
+# Root performs owner/mode/path checks and reads as the selected user first.
+session_terminal_content_valid() {
+    local report=$1 boot=$2 uid=$3
+    [ -f "$report" ] && [ ! -L "$report" ] || return 1
+    [ "$(wc -c < "$report" | tr -d ' ')" -le 512 ] || return 1
+    awk -v boot="$boot" -v uid="$uid" '
+      $0 == "terminal_version=1" { version++; next }
+      $0 == "boot=" boot { boots++; next }
+      $0 == "uid=" uid { users++; next }
+      /^coordinator_exit=[0-9]+$/ {
+        split($0,a,"="); if (length(a[2]) > 3 || a[2]+0 > 255) bad=1
+        codes++; next
+      }
+      { bad=1 }
+      END { exit !(NR==4 && version==1 && boots==1 && users==1 && codes==1 && !bad) }
+    ' "$report"
+}
+
+# A stopped collector must have written its final marker for this exact boot.
+# Command success alone does not establish that its buffered evidence is closed.
+session_recorder_ended() {
+    local report=$1 boot=$2
+    [ -f "$report/boot-identity.txt" ] && [ -f "$report/stages.txt" ] || return 1
+    grep -Fxq "kern.bootsessionuuid: $boot" "$report/boot-identity.txt" || return 1
+    grep -Eq 'collector_end reason=(duration_complete|deadline_or_termination|interrupted)' "$report/stages.txt"
+}
+
+# Wait only until a validated exit notification exists. SECONDS is monotonic
+# within Bash and does not depend on this Hackintosh's wall-clock configuration.
+# The callback can report completion only; it cannot make a GPU result pass.
+session_wait_terminal() {
+    local limit=$1 output=$2 started=$SECONDS
+    shift 2
+    while [ $((SECONDS - started)) -lt "$limit" ]; do
+        if "$@"; then
+            printf 'trigger=coordinator-ended\nwaited_seconds=%s\n' "$((SECONDS - started))" > "$output"
+            return 0
+        fi
+        sleep 2
+    done
+    printf 'trigger=deadline\nwaited_seconds=%s\npartial=true\n' "$((SECONDS - started))" > "$output"
+    return 124
+}
+
 # Run the two diagnostics in order only when the preceding command actually
 # returned success. The production probe independently requires its own exact
 # readback marker, deadline and candidate UUID; callers cannot skip that gate.
 session_compute_sequence() {
-    local runner=$1 output=$2 code=0
+    local runner=$1 output=$2 stop=${3:-} code=0
+    if [ -n "$stop" ] && [ -f "$stop" ]; then
+        printf 'phase=not-started\nexit=124\nvulkan_started=false\nmetal_started=false\n' > "$output/sequence.txt"
+        return 124
+    fi
     "$runner" vulkan > "$output/vulkan-runner.txt" 2>&1 || code=$?
     if [ "$code" -ne 0 ]; then
         printf 'phase=vulkan\nexit=%s\nmetal_started=false\n' "$code" > "$output/sequence.txt"
         return "$code"
+    fi
+    if [ -n "$stop" ] && [ -f "$stop" ]; then
+        printf 'phase=vulkan\nexit=124\nmetal_started=false\nautomation_deadline=true\n' > "$output/sequence.txt"
+        return 124
     fi
     "$runner" metal > "$output/metal-runner.txt" 2>&1 || code=$?
     printf 'phase=metal\nexit=%s\nmetal_started=true\n' "$code" > "$output/sequence.txt"

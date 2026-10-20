@@ -95,11 +95,58 @@ command mv "$TASK_TMP/stages" "$TASK_TMP/report/stages.txt"
 printf 'collector_command_exit=124\n' > "$TASK_TMP/report/dmesg-0.txt"
 if session_recorder_valid "$TASK_TMP/report" CURRENT; then exit 1; fi
 
+# Recorder completion is a narrow stop/export gate, independent of the
+# five-minute normal-desktop validation and of any GPU success claim.
+session_recorder_ended "$TASK_TMP/report" CURRENT
+if session_recorder_ended "$TASK_TMP/report" OLD; then exit 1; fi
+mkdir "$TASK_TMP/partial-report"
+printf 'kern.bootsessionuuid: CURRENT\n' > "$TASK_TMP/partial-report/boot-identity.txt"
+printf 'elapsed_s=1 heartbeat stream_alive=1\n' > "$TASK_TMP/partial-report/stages.txt"
+if session_recorder_ended "$TASK_TMP/partial-report" CURRENT; then exit 1; fi
+printf 'elapsed_s=2 collector_end reason=deadline_or_termination\n' >> "$TASK_TMP/partial-report/stages.txt"
+session_recorder_ended "$TASK_TMP/partial-report" CURRENT
+
+# A user EXIT marker is published atomically and parsed only as fixed data.
+# Nonzero coordinator exits also end the root wait; they never imply success.
+mkdir "$TASK_TMP/terminal-session"
+session_write_terminal "$TASK_TMP/terminal-session" CURRENT 501 0
+session_terminal_content_valid "$TASK_TMP/terminal-session/terminal.txt" CURRENT 501
+grep -qx 'coordinator_exit=0' "$TASK_TMP/terminal-session/terminal.txt"
+session_write_terminal "$TASK_TMP/terminal-session" CURRENT 501 31
+session_terminal_content_valid "$TASK_TMP/terminal-session/terminal.txt" CURRENT 501
+grep -qx 'coordinator_exit=31' "$TASK_TMP/terminal-session/terminal.txt"
+if session_terminal_content_valid "$TASK_TMP/terminal-session/terminal.txt" OLD 501; then exit 1; fi
+if session_terminal_content_valid "$TASK_TMP/terminal-session/terminal.txt" CURRENT 502; then exit 1; fi
+for invalid in missing duplicate extra exit-too-large exit-negative wrong-version; do
+    case "$invalid" in
+        missing) printf 'terminal_version=1\nboot=CURRENT\nuid=501\n' ;;
+        duplicate) printf 'terminal_version=1\nboot=CURRENT\nuid=501\nuid=501\ncoordinator_exit=0\n' ;;
+        extra) printf 'terminal_version=1\nboot=CURRENT\nuid=501\ncoordinator_exit=0\ncommand=do-not-evaluate\n' ;;
+        exit-too-large) printf 'terminal_version=1\nboot=CURRENT\nuid=501\ncoordinator_exit=256\n' ;;
+        exit-negative) printf 'terminal_version=1\nboot=CURRENT\nuid=501\ncoordinator_exit=-1\n' ;;
+        wrong-version) printf 'terminal_version=2\nboot=CURRENT\nuid=501\ncoordinator_exit=0\n' ;;
+    esac > "$TASK_TMP/invalid-terminal.txt"
+    if session_terminal_content_valid "$TASK_TMP/invalid-terminal.txt" CURRENT 501; then exit 1; fi
+done
+
+terminal_ready() { [ "$1:$2" = CURRENT:501 ]; }
+session_wait_terminal 5 "$TASK_TMP/ready-trigger.txt" terminal_ready CURRENT 501
+grep -qx 'trigger=coordinator-ended' "$TASK_TMP/ready-trigger.txt"
+terminal_pending() { return 1; }
+wait_code=0
+session_wait_terminal 0 "$TASK_TMP/deadline-trigger.txt" terminal_pending || wait_code=$?
+[ "$wait_code" -eq 124 ]
+grep -qx 'trigger=deadline' "$TASK_TMP/deadline-trigger.txt"
+
 mkdir "$TASK_TMP/output"
 cat > "$TASK_TMP/runner" <<'RUNNER'
 #!/bin/bash
 printf '%s\n' "$1" >> "$TASK_TMP/calls"
-case "$1:$TASK_RUN" in vulkan:fail-vulkan) exit 31 ;; metal:fail-metal) exit 32 ;; esac
+case "$1:$TASK_RUN" in
+    vulkan:fail-vulkan) exit 31 ;;
+    metal:fail-metal) exit 32 ;;
+    vulkan:stop-after-vulkan) : > "$TASK_TMP/stop-probes" ;;
+esac
 RUNNER
 chmod 700 "$TASK_TMP/runner"
 export TASK_TMP TASK_RUN
@@ -114,9 +161,18 @@ grep -q exit=32 "$TASK_TMP/output/sequence.txt"
 : > "$TASK_TMP/calls"; TASK_RUN=success
 session_compute_sequence "$TASK_TMP/runner" "$TASK_TMP/output"
 grep -q exit=0 "$TASK_TMP/output/sequence.txt"
+: > "$TASK_TMP/calls"; : > "$TASK_TMP/stop-probes"
+sequence_code=0
+session_compute_sequence "$TASK_TMP/runner" "$TASK_TMP/output" "$TASK_TMP/stop-probes" || sequence_code=$?
+[ "$sequence_code" -eq 124 ] && [ ! -s "$TASK_TMP/calls" ]
+rm -- "$TASK_TMP/stop-probes"
+: > "$TASK_TMP/calls"; TASK_RUN=stop-after-vulkan; sequence_code=0
+session_compute_sequence "$TASK_TMP/runner" "$TASK_TMP/output" "$TASK_TMP/stop-probes" || sequence_code=$?
+[ "$sequence_code" -eq 124 ] && [ "$(cat "$TASK_TMP/calls")" = vulkan ]
+grep -q metal_started=false "$TASK_TMP/output/sequence.txt"
 
 session_bounded 2 "$TASK_TMP/command.txt" /bin/bash -c 'exit 27' && exit 1
 grep -q command_exit_status=27 "$TASK_TMP/command.txt"
 if session_bounded 1 "$TASK_TMP/timeout.txt" /bin/bash -c 'trap "" TERM; exec sleep 8'; then exit 1; fi
 grep -q command_timeout_seconds=1 "$TASK_TMP/timeout.txt"
-printf 'Session transaction, interrupted recovery, recorder and sequential failure gates passed; no GPU accessed.\n'
+printf 'Session transaction, terminal/deadline export, recorder and sequential failure gates passed; no GPU accessed.\n'

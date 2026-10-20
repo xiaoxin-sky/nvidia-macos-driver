@@ -16,6 +16,7 @@ PLAN="$PUBLIC/plan.plist"
 LABEL=com.uhd770.mvp.session
 LOCK=/private/var/run/com.uhd770.mvp.prepare.lock
 LOCK_OWNED=0
+AUTO_EXPORT_ATTEMPTED=0
 KEY='NVRAM.Add.7C436110-AB2A-4BBB-A880-FE41995C9F82.boot-args'
 KIT=$(cd "$(dirname "$0")/.." && pwd -P)
 HERE="$KIT/tools"
@@ -158,6 +159,78 @@ restore_files() {
         session_restore_one "$JOURNAL" "$key" "$target" || code=1
     done < <(targets)
     return "$code"
+}
+
+# A selected-user exit notice only controls when to collect evidence. Read at
+# that user's privilege after bounding its size: a concurrent symlink/FIFO swap
+# must not disclose a root-only file or stall the root coordinator indefinitely.
+terminal_for_boot() {
+    local boot=$1 uid=$2 home=$3 directory marker ancestor mode size
+    directory="$home/Library/Logs/UHD770MVP/automatic-$boot"
+    marker="$directory/terminal.txt"
+    for ancestor in "$home" "$home/Library" "$home/Library/Logs" "$home/Library/Logs/UHD770MVP" "$directory"; do
+        [ -d "$ancestor" ] && [ ! -L "$ancestor" ] || return 1
+    done
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    [ "$(stat -f '%u' "$marker")" = "$uid" ] || return 1
+    mode=$(stat -f '%Lp' "$marker") || return 1
+    [ $((8#$mode & 0022)) -eq 0 ] || return 1
+    size=$(stat -f '%z' "$marker") || return 1
+    [ "$size" -le 512 ] || return 1
+    session_bounded 2 "$PRIVATE/terminal-read-$boot.txt" /bin/bash -p -c \
+        'exec /usr/bin/sudo -n -u "#$1" /usr/bin/head -c 513 "$2" > "$3"' \
+        _ "$uid" "$marker" "$PRIVATE/terminal-$boot.txt" || return 1
+    session_terminal_content_valid "$PRIVATE/terminal-$boot.txt" "$boot" "$uid"
+}
+
+# Check every matching root collector, not an ended report from an earlier boot
+# or an earlier recorder restart while another same-boot stream still writes.
+capture_finalized() {
+    local boot=$1 report found=0
+    for report in /private/var/log/UHD770MVP/session-*; do
+        [ -d "$report" ] && [ ! -L "$report" ] || continue
+        [ -f "$report/boot-identity.txt" ] || continue
+        grep -Fxq "kern.bootsessionuuid: $boot" "$report/boot-identity.txt" || continue
+        found=1
+        session_recorder_ended "$report" "$boot" || return 1
+    done
+    [ "$found" -eq 1 ]
+}
+
+# Stop only our current capture registration; its RunAtLoad plist remains for a
+# recovery boot. Even a successful bootout needs a final collector marker before
+# the export can describe capture as closed. Failure retains partial evidence.
+finish_capture() {
+    local boot=$1 started=$SECONDS
+    session_bounded 10 "$PRIVATE/capture-stop-$boot.txt" \
+        launchctl bootout system/com.uhd770.mvp.capture || :
+    started=$SECONDS
+    while ! capture_finalized "$boot" && [ $((SECONDS - started)) -lt 8 ]; do sleep 1; done
+    if capture_finalized "$boot"; then
+        printf 'capture_finalization=closed\n' > "$PRIVATE/capture-finalization-$boot.txt"
+    else
+        printf 'capture_finalization=partial\n' > "$PRIVATE/capture-finalization-$boot.txt"
+    fi
+    session_bounded 3 "$PRIVATE/final-dmesg-$boot.txt" dmesg || :
+    session_bounded 3 "$PRIVATE/final-NMXGPU-$boot.txt" ioreg -r -c NMXGPU -l -w0 || :
+    session_bounded 3 "$PRIVATE/final-NMXAccel-$boot.txt" ioreg -r -c NMXAccel -l -w0 || :
+}
+
+automatic_export() {
+    local boot=$1
+    AUTO_EXPORT_ATTEMPTED=1
+    [ ! -f "$PUBLIC/exported-$boot.txt" ] || return 0
+    # Include failed recovery/aborted boots in the same deduplication contract.
+    # Manual export never takes this lock and can still retrieve partial data.
+    if ! mkdir -m 700 "$PRIVATE/exporting-$boot"; then return 0; fi
+    if export_all > "$PRIVATE/automatic-export-$boot.txt"; then
+        cp "$PRIVATE/automatic-export-$boot.txt" "$PUBLIC/exported-$boot.txt"
+        chmod 644 "$PUBLIC/exported-$boot.txt"
+        cat "$PRIVATE/automatic-export-$boot.txt"
+    else
+        printf 'Automatic export failed; keep the existing logs and use manual export.\n' >&2
+        return 1
+    fi
 }
 
 prepare() {
@@ -323,15 +396,17 @@ prepare() {
     printf '\nPREPARED. Restart ONCE through the same 1401 USB and choose macOS 15.\n'
     printf 'Log in normally. GPU takeover waits 180 seconds after firmware availability.\n'
     printf 'The next-boot opt-out is restored automatically; Vulkan then Metal run only if initialization succeeds.\n'
-    printf 'Allow up to 10 minutes. If black, wait 6 minutes after signal loss, then restart through the same USB.\n'
+    printf 'Reports export as soon as the coordinator exits; 10 minutes is only the wait deadline.\n'
+    printf 'If black, wait 6 minutes after signal loss, then restart through the same USB.\n'
     printf 'If that recovery boot fails, return to Windows and run the package Restore-UHD770.ps1.\n'
     printf 'No automatic reboot or claim of acceleration success.\n'
 }
 
 boot() {
     safe_directory "$ROOT"; safe_directory "$PRIVATE"; safe_directory "$PUBLIC"
-    local current prepare_boot args attempt recovered=0
+    local current prepare_boot args attempt recovered=0 uid account home wait_code=0
     current=$(sysctl -n kern.bootsessionuuid); prepare_boot=$(property preparation_boot)
+    case "$current" in ''|*[!a-zA-Z0-9-]*) die 'Invalid current boot identity.' ;; esac
     if [ "$current" = "$prepare_boot" ]; then
         printf 'root_job_entrypoint=passed\nboot=%s\n' "$current" > "$PUBLIC/root-preflight-$current.txt"
         chmod 644 "$PUBLIC/root-preflight-$current.txt"
@@ -349,22 +424,37 @@ boot() {
     else
         printf 'next_boot_optout=NOT_VERIFIED\nboot=%s\n' "$current" > "$PUBLIC/recovery-$current.txt"
         chmod 644 "$PUBLIC/recovery-$current.txt"
-        export_all
+        automatic_export "$current"
         exit 1
     fi
     chmod 644 "$PUBLIC/recovery-$current.txt"
     [ "$(cat "$PUBLIC/state.txt")" = armed ] || exit 0
     args=$(sysctl -n kern.bootargs)
     case " $args " in
-        *' -nvoff '*) printf 'recovered\n' > "$PUBLIC/state.txt"; export_all; exit 0 ;;
+        *' -nvoff '*) printf 'recovered\n' > "$PUBLIC/state.txt"; automatic_export "$current"; exit 0 ;;
         *' nmxintel=1 '*) ;;
-        *) export_all; exit 0 ;;
+        *) automatic_export "$current"; exit 0 ;;
     esac
-    # Current recorder/probes write directly to disk. A later safe boot exports
-    # their partial files even if this wait is interrupted by a kernel failure.
-    sleep 600
+    # Same-boot launch retries cannot create duplicate automatic reports. Manual
+    # export/restore never use this lock and remain available after interruption.
+    if ! mkdir -m 700 "$PUBLIC/automatic-$current"; then exit 0; fi
+    uid=$(property user_uid)
+    case "$uid" in ''|*[!0-9]*) die 'Invalid selected-user identity.' ;; esac
+    account=$(id -nu "$uid")
+    home=$(dscl . -read "/Users/$account" NFSHomeDirectory | sed 's/^NFSHomeDirectory: //')
+    case "$home" in /Users/*) ;; *) die 'Selected account home is unavailable.' ;; esac
+    session_wait_terminal 600 "$PRIVATE/export-trigger-$current.txt" \
+        terminal_for_boot "$current" "$uid" "$home" || wait_code=$?
+    if [ "$wait_code" -ne 0 ]; then
+        printf 'boot=%s\ntrigger=deadline\npartial=true\n' "$current" > "$PUBLIC/deadline-$current.txt"
+        chmod 644 "$PUBLIC/deadline-$current.txt"
+        # Do not leave an unrecorded later phase running after this deadline.
+        session_bounded 8 "$PRIVATE/user-stop-$current.txt" \
+            launchctl bootout "gui/$uid/$LABEL" || :
+    fi
+    finish_capture "$current"
     printf 'finished\n' > "$PUBLIC/state.txt"
-    export_all
+    automatic_export "$current"
 }
 
 failed() {
@@ -380,7 +470,7 @@ failed() {
         printf 'prepare_exit=%s\noptout_restore_exit=%s\nfile_restore_exit=%s\n' "$code" "$safe_code" "$restore_code" > "$PRIVATE/failure.txt"
         printf 'Preparation stopped. Recovery status is in the exported report; do not reboot for a test.\n' >&2
     fi
-    export_all || :
+    if [ "$AUTO_EXPORT_ATTEMPTED" -eq 0 ]; then export_all || :; fi
     if [ "$LOCK_OWNED" -eq 1 ]; then rmdir "$LOCK" || :; fi
     exit "$code"
 }

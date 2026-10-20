@@ -39,10 +39,20 @@ mkdir -m 700 "$SESSION" || exit 0
 exec > "$SESSION/coordinator.txt" 2>&1
 printf 'boot=%s\ngpu_started=false\n' "$BOOT" > "$SESSION/session.txt"
 . "$ROOT/session-tools/session-lib.sh"
-trap 'code=$?; printf "coordinator_exit=%s\n" "$code" >> "$SESSION/session.txt"' EXIT
+finish() {
+    local code=$?
+    trap - EXIT INT TERM HUP
+    set +e
+    printf 'coordinator_exit=%s\n' "$code" >> "$SESSION/session.txt"
+    session_write_terminal "$SESSION" "$BOOT" "$EUID" "$code"
+}
+trap finish EXIT
+trap 'exit 130' INT HUP
+trap 'exit 143' TERM
 elapsed=0
 ready=0
 while [ "$elapsed" -lt 330 ]; do
+    [ ! -f "$ROOT/session-public/deadline-$BOOT.txt" ] || exit 124
     recovery="$ROOT/session-public/recovery-$BOOT.txt"
     if [ -f "$recovery" ] && grep -qx 'next_boot_optout=NOT_VERIFIED' "$recovery"; then
         printf 'Independent next-boot recovery not verified; no probe started.\n'
@@ -64,5 +74,5 @@ while [ "$elapsed" -lt 330 ]; do
 done
 [ "$ready" -eq 1 ] || { printf 'Initialization/recovery gate did not complete.\n'; exit 68; }
 printf 'gpu_started=true\n' >> "$SESSION/session.txt"
-session_compute_sequence "$ROOT/probes/run-probe.sh" "$SESSION"
+session_compute_sequence "$ROOT/probes/run-probe.sh" "$SESSION" "$ROOT/session-public/deadline-$BOOT.txt"
 printf 'Both bounded application compute/readback diagnostics passed. Desktop acceleration is not established.\n'
