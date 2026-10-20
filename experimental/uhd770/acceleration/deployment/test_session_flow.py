@@ -12,6 +12,7 @@ import plistlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -157,7 +158,10 @@ class SessionFlowTests(unittest.TestCase):
         mock = self.root / "mock-bin"
         mock.mkdir()
         dispatcher = mock / "dispatcher"
-        dispatcher.write_text(DISPATCHER, encoding="utf-8")
+        # Production deliberately uses a system-only PATH. Keep this test's
+        # interpreter rather than accidentally invoking macOS's CLT launcher
+        # for every mocked command (hundreds of processes per full flow).
+        dispatcher.write_text(DISPATCHER.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1), encoding="utf-8")
         dispatcher.chmod(0o700)
         for name in ("uname", "sw_vers", "id", "dscl", "sysctl", "stat", "csrutil", "nvram", "ioreg",
                      "diskutil", "plutil", "ditto", "kmutil", "launchctl", "codesign", "sync", "sleep",

@@ -22,12 +22,28 @@ jobs:
         run: |
           python3 -m unittest discover -s experimental/uhd770/acceleration/kit -p 'test_*.py' -v
           python3 - <<'PY'
-          import sys, unittest
+          import sys, time, unittest
+          def annotation(kind, title, text):
+              message = str(text)[-6000:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::{kind} title={title}::{message}', flush=True)
+          class ObservedResult(unittest.TextTestResult):
+              def startTest(self, test):
+                  self.started = time.monotonic()
+                  if test.id().startswith('test_session_flow.'):
+                      annotation('notice', 'Flow fixture started', test.id())
+                  super().startTest(test)
+              def stopTest(self, test):
+                  if test.id().startswith('test_session_flow.'):
+                      annotation('notice', 'Flow fixture ended', f'{test.id()} seconds={time.monotonic()-self.started:.2f}')
+                  super().stopTest(test)
+              def addError(self, test, err):
+                  super().addError(test, err)
+                  annotation('error', 'Deployment fixture error', self.errors[-1][1])
+              def addFailure(self, test, err):
+                  super().addFailure(test, err)
+                  annotation('error', 'Deployment fixture failure', self.failures[-1][1])
           suite = unittest.defaultTestLoader.discover('experimental/uhd770/acceleration/deployment', pattern='test_*.py')
-          result = unittest.TextTestRunner(verbosity=2).run(suite)
-          for _, failure in result.errors + result.failures:
-              message = failure[-6000:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-              print(f'::error title=Deployment fixture failure::{message}', flush=True)
+          result = unittest.TextTestRunner(verbosity=2, resultclass=ObservedResult).run(suite)
           sys.exit(0 if result.wasSuccessful() else 1)
           PY
       - name: Native system Bash syntax and inert command help
