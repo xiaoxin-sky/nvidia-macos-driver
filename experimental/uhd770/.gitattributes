@@ -1,3 +1,4 @@
 * text eol=lf
 # Unified patch context must preserve upstream blank-line whitespace.
 patches/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+acceleration/patches/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

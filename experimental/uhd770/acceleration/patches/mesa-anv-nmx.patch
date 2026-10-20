@@ -1,0 +1,366 @@
+diff --git a/src/intel/vulkan/anv_nmx_mmap.h b/src/intel/vulkan/anv_nmx_mmap.h
+new file mode 100644
+--- /dev/null
++++ b/src/intel/vulkan/anv_nmx_mmap.h
+@@ -0,0 +1,118 @@
++/*
++ * Copyright (C) 2026 Intel macOS experimental port contributors
++ * SPDX-License-Identifier: MIT
++ *
++ * Exact-range BO mappings for the x86_64 NMX DRM node. Darwin character
++ * devices cannot provide mmap(2); the kernel owns each complete mapping until
++ * its matching unmap ioctl or DRM-fd close. Keep these copied ABI structures
++ * and commands synchronized with xkpi/bsdcompat/include/nmx_drm_uapi.h.
++ *
++ * The caller supplies Intel's ioctl transport. This helper never handles
++ * anonymous/host mappings or PRIME fds, and never splits one kernel mapping
++ * into aliases that could outlive its pin. Placed/reserved mappings require
++ * additional lifetime support and are deliberately unavailable in this MVP.
++ */
++#ifndef ANV_NMX_MMAP_H
++#define ANV_NMX_MMAP_H
++
++#include <errno.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++
++struct anv_nmx_drm_mmap {
++   uint64_t offset;
++   uint64_t size;
++   uint32_t prot;
++   uint32_t flags;
++   uint64_t addr;
++};
++
++struct anv_nmx_drm_munmap {
++   uint64_t addr;
++   uint64_t size;
++};
++
++_Static_assert(sizeof(struct anv_nmx_drm_mmap) == 32, "NMX mmap ABI size");
++_Static_assert(sizeof(struct anv_nmx_drm_munmap) == 16, "NMX munmap ABI size");
++
++#define ANV_NMX_DRM_IOCTL_MMAP \
++   _IOWR('N', 0x40, struct anv_nmx_drm_mmap)
++#define ANV_NMX_DRM_IOCTL_MUNMAP \
++   _IOW('N', 0x41, struct anv_nmx_drm_munmap)
++#define ANV_NMX_PAGE_SIZE UINT64_C(4096)
++#define ANV_NMX_MAX_MAP_SIZE (UINT64_C(1) << 40)
++
++typedef int (*anv_nmx_ioctl_fn)(int fd, unsigned long command, void *argument);
++
++/*
++ * Map a page-aligned slice of a GEM object at its fake offset. Unlike ANV's
++ * Linux overmap-and-trim path, offset is added to the DRM offset before the
++ * request: the returned address and size always describe one complete NMX
++ * mapping. The existing i915 VMA lookup/fault path validates the object bounds.
++ */
++static inline void *
++anv_nmx_bo_mmap(int fd, uint64_t fake_offset, uint64_t offset, uint64_t size,
++                 void *placed_addr, anv_nmx_ioctl_fn invoke)
++{
++   if (placed_addr != NULL) {
++      errno = EOPNOTSUPP;
++      return MAP_FAILED;
++   }
++   if (size == 0 || size > ANV_NMX_MAX_MAP_SIZE ||
++       (fake_offset & (ANV_NMX_PAGE_SIZE - 1)) != 0 ||
++       (offset & (ANV_NMX_PAGE_SIZE - 1)) != 0 ||
++       offset > UINT64_MAX - fake_offset) {
++      errno = EINVAL;
++      return MAP_FAILED;
++   }
++
++   const uint64_t request_offset = fake_offset + offset;
++   const uint64_t rounded_size =
++      (size + ANV_NMX_PAGE_SIZE - 1) & ~(ANV_NMX_PAGE_SIZE - 1);
++   if (rounded_size > UINT64_MAX - request_offset) {
++      errno = EINVAL;
++      return MAP_FAILED;
++   }
++
++   struct anv_nmx_drm_mmap request = {
++      .offset = request_offset,
++      .size = size,
++      .prot = PROT_READ | PROT_WRITE,
++   };
++   if (invoke(fd, ANV_NMX_DRM_IOCTL_MMAP, &request) != 0)
++      return MAP_FAILED;
++
++   return (void *)(uintptr_t)request.addr;
++}
++
++/*
++ * Release the exact page-rounded slice returned by anv_nmx_bo_mmap through
++ * the same still-open DRM fd. A failed ioctl leaves ownership in the kernel;
++ * it must not be hidden by a libc munmap fallback or forgotten user record.
++ */
++static inline int
++anv_nmx_bo_munmap(int fd, void *address, uint64_t size, bool replace,
++                   anv_nmx_ioctl_fn invoke)
++{
++   if (replace) {
++      errno = EOPNOTSUPP;
++      return -1;
++   }
++   if (address == NULL || address == MAP_FAILED ||
++       ((uintptr_t)address & (ANV_NMX_PAGE_SIZE - 1)) != 0 ||
++       size == 0 || size > ANV_NMX_MAX_MAP_SIZE) {
++      errno = EINVAL;
++      return -1;
++   }
++
++   struct anv_nmx_drm_munmap request = {
++      .addr = (uint64_t)(uintptr_t)address,
++      .size = size,
++   };
++   return invoke(fd, ANV_NMX_DRM_IOCTL_MUNMAP, &request);
++}
++
++#endif
+diff --git a/src/intel/vulkan/i915/anv_kmd_backend.c b/src/intel/vulkan/i915/anv_kmd_backend.c
+--- a/src/intel/vulkan/i915/anv_kmd_backend.c
++++ b/src/intel/vulkan/i915/anv_kmd_backend.c
+@@ -30,6 +30,10 @@
+ #include "drm-uapi/i915_drm.h"
+ #include "intel/common/i915/intel_gem.h"
+ 
++#ifdef __APPLE__
++#include "anv_nmx_mmap.h"
++#endif
++
+ static int
+ i915_gem_set_caching(struct anv_device *device,
+                      uint32_t gem_handle, uint32_t caching)
+@@ -170,6 +174,13 @@
+    if (intel_ioctl(device->fd, DRM_IOCTL_I915_GEM_MMAP_OFFSET, &gem_mmap))
+       return MAP_FAILED;
+ 
++#ifdef __APPLE__
++   /* NMX maps one complete VMA per ioctl. Request the slice directly instead
++    * of libc mmap plus prefix munmap, which cannot release its kernel pin.
++    */
++   return anv_nmx_bo_mmap(device->fd, gem_mmap.offset, offset, size,
++                          placed_addr, intel_ioctl);
++#else
+    if (placed_addr != NULL) {
+       const uint64_t placed_num = (uintptr_t)placed_addr;
+ 
+@@ -203,8 +214,10 @@
+       munmap(ptr, offset);
+ 
+    return ret;
+-}
+-
++#endif
++}
++
++#ifndef __APPLE__
+ static void *
+ i915_gem_mmap_legacy(struct anv_device *device, struct anv_bo *bo, uint64_t offset,
+                       uint64_t size, uint32_t flags)
+@@ -220,6 +233,7 @@
+ 
+    return (void *)(uintptr_t) gem_mmap.addr_ptr;
+ }
++#endif
+ 
+ static enum intel_device_info_mmap_mode
+ anv_bo_get_mmap_mode(struct anv_device *device, struct anv_bo *bo)
+@@ -284,8 +298,16 @@
+ 
+    if (likely(device->physical->info.has_mmap_offset))
+       return i915_gem_mmap_offset(device, bo, offset, size, flags, placed_addr);
++#ifdef __APPLE__
++   /* This NMX kernel deliberately does not implement the legacy shmem ioctl.
++    * Fail instead of silently switching to an incompatible mapping lifetime.
++    */
++   errno = EOPNOTSUPP;
++   return MAP_FAILED;
++#else
+    assert(placed_addr == NULL);
+    return i915_gem_mmap_legacy(device, bo, offset, size, flags);
++#endif
+ }
+ 
+ static VkResult
+diff --git a/src/intel/vulkan/anv_allocator.c b/src/intel/vulkan/anv_allocator.c
+--- a/src/intel/vulkan/anv_allocator.c
++++ b/src/intel/vulkan/anv_allocator.c
+@@ -34,6 +34,11 @@
+ #include "util/anon_file.h"
+ #include "util/futex.h"
+ #include "util/os_mman.h"
++
++#ifdef __APPLE__
++#include "anv_nmx_mmap.h"
++#include "common/intel_gem.h"
++#endif
+ 
+ #ifdef HAVE_VALGRIND
+ #define VG_NOACCESS_READ(__ptr) ({                       \
+@@ -1837,6 +1842,15 @@
+    assert(!bo->from_host_ptr);
+    assert(size > 0);
+ 
++#ifdef __APPLE__
++   /* Placed slab mappings below require PRIME fd export. Neither those fds
++    * nor reserve/replace lifetime semantics are part of the NMX BO ABI.
++    */
++   if (device->info->kmd_type == INTEL_KMD_TYPE_I915 && placed_addr != NULL)
++      return vk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
++                       "NMX does not support placed BO mappings");
++#endif
++
+    struct anv_bo *real = anv_bo_get_real(bo);
+    uint64_t offset_adjustment = 0;
+    if (real != bo) {
+@@ -1892,6 +1906,18 @@
+       }
+       assert(((uintptr_t)map & (page_size - 1)) == 0);
+    }
++
++#ifdef __APPLE__
++   if (device->info->kmd_type == INTEL_KMD_TYPE_I915) {
++      if (anv_nmx_bo_munmap(device->fd, map, map_size, replace,
++                            intel_ioctl) != 0) {
++         return vk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
++                          "NMX BO unmap failed: %m");
++      }
++      VG(VALGRIND_FREELIKE_BLOCK(map, 0));
++      return VK_SUCCESS;
++   }
++#endif
+ 
+    if (replace) {
+       map = mmap(map, map_size, PROT_NONE,
+diff --git a/src/intel/vulkan/anv_physical_device.c b/src/intel/vulkan/anv_physical_device.c
+--- a/src/intel/vulkan/anv_physical_device.c
++++ b/src/intel/vulkan/anv_physical_device.c
+@@ -656,6 +656,20 @@
+       .KHR_shader_bfloat16                   = device->info.has_bfloat16,
+    };
+ 
++#ifdef __APPLE__
++   /* NMX has per-DRM-file syncobjs, but no process fd allocation/lookup for
++    * PRIME, opaque syncobj fds or sync_file fences. Advertising these would
++    * select sharing paths which the kernel necessarily rejects. The first
++    * Intel MVP also does not provide placed/reserved BO mapping lifetimes.
++    */
++   ext->KHR_external_fence_fd = false;
++   ext->KHR_external_memory_fd = false;
++   ext->KHR_external_semaphore_fd = false;
++   ext->EXT_external_memory_dma_buf = false;
++   ext->EXT_image_drm_format_modifier = false;
++   ext->EXT_map_memory_placed = false;
++#endif
++
+    if (vk_android_get_ugralloc() != NULL) {
+       ext->ANDROID_external_memory_android_hardware_buffer = true,
+       ext->ANDROID_native_buffer = true;
+@@ -1168,9 +1182,14 @@
+       .descriptorBufferPushDescriptors = true,
+ 
+       /* VK_EXT_map_memory_placed */
++#ifdef __APPLE__
++      .memoryMapPlaced = false,
++      .memoryUnmapReserve = false,
++#else
+       .memoryMapPlaced = true,
++      .memoryUnmapReserve = true,
++#endif
+       .memoryMapRangePlaced = false,
+-      .memoryUnmapReserve = true,
+ 
+       /* VK_KHR_shader_quad_control */
+       .shaderQuadControl = true,
+@@ -3154,6 +3173,26 @@
+       device->sync_syncobj_type = vk_drm_syncobj_get_type(fd);
+    }
+ 
++#ifdef __APPLE__
++   /* Core external-fence/semaphore property queries derive support from
++    * these callbacks, independently of extension enumeration. Disable the
++    * unavailable fd transports there too, while retaining handle-based
++    * timeline transfer, CPU waits and GPU submit synchronization.
++    */
++   device->sync_syncobj_type.import_opaque_fd = NULL;
++   device->sync_syncobj_type.export_opaque_fd = NULL;
++   device->sync_syncobj_type.import_sync_file = NULL;
++   device->sync_syncobj_type.export_sync_file = NULL;
++   const enum vk_sync_features nmx_required_sync =
++      VK_SYNC_FEATURE_TIMELINE | VK_SYNC_FEATURE_CPU_WAIT;
++   if ((device->sync_syncobj_type.features & nmx_required_sync) !=
++       nmx_required_sync) {
++      result = vk_errorf(device, VK_ERROR_INCOMPATIBLE_DRIVER,
++                         "NMX requires CPU-waitable timeline syncobjs");
++      goto fail_drirc;
++   }
++#endif
++
+    assert(vk_sync_type_is_drm_syncobj(&device->sync_syncobj_type));
+    assert(device->sync_syncobj_type.features & VK_SYNC_FEATURE_TIMELINE);
+    assert(device->sync_syncobj_type.features & VK_SYNC_FEATURE_CPU_WAIT);
+diff --git a/src/intel/vulkan/i915/anv_device.c b/src/intel/vulkan/i915/anv_device.c
+--- a/src/intel/vulkan/i915/anv_device.c
++++ b/src/intel/vulkan/i915/anv_device.c
+@@ -121,11 +121,25 @@
+       return result;
+    }
+ 
++#ifndef __APPLE__
+    if (!i915_gem_supports_dma_buf_sync_file(fd)) {
+       result = vk_errorf(device, VK_ERROR_INCOMPATIBLE_DRIVER,
+                          "kernel missing dma-buf sync file import/export");
+       return result;
+    }
++#else
++   /* NMX supports internal syncobj handles, not PRIME or sync_file fds.
++    * The app-only MVP disables external-fd extensions and their sync-type
++    * callbacks; requiring a DMA-BUF round trip would reject that valid
++    * subset (or rely on the probe's error being overwritten during cleanup).
++    * Keep all execbuf/syncobj checks above, and require the only supported
++    * Darwin memory-mapping interface explicitly.
++    */
++   if (!device->info.has_mmap_offset) {
++      return vk_errorf(device, VK_ERROR_INCOMPATIBLE_DRIVER,
++                       "NMX requires i915 GEM mmap offsets");
++   }
++#endif
+ 
+    /* Start with medium; sorted low to high */
+    const VkQueueGlobalPriority priorities[] = {
+diff --git a/src/intel/vulkan/anv_formats.c b/src/intel/vulkan/anv_formats.c
+--- a/src/intel/vulkan/anv_formats.c
++++ b/src/intel/vulkan/anv_formats.c
+@@ -2005,6 +2005,14 @@
+     *    present and VkExternalImageFormatProperties will be ignored.
+     */
+    if (external_info && external_info->handleType != 0) {
++#ifdef __APPLE__
++      if (external_info->handleType ==
++             VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
++          external_info->handleType ==
++             VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)
++         goto unsupported;
++#endif
++
+       /* Does there exist a method for app and driver to explicitly communicate
+        * to each other the image's memory layout?
+        */
+@@ -2359,8 +2367,12 @@
+    switch (pExternalBufferInfo->handleType) {
+    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
+    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT:
++#ifdef __APPLE__
++      goto unsupported;
++#else
+       pExternalBufferProperties->externalMemoryProperties = opaque_fd_dma_buf_props;
+       return;
++#endif
+    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
+       pExternalBufferProperties->externalMemoryProperties = userptr_props;
+       return;

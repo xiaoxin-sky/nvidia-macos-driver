@@ -1,0 +1,18 @@
+#version 450
+
+// This deliberately reads uploaded input as well as per-dispatch push constants.
+// A correct CPU readback therefore needs a submitted, completed compute dispatch.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { uint words[]; } inputData;
+layout(set = 0, binding = 1, std430) writeonly buffer Output { uint words[]; } outputData;
+layout(push_constant) uniform Parameters { uint count; uint seed; } parameters;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= parameters.count) return;
+    uint value = inputData.words[i] ^ parameters.seed;
+    uint shift = (i % 31u) + 1u;
+    uint rotated = (value << shift) | (value >> (32u - shift));
+    outputData.words[i] = (rotated + i * 0x9e3779b9u) ^ (inputData.words[i] >> 7u);
+}

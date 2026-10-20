@@ -1,0 +1,96 @@
+name: UHD 770 acceleration components (offline build only)
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/uhd770-acceleration.yml'
+      - 'experimental/uhd770/acceleration/**'
+permissions:
+  contents: read
+jobs:
+  components:
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [userland, metal]
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Record compiler and source identity
+        id: identity
+        run: |
+          set -euo pipefail
+          mkdir -p out/logs
+          { sw_vers; uname -m; xcodebuild -version; xcrun clang --version; } > out/logs/toolchain.txt
+          git rev-parse HEAD > out/logs/source-commit.txt
+          if [[ -d /usr/local/opt/llvm@18 ]]; then LLVM=/usr/local/opt/llvm@18
+          else LLVM=$(brew --prefix llvm@18); fi
+          test -x "$LLVM/bin/llvm-config"
+          [[ "$("$LLVM/bin/llvm-config" --version)" == 18.* ]]
+          echo "LLVM_PREFIX=$LLVM" >> "$GITHUB_ENV"
+          echo "NMX_ACCEL_ROOT=$RUNNER_TEMP/uhd770-${{ matrix.component }}" >> "$GITHUB_ENV"
+          echo "NMX_ACCEL_CACHE=$HOME/.cache/uhd770-acceleration/archives" >> "$GITHUB_ENV"
+          "$LLVM/bin/llvm-config" --version >> out/logs/toolchain.txt
+          echo "fingerprint=$(shasum -a 256 out/logs/toolchain.txt | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "CCACHE_DIR=$HOME/.cache/uhd770-acceleration/ccache" >> "$GITHUB_ENV"
+          echo 'CCACHE_COMPILERCHECK=content' >> "$GITHUB_ENV"
+          echo 'CCACHE_NODIRECT=true' >> "$GITHUB_ENV"
+      - name: Restore compiler objects
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uhd770-acceleration/ccache
+          key: uhd770-accel-objects-${{ matrix.component }}-${{ steps.identity.outputs.fingerprint }}-${{ github.run_id }}
+          restore-keys: |
+            uhd770-accel-objects-${{ matrix.component }}-${{ steps.identity.outputs.fingerprint }}-
+      - name: Restore checksum-verified source archive cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uhd770-acceleration/archives
+          key: uhd770-accel-sources-${{ matrix.component }}-${{ hashFiles('experimental/uhd770/acceleration/sources.json') }}
+      - name: Prepare native build tools
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/uhd770-python"
+          "$RUNNER_TEMP/uhd770-python/bin/pip" install meson==1.9.1 ninja==1.13.0 mako==1.3.10 pyyaml==6.0.3 packaging==25.0
+          echo "$RUNNER_TEMP/uhd770-python/bin" >> "$GITHUB_PATH"
+          cmake --version
+          if ! command -v ccache >/dev/null; then
+            HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ccache
+          fi
+          ccache --set-config=max_size=1G
+          ccache --set-config=sloppiness=
+          ccache --zero-stats
+          if [[ '${{ matrix.component }}' == metal ]]; then rustc --version; cargo --version; fi
+      - name: Stage immutable dependencies and apply Darwin repairs
+        run: |
+          set -euo pipefail
+          python3 experimental/uhd770/acceleration/stage.py \
+            --root "$NMX_ACCEL_ROOT" --cache "$NMX_ACCEL_CACHE" --group '${{ matrix.component }}'
+      - name: Compile components without installing or loading
+        run: |
+          set -euo pipefail
+          bash 'experimental/uhd770/acceleration/build_${{ matrix.component }}.sh' \
+            "$NMX_ACCEL_ROOT" "$GITHUB_WORKSPACE/out" 2>&1 | tee out/logs/build.txt
+      - name: Collect source and configure diagnostics
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p out/logs
+          for source in "$NMX_ACCEL_ROOT/build/mesa/meson-logs/meson-log.txt" "$NMX_ACCEL_ROOT/build/libdrm/meson-logs/meson-log.txt"; do
+            if [[ -f "$source" ]]; then
+              name=$(basename "$(dirname "$(dirname "$source")")")
+              cp "$source" "out/logs/$name-configure.txt"
+            fi
+          done
+          cp experimental/uhd770/acceleration/README.txt out/README.txt
+          cp experimental/uhd770/acceleration/sources.json out/logs/pinned-inputs.json
+          ccache --show-stats > out/logs/ccache.txt 2>/dev/null || true
+      - name: Upload separate diagnostic components
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uhd770-acceleration-${{ matrix.component }}
+          path: out

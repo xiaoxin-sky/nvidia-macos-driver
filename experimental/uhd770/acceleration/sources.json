@@ -1,0 +1,78 @@
+{
+  "scope": "Intel i915 compute/Metal application MVP build inputs; hardware acceleration not verified",
+  "frontend_revision": "fd917ea9b2b01e70241e5380fde50defbc2d9d49",
+  "historical_revision": "7222618727449426631d13d0654f8347634717e9",
+  "llvm_major": 18,
+  "sources": [
+    {
+      "name": "mesa",
+      "revision": "bffd91947efc1932da99aca69fc540d6d4201b0c",
+      "url": "https://gitlab.freedesktop.org/mesa/mesa/-/archive/bffd91947efc1932da99aca69fc540d6d4201b0c/mesa-bffd91947efc1932da99aca69fc540d6d4201b0c.tar.gz",
+      "sha256": "3a2bd89144819db99417f0b9c72989c52b81ee32c87a87becda0ce0efb7673c6",
+      "archiveRoot": "mesa-bffd91947efc1932da99aca69fc540d6d4201b0c"
+    },
+    {
+      "name": "libdrm",
+      "revision": "b97cbde15c5c3abfe44d78e8f57139e50f612fec",
+      "url": "https://gitlab.freedesktop.org/mesa/drm/-/archive/b97cbde15c5c3abfe44d78e8f57139e50f612fec/drm-b97cbde15c5c3abfe44d78e8f57139e50f612fec.tar.gz",
+      "sha256": "379d0881f6e7509ba5c0dca6ce045d7e68ffcbb4bed4cee5b598ab843fcb8cb2",
+      "archiveRoot": "libdrm-b97cbde15c5c3abfe44d78e8f57139e50f612fec"
+    },
+    {
+      "revision": "fa218055ff4948b159f31d43f800c808a13d51df",
+      "url": "https://codeload.github.com/KhronosGroup/Vulkan-Loader/tar.gz/fa218055ff4948b159f31d43f800c808a13d51df",
+      "sha256": "ae107edcf183b6fc9d6dbd4f8b78bd3e1c08dbc6168b86e55244e614acdfeb27",
+      "archiveRoot": "Vulkan-Loader-fa218055ff4948b159f31d43f800c808a13d51df",
+      "name": "vulkan-loader"
+    },
+    {
+      "revision": "6802bb4733b63ed5efd3adb308a6c885ef180ea1",
+      "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/6802bb4733b63ed5efd3adb308a6c885ef180ea1",
+      "sha256": "9044fbb356160e43201dc2094acb44c8a906722a63a35f48fc0f051579db9bb6",
+      "archiveRoot": "Vulkan-Headers-6802bb4733b63ed5efd3adb308a6c885ef180ea1",
+      "name": "vulkan-headers"
+    },
+    {
+      "revision": "ef96ed763b43b59b33b31b362f09a02b729fa1c9",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-Tools/tar.gz/ef96ed763b43b59b33b31b362f09a02b729fa1c9",
+      "sha256": "82c62146083fd558735a3171cf97cfc47903ca7d368482e87f94bd44883c0f00",
+      "archiveRoot": "SPIRV-Tools-ef96ed763b43b59b33b31b362f09a02b729fa1c9",
+      "name": "spirv-tools"
+    },
+    {
+      "revision": "496543121ce6419f23d6fa5d7194ba66c36212d2",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/496543121ce6419f23d6fa5d7194ba66c36212d2",
+      "sha256": "a9bb9c48713245eacf97cc539b6f1d45405a92d8813f8b82e635f0a085ee9898",
+      "archiveRoot": "SPIRV-Headers-496543121ce6419f23d6fa5d7194ba66c36212d2",
+      "name": "spirv-headers"
+    },
+    {
+      "revision": "e1b562a8bed273a02f30b59b66a5d499793cede5",
+      "url": "https://codeload.github.com/KhronosGroup/glslang/tar.gz/e1b562a8bed273a02f30b59b66a5d499793cede5",
+      "sha256": "907174a24713c6202c146f164bf81783f1fbc79c8cb821a30f18f159eb980312",
+      "archiveRoot": "glslang-e1b562a8bed273a02f30b59b66a5d499793cede5",
+      "name": "glslang"
+    },
+    {
+      "revision": "7f3e57f3c1286978b32f8b6add6ff385f38c81b9",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-LLVM-Translator/tar.gz/7f3e57f3c1286978b32f8b6add6ff385f38c81b9",
+      "sha256": "a3e6a6288e8f4870dbbea373b349d5083c56e5ccfab26a6987161785bca4b723",
+      "archiveRoot": "SPIRV-LLVM-Translator-7f3e57f3c1286978b32f8b6add6ff385f38c81b9",
+      "name": "spirv-llvm-translator"
+    },
+    {
+      "revision": "1c6bb2743599e6eb6f37b2969acc0aef812e32e3",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/1c6bb2743599e6eb6f37b2969acc0aef812e32e3",
+      "sha256": "1a248f4199f4a30b2e7304ed4d62f731765bab12d9fa4c5abb189a5e2d57f1f5",
+      "archiveRoot": "SPIRV-Headers-1c6bb2743599e6eb6f37b2969acc0aef812e32e3",
+      "name": "translator-spirv-headers"
+    },
+    {
+      "name": "nvidia-headers",
+      "revision": "e4a5faa2567f28c8eabe0ebb6422b6d0abcf37eb",
+      "url": "https://codeload.github.com/NVIDIA/open-gpu-kernel-modules/tar.gz/e4a5faa2567f28c8eabe0ebb6422b6d0abcf37eb",
+      "sha256": "7fff4ba80f8295d5bdb5853c81fae9a8c07d8d0ad6de5382f5525725ab9e39ac",
+      "archiveRoot": "open-gpu-kernel-modules-e4a5faa2567f28c8eabe0ebb6422b6d0abcf37eb"
+    }
+  ]
+}

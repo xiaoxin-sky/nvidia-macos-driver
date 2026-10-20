@@ -612,6 +612,116 @@
  exec xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -ffile-prefix-map=/Volumes/MiniData/build/gpu-src=/src -mkernel -fapple-kext -nostdinc -isysroot "$SDK" -I"$KF" \
    -I$X/bsdcompat/include/nmxxnu -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
    -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -O2 -g0 -Wall -Wno-unused-parameter \
+--- a/fork_i915_gem_mman.py
++++ b/fork_i915_gem_mman.py
+@@ -1,13 +1,94 @@
+-# fork_i915_gem_mman.py <drm-kmod> <out>: i915_gem_mman.c for macOS. The legacy whole-object mmap ioctl
+-# (DRM_I915_GEM_MMAP) maps a GEM object's shmem object with FreeBSD's VM map; on macOS userland maps buffers through
+-# I915_GEM_MMAP_OFFSET and the node's mmap ioctl, which Mesa uses on every GPU the port drives (Gen9+).
+-import pathlib, sys
+-src = pathlib.Path(sys.argv[1]) / "drivers/gpu/drm/i915/gem/i915_gem_mman.c"
+-s = src.read_text()
+-start = s.index("#else\n\terror = 0;\n\taddr = 0;\n")
+-end = s.index("out:\n#endif\n") + len("out:\n#endif\n")
+-assert s.count("#else\n\terror = 0;\n\taddr = 0;\n") == 1 and s.count("out:\n#endif\n") == 1
+-s = s[:start] + "#else\n\t/* macOS port: no FreeBSD VM map; see the fork script's header */\n\ti915_gem_object_put(obj);\n\treturn -ENODEV;\n#endif\n" + s[end:]
+-s = s.replace("#include <sys/resourcevar.h>\t/* for lim_cur_proc */\n", "", 1)
+-pathlib.Path(sys.argv[2]).write_text(s)
+-print("i915_gem_mman.c fork applied")
++"""Fork the pinned i915 mmap code for the Darwin node mapping ABI.
++
++Darwin uses whole, physical IOMemoryDescriptor mappings instead of Linux PTE
++faults. Keep the shmem backing pages pinned until that native mapping is gone;
++GGTT apertures and TTM objects need additional placement ownership and are
++outside this first application-compute path. The legacy GEM_MMAP ioctl remains
++unsupported: userland must request a CPU GEM_MMAP_OFFSET and use the node ABI.
++"""
++
++import pathlib
++import sys
++
++
++def replace_once(text, before, after, label):
++    """Replace one pinned source fragment, refusing missing or ambiguous inputs."""
++    count = text.count(before)
++    if count != 1:
++        raise SystemExit(f"i915 mmap fork drift at {label}: expected one anchor, found {count}")
++    return text.replace(before, after, 1)
++
++
++source = pathlib.Path(sys.argv[1]) / "drivers/gpu/drm/i915/gem/i915_gem_mman.c"
++text = source.read_text(encoding="utf-8")
++legacy_start = "#else\n\terror = 0;\n\taddr = 0;\n"
++legacy_end = "out:\n#endif\n"
++if text.count(legacy_start) != 1 or text.count(legacy_end) != 1:
++    raise SystemExit("i915 mmap fork drift at legacy FreeBSD VM implementation")
++start = text.index(legacy_start)
++end = text.index(legacy_end, start) + len(legacy_end)
++text = text[:start] + (
++    "#else\n"
++    "\t/* Darwin has no FreeBSD VM map; use the node's CPU offset ABI. */\n"
++    "\ti915_gem_object_put(obj);\n"
++    "\treturn -ENODEV;\n"
++    "#endif\n"
++) + text[end:]
++text = replace_once(text, "#include <sys/resourcevar.h>\t/* for lim_cur_proc */\n", "", "resource header")
++text = replace_once(text, '#include "i915_vma.h"\n', '#include "i915_vma.h"\n#include <nmx_vma.h>\n', "pin hook header")
++
++function_start = (
++    "static int\n"
++    "i915_gem_object_mmap(struct drm_i915_gem_object *obj,\n"
++)
++pin_hook = """/* The node mapper owns one persistent pin, independently of each fault's
++ * temporary pin. Its existing GEM reference survives until vm_close; native
++ * mappings are destroyed before the node calls this hook to drop the pin.
++ */
++static int nmx_i915_mmap_pin(void *arg, bool on)
++{
++\tstruct drm_i915_gem_object *obj = arg;
++
++\tif (on)
++\t\treturn i915_gem_object_pin_pages_unlocked(obj);
++
++\ti915_gem_object_unpin_pages(obj);
++\treturn 0;
++}
++
++"""
++text = replace_once(text, function_start, pin_hook + function_start, "pin hook implementation")
++
++guard_anchor = (
++    "\tstruct drm_device *dev = &i915->drm;\n"
++    "\tstruct file *anon;\n\n"
++    "\tif (i915_gem_object_is_readonly(obj)) {\n"
++)
++guard = """\t/* A GEM reference alone does not retain shmem physical pages. GGTT
++\t * mappings also need a pinned aperture/fence, and TTM mappings need
++\t * placement ownership; refuse both until their native lifetime exists.
++\t */
++\tif (!mmo || !i915_gem_object_is_shmem(obj) ||
++\t    (mmo->mmap_type != I915_MMAP_TYPE_WB &&
++\t     mmo->mmap_type != I915_MMAP_TYPE_WC &&
++\t     mmo->mmap_type != I915_MMAP_TYPE_UC)) {
++\t\ti915_gem_object_put(obj);
++\t\treturn -EOPNOTSUPP;
++\t}
++
++"""
++text = replace_once(
++    text, guard_anchor,
++    "\tstruct drm_device *dev = &i915->drm;\n\tstruct file *anon;\n\n" + guard +
++    "\tif (i915_gem_object_is_readonly(obj)) {\n",
++    "native shmem mapping scope",
++)
++text = replace_once(
++    text,
++    "\tvma->vm_page_prot = pgprot_decrypted(vma->vm_page_prot);\n\n\treturn 0;\n}",
++    "\tvma->vm_page_prot = pgprot_decrypted(vma->vm_page_prot);\n"
++    "\tnmx_vma_set_pin(vma, nmx_i915_mmap_pin, obj);\n\n\treturn 0;\n}",
++    "persistent mapping pin registration",
++)
++pathlib.Path(sys.argv[2]).write_text(text, encoding="utf-8", newline="\n")
++print("i915_gem_mman.c Darwin CPU mapping fork applied")
 --- a/gen_flags.py
 +++ b/gen_flags.py
 @@ -8,7 +8,7 @@
@@ -623,6 +733,74 @@
  }
  txt = (dk / "kconfig.mk").read_text()
  # amd64 branch, FBDEV branch dropped (excluded anyway)
+--- a/override/i915/i915_gem_mman.c
++++ b/override/i915/i915_gem_mman.c
+@@ -25,6 +25,7 @@
+ #include "i915_user_extensions.h"
+ #include "i915_gem_ttm.h"
+ #include "i915_vma.h"
++#include <nmx_vma.h>
+ 
+ #ifdef __FreeBSD__
+ #include <sys/proc.h>
+@@ -143,7 +144,7 @@
+ 			goto err;
+ 	}
+ #else
+-	/* macOS port: no FreeBSD VM map; see the fork script's header */
++	/* Darwin has no FreeBSD VM map; use the node's CPU offset ABI. */
+ 	i915_gem_object_put(obj);
+ 	return -ENODEV;
+ #endif
+@@ -1024,6 +1025,21 @@
+ 	return file;
+ }
+ 
++/* The node mapper owns one persistent pin, independently of each fault's
++ * temporary pin. Its existing GEM reference survives until vm_close; native
++ * mappings are destroyed before the node calls this hook to drop the pin.
++ */
++static int nmx_i915_mmap_pin(void *arg, bool on)
++{
++	struct drm_i915_gem_object *obj = arg;
++
++	if (on)
++		return i915_gem_object_pin_pages_unlocked(obj);
++
++	i915_gem_object_unpin_pages(obj);
++	return 0;
++}
++
+ static int
+ i915_gem_object_mmap(struct drm_i915_gem_object *obj,
+ 		     struct i915_mmap_offset *mmo,
+@@ -1032,6 +1048,18 @@
+ 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
+ 	struct drm_device *dev = &i915->drm;
+ 	struct file *anon;
++
++	/* A GEM reference alone does not retain shmem physical pages. GGTT
++	 * mappings also need a pinned aperture/fence, and TTM mappings need
++	 * placement ownership; refuse both until their native lifetime exists.
++	 */
++	if (!mmo || !i915_gem_object_is_shmem(obj) ||
++	    (mmo->mmap_type != I915_MMAP_TYPE_WB &&
++	     mmo->mmap_type != I915_MMAP_TYPE_WC &&
++	     mmo->mmap_type != I915_MMAP_TYPE_UC)) {
++		i915_gem_object_put(obj);
++		return -EOPNOTSUPP;
++	}
+ 
+ 	if (i915_gem_object_is_readonly(obj)) {
+ 		if (vma->vm_flags & VM_WRITE) {
+@@ -1098,6 +1126,7 @@
+ 		break;
+ 	}
+ 	vma->vm_page_prot = pgprot_decrypted(vma->vm_page_prot);
++	nmx_vma_set_pin(vma, nmx_i915_mmap_pin, obj);
+ 
+ 	return 0;
+ }
 --- /dev/null
 +++ b/override/i915/nmx_i915_scanout.c
 @@ -0,0 +1,122 @@

@@ -157,6 +157,14 @@ jobs:
             -I"$X/bsdcompat/include/nmxxnu" -I"$X/xnu" \
             /tmp/nmx-native-display-test.cpp -o /tmp/nmx-native-display-test
           /tmp/nmx-native-display-test | tee /tmp/nmx-native-display-test.log
+          python3 "$X/fork_i915_gem_mman.py" "$S/kpi/drm-kmod" /tmp/nmx-i915-mman-generated.c
+          cmp "$X/override/i915/i915_gem_mman.c" /tmp/nmx-i915-mman-generated.c
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/acceleration/kernel-tests/prepare_mmap_fixture.py" \
+            --port "$X" \
+            --template "$GITHUB_WORKSPACE/experimental/uhd770/acceleration/kernel-tests/mmap_fixture.c.in" \
+            --output /tmp/nmx-i915-mmap-test.c
+          cc -std=c11 -Wall -Wextra -Werror /tmp/nmx-i915-mmap-test.c -o /tmp/nmx-i915-mmap-test
+          /tmp/nmx-i915-mmap-test | tee /tmp/nmx-i915-mmap-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_irq_fixture.py" \
             "$X/bsdcompat/src/nmx_bus.c" \
             "$GITHUB_WORKSPACE/experimental/uhd770/tests/irq_drain_fixture.c.in" \
@@ -292,6 +300,7 @@ jobs:
           cp /tmp/nmx-checked-ranges-test.log /tmp/nmx-irq-drain-test.c /tmp/nmx-irq-drain-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-display-protocol-test.log "$X/bsdcompat/include/nmx_display_protocol.h" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-native-display-test.cpp /tmp/nmx-native-display-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-i915-mmap-test.c /tmp/nmx-i915-mmap-test.log /tmp/nmx-i915-mman-generated.c "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/xnu/nmx_fb_interrupts.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/xnu/nmx_attach_lifecycle.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/bsdcompat/include/nmx_gamma_lut.h" "$S/kpi/drm-kmod/drivers/gpu/drm/drm_color_mgmt.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true

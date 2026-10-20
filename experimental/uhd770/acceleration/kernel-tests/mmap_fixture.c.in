@@ -1,0 +1,318 @@
+/* Host verification of the real i915/node mmap lifecycle, without a kernel or
+ * GPU. Services inject placement, pin, native-map and allocation failures;
+ * production function bodies decide all ownership and cleanup transitions.
+ */
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+#ifndef EOPNOTSUPP
+#define EOPNOTSUPP 95
+#endif
+#ifndef ENODEV
+#define ENODEV 19
+#endif
+#ifndef EFAULT
+#define EFAULT 14
+#endif
+
+typedef uintptr_t pgprot_t;
+typedef int vm_fault_t;
+#define PAGE_SHIFT 12
+#define PAGE_SIZE 4096ULL
+#define PAGE_MASK (PAGE_SIZE - 1)
+#define VM_READ 1
+#define VM_WRITE 2
+#define VM_MAYWRITE 4
+#define VM_SHARED 8
+#define VM_PFNMAP 16
+#define VM_DONTEXPAND 32
+#define VM_DONTDUMP 64
+#define VM_IO 128
+#define FAULT_FLAG_WRITE 1
+#define VM_FAULT_NOPAGE 0
+#define VM_FAULT_SIGBUS 1
+#define VM_FAULT_OOM 2
+#define NMX_DRM_MMAP_FIXED 1
+#define M_NMXCDEV 0
+#define M_WAITOK 1
+#define M_ZERO 2
+#define MTX_DEF 0
+#define round_page(value) (((value) + PAGE_MASK) & ~PAGE_MASK)
+#define unlikely(value) (value)
+#define __containerof(ptr, type, field) ((type *)((char *)(ptr) - offsetof(type, field)))
+#define bzero(ptr, size) memset((ptr), 0, (size))
+#define linux_file file
+#define fallthrough ((void)0)
+#define GEM_WARN_ON(value) assert(!(value))
+#define GEM_BUG_ON(value) assert(!(value))
+#define TAILQ_ENTRY(type) struct { struct type *tqe_next; }
+#define TAILQ_FIRST(head) ((head)->tqh_first)
+#define TAILQ_INSERT_HEAD(head, entry, field) do { (entry)->field.tqe_next = (head)->tqh_first; (head)->tqh_first = (entry); } while (0)
+#define TAILQ_FOREACH(entry, head, field) for ((entry) = (head)->tqh_first; (entry); (entry) = (entry)->field.tqe_next)
+#define TAILQ_REMOVE(head, entry, field) do { struct nmx_umap **slot_ = &(head)->tqh_first; while (*slot_ && *slot_ != (entry)) slot_ = &(*slot_)->field.tqe_next; assert(*slot_ == (entry)); *slot_ = (entry)->field.tqe_next; } while (0)
+
+struct vm_area_struct;
+struct vm_fault;
+struct file;
+struct vm_operations_struct {
+    vm_fault_t (*fault)(struct vm_fault *);
+    void (*close)(struct vm_area_struct *);
+};
+struct file_operations { int (*mmap)(struct file *, struct vm_area_struct *); };
+struct file { int refs; void *f_data; const void *f_ops; const struct file_operations *f_op; };
+struct mm_struct { int refs; int mmap_sem; };
+struct vm_object { int lock; };
+struct vm_area_struct {
+    uintptr_t vm_start, vm_end, vm_pgoff, vm_flags;
+    pgprot_t vm_page_prot;
+    struct file *vm_file;
+    struct mm_struct *vm_mm;
+    struct vm_object *vm_obj;
+    const struct vm_operations_struct *vm_ops;
+    void *vm_private_data;
+    int vm_pfn_count;
+};
+struct vm_fault {
+    int flags;
+    uintptr_t pgoff, address;
+    void *page;
+    struct vm_area_struct *vma;
+};
+struct drm_device { int unused; };
+struct drm_i915_private { struct drm_device drm; };
+struct object_ops { const struct vm_operations_struct *mmap_ops; };
+struct drm_i915_gem_object {
+    struct { struct drm_device *dev; struct { void *driver_private; } vma_node; } base;
+    struct object_ops *ops;
+    int refs, pins;
+    bool shmem, readonly;
+};
+enum { I915_MMAP_TYPE_WB, I915_MMAP_TYPE_WC, I915_MMAP_TYPE_UC, I915_MMAP_TYPE_GTT, I915_MMAP_TYPE_FIXED };
+struct i915_mmap_offset { struct drm_i915_gem_object *obj; int mmap_type; };
+struct nmx_umap;
+struct map_head { struct nmx_umap *tqh_first; };
+struct nmx_open { struct file *fp; int maps_mtx; struct map_head maps; };
+struct nmx_drm_mmap { uint64_t offset, size; uint32_t prot, flags; uint64_t addr; };
+struct nmx_drm_munmap { uint64_t addr, size; };
+struct thread { struct file *td_fpop; };
+struct task_current { struct mm_struct *mm; };
+
+static struct drm_i915_private gpu;
+static struct object_ops object_ops;
+static struct drm_i915_gem_object object;
+static struct i915_mmap_offset offset_node;
+static struct file native_file, source_file, singleton_file;
+static struct mm_struct process_mm;
+static struct thread thread_storage;
+static struct thread *curthread = &thread_storage;
+static struct task_current task_storage;
+static struct task_current *current = &task_storage;
+static int heap_live, allocation_calls, fail_allocation, lock_live;
+static int fault_calls, fail_fault, pin_calls, fail_pin, fail_native, fail_singleton;
+static bool null_offset;
+static int singleton_calls, native_calls, expected_pin_during_native, last_writable;
+static uint64_t next_address;
+static char events[64];
+static size_t event_count;
+static void event(char value) { assert(event_count + 1 < sizeof events); events[event_count++] = value; events[event_count] = 0; }
+
+static void *service_allocate(size_t size)
+{
+    void *result;
+    allocation_calls++;
+    if (allocation_calls == fail_allocation) return NULL;
+    result = calloc(1, size);
+    assert(result);
+    heap_live++;
+    return result;
+}
+static void service_free(void *value) { if (value) { heap_live--; free(value); } }
+#define malloc(size, pool, flags) service_allocate(size)
+#define free(value, pool) service_free(value)
+static void mtx_init(int *lock, const char *name, void *unused, int flags) { (void)name; (void)unused; (void)flags; assert(!*lock); *lock = 1; lock_live++; }
+static void mtx_destroy(int *lock) { assert(*lock == 1); *lock = 0; lock_live--; }
+static void mtx_lock(int *lock) { assert(!*lock); *lock = 1; }
+static void mtx_unlock(int *lock) { assert(*lock == 1); *lock = 0; }
+static void down_write(int *lock) { assert(!*lock); *lock = 1; }
+static void up_write(int *lock) { assert(*lock == 1); *lock = 0; }
+static void linux_set_current(struct thread *thread) { assert(thread == curthread); }
+static bool mmget_not_zero(struct mm_struct *mm) { if (!mm->refs) return false; mm->refs++; return true; }
+static void mmput(struct mm_struct *mm) { assert(mm->refs > 1); mm->refs--; }
+static struct file *get_file(struct file *file) { file->refs++; return file; }
+static void fput(struct file *file) { assert(file->refs > 1); file->refs--; }
+static void vma_set_file(struct vm_area_struct *vma, struct file *file) { if (vma->vm_file) fput(vma->vm_file); vma->vm_file = get_file(file); }
+static struct drm_i915_private *to_i915(struct drm_device *device) { assert(device == &gpu.drm); return &gpu; }
+static bool i915_gem_object_is_shmem(struct drm_i915_gem_object *obj) { return obj->shmem; }
+static bool i915_gem_object_is_readonly(struct drm_i915_gem_object *obj) { return obj->readonly; }
+static void i915_gem_object_put(struct drm_i915_gem_object *obj) { assert(obj->refs > 1); obj->refs--; event('G'); }
+static int i915_gem_object_pin_pages_unlocked(struct drm_i915_gem_object *obj) { pin_calls++; if (fail_pin) return -ENOMEM; obj->pins++; event('P'); return 0; }
+static void i915_gem_object_unpin_pages(struct drm_i915_gem_object *obj) { assert(obj->pins > 0); obj->pins--; event('U'); }
+static struct file *mmap_singleton(struct drm_i915_private *device) { assert(device == &gpu); singleton_calls++; return fail_singleton ? (struct file *)(intptr_t)-ENOMEM : get_file(&singleton_file); }
+#define IS_ERR(ptr) ((intptr_t)(ptr) < 0)
+#define PTR_ERR(ptr) ((int)(intptr_t)(ptr))
+static void vm_flags_clear(struct vm_area_struct *vma, uintptr_t flags) { vma->vm_flags &= ~flags; }
+static void vm_flags_set(struct vm_area_struct *vma, uintptr_t flags) { vma->vm_flags |= flags; }
+static pgprot_t vm_get_page_prot(uintptr_t flags) { return flags & (VM_READ | VM_WRITE); }
+static pgprot_t pgprot_writecombine(pgprot_t prot) { return prot | 256; }
+static pgprot_t pgprot_noncached(pgprot_t prot) { return prot | 512; }
+static pgprot_t pgprot_decrypted(pgprot_t prot) { return prot; }
+static uintptr_t pgprot2cachemode(pgprot_t prot) { return prot >> 8; }
+static void service_pause(const char *name, int ticks) { (void)name; (void)ticks; }
+#define pause(name, ticks) service_pause(name, ticks)
+
+static vm_fault_t service_fault(struct vm_fault *fault);
+static void vm_close(struct vm_area_struct *vma);
+static const struct vm_operations_struct vm_ops_cpu = { service_fault, vm_close };
+static const struct vm_operations_struct vm_ops_gtt = { service_fault, vm_close };
+void nmx_vma_set_pin(struct vm_area_struct *, int (*)(void *, bool), void *);
+vm_fault_t nmx_umap_insert(struct vm_area_struct *, uintptr_t, uintptr_t, pgprot_t);
+static int service_driver_mmap(struct file *, struct vm_area_struct *);
+static const struct file_operations driver_ops = { service_driver_mmap };
+static int nmx_xnu_map_user(const uint64_t *pages, size_t count, int cache, int writable, uint64_t fixed, uint64_t *addr, void **handle)
+{
+    (void)cache; (void)fixed;
+    native_calls++;
+    assert(pages && count == 3 && object.pins == expected_pin_during_native);
+    last_writable = writable;
+    if (fail_native) return ENOMEM;
+    *addr = next_address;
+    next_address += 0x10000;
+    *handle = (void *)(uintptr_t)*addr;
+    event('M');
+    return 0;
+}
+static void nmx_xnu_unmap_user(void *handle) { assert(handle && object.pins > 0); event('X'); }
+
+/* NMX_ACTUAL_MMAP_IMPLEMENTATION */
+
+static vm_fault_t service_fault(struct vm_fault *fault)
+{
+    fault_calls++;
+    assert(object.pins == expected_pin_during_native - ((fault_calls - 1) % 6 < 3 ? 1 : 0));
+    if (fault_calls == fail_fault) return VM_FAULT_SIGBUS;
+    assert(object.refs > 1);
+    return nmx_umap_insert(fault->vma, fault->address, 0x400 + fault->pgoff, fault->vma->vm_page_prot);
+}
+static int service_driver_mmap(struct file *file, struct vm_area_struct *vma)
+{
+    assert(file == &source_file);
+    object.refs++; /* the actual i915 lookup transfers this reference to mmap */
+    return i915_gem_object_mmap(&object, null_offset ? NULL : &offset_node, vma);
+}
+static struct nmx_drm_mmap request(void)
+{
+    const struct nmx_drm_mmap value = { 0, 3 * PAGE_SIZE, VM_READ | VM_WRITE, 0, 0 };
+    return value;
+}
+static void reset(struct nmx_open *open)
+{
+    assert(heap_live == 0 && lock_live == 0);
+    memset(&object, 0, sizeof object);
+    memset(&object_ops, 0, sizeof object_ops);
+    object.base.dev = &gpu.drm;
+    object.ops = &object_ops;
+    object.refs = 1;
+    object.shmem = true;
+    offset_node.obj = &object;
+    offset_node.mmap_type = I915_MMAP_TYPE_WB;
+    memset(&source_file, 0, sizeof source_file);
+    source_file.refs = singleton_file.refs = 1;
+    source_file.f_op = &driver_ops;
+    memset(&native_file, 0, sizeof native_file);
+    native_file.f_data = &source_file;
+    native_file.f_ops = &driver_ops;
+    memset(open, 0, sizeof *open);
+    open->fp = &native_file;
+    process_mm.refs = 1;
+    process_mm.mmap_sem = 0;
+    current->mm = &process_mm;
+    curthread->td_fpop = &native_file;
+    allocation_calls = fail_allocation = fault_calls = fail_fault = 0;
+    pin_calls = fail_pin = fail_native = fail_singleton = 0;
+    singleton_calls = native_calls = 0;
+    null_offset = false;
+    expected_pin_during_native = 1;
+    last_writable = -1;
+    next_address = 0x100000;
+    event_count = 0;
+    events[0] = 0;
+}
+static void clean(const struct nmx_open *open)
+{
+    assert(!open->maps.tqh_first && !open->maps_mtx);
+    assert(!heap_live && !lock_live && !object.pins && object.refs == 1);
+    assert(source_file.refs == 1 && singleton_file.refs == 1 && process_mm.refs == 1);
+    assert(!process_mm.mmap_sem && curthread->td_fpop == &native_file);
+}
+int main(void)
+{
+    struct nmx_open open;
+    struct nmx_drm_mmap req;
+    struct nmx_drm_munmap un;
+    int type, failure;
+    for (type = I915_MMAP_TYPE_WB; type <= I915_MMAP_TYPE_UC; type++) {
+        reset(&open); offset_node.mmap_type = type; req = request();
+        assert(nmx_mmap(&open, &req) == 0);
+        assert(pin_calls == 1 && fault_calls == 6 && object.pins == 1 && object.refs == 2);
+        assert(native_calls == 1 && last_writable == 1 && !strcmp(events, "PM"));
+        un.addr = req.addr; un.size = req.size;
+        assert(nmx_munmap(&open, &un) == 0);
+        assert(!strcmp(events, "PMXUG"));
+        clean(&open);
+    }
+    for (type = I915_MMAP_TYPE_GTT; type <= I915_MMAP_TYPE_FIXED + 1; type++) {
+        reset(&open); offset_node.mmap_type = type; req = request();
+        assert(nmx_mmap(&open, &req) == EOPNOTSUPP);
+        assert(!pin_calls && !fault_calls && !singleton_calls && !strcmp(events, "G"));
+        clean(&open);
+    }
+    reset(&open); object.shmem = false; object_ops.mmap_ops = &vm_ops_gtt; req = request();
+    assert(nmx_mmap(&open, &req) == EOPNOTSUPP && !singleton_calls);
+    clean(&open);
+    reset(&open); null_offset = true; req = request();
+    assert(nmx_mmap(&open, &req) == EOPNOTSUPP && !singleton_calls && !pin_calls);
+    clean(&open);
+    reset(&open); object.readonly = true; req = request();
+    assert(nmx_mmap(&open, &req) == EINVAL && !pin_calls && !singleton_calls);
+    clean(&open);
+    reset(&open); object.readonly = true; req = request(); req.prot = VM_READ;
+    assert(nmx_mmap(&open, &req) == 0 && last_writable == 0);
+    umap_release_all(&open); clean(&open);
+    reset(&open); fail_singleton = 1; req = request();
+    assert(nmx_mmap(&open, &req) == ENOMEM && !pin_calls && !fault_calls);
+    clean(&open);
+    for (failure = 1; failure <= 2; failure++) {
+        reset(&open); fail_allocation = failure; req = request();
+        assert(nmx_mmap(&open, &req) == ENOMEM && !pin_calls && !singleton_calls);
+        clean(&open);
+    }
+    reset(&open); fail_fault = 1; req = request();
+    assert(nmx_mmap(&open, &req) == EFAULT && !pin_calls && !strcmp(events, "G"));
+    clean(&open);
+    reset(&open); fail_pin = 1; req = request();
+    assert(nmx_mmap(&open, &req) == ENOMEM && pin_calls == 1 && !strcmp(events, "G"));
+    clean(&open);
+    reset(&open); fail_fault = 4; req = request();
+    assert(nmx_mmap(&open, &req) == EFAULT && !native_calls && !strcmp(events, "PUG"));
+    clean(&open);
+    reset(&open); fail_native = 1; req = request();
+    assert(nmx_mmap(&open, &req) == ENOMEM && !strcmp(events, "PUG"));
+    clean(&open);
+    reset(&open); req = request();
+    assert(nmx_mmap(&open, &req) == 0);
+    un.addr = req.addr; un.size = req.size;
+    req = request(); expected_pin_during_native = 2;
+    assert(nmx_mmap(&open, &req) == 0 && object.pins == 2 && object.refs == 3);
+    assert(nmx_munmap(&open, &un) == 0 && object.pins == 1 && object.refs == 2);
+    umap_release_all(&open);
+    assert(!strcmp(events, "PMPMXUGXUG"));
+    clean(&open);
+    puts("actual i915 mmap: CPU scope, persistent pins, failure cleanup and fd-close PASS");
+    return 0;
+}
