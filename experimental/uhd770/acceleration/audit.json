@@ -118,7 +118,16 @@
       "checks": "Actual production preparation/EXIT recovery/root-job/user-job flow with fake macOS services; atomic file backup, interrupted recovery, recorder and readiness predicates; probe failure sequencing; native Bash syntax, capture/probe supervision, Windows recovery on a temporary fake USB and launchd template structure.",
       "target_gate": "One preparation invocation checks actual target KC, selected USB UUID/config, signing policy, complete normal-desktop recorder and both real launch entry points before arming. These gates have not yet run on this machine.",
       "gpu_executed": false,
-      "desktop_acceleration_verified": false
+      "desktop_acceleration_verified": false,
+      "completion_export_update": {
+        "source_commit": "2d5223c96e7f3147b5650d92d948f834ff0947f4",
+        "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39379266235",
+        "result": "success on ubuntu-latest, macos-15-intel and windows-latest",
+        "behavior": "A bounded, selected-user read of an atomic same-boot exit notice triggers capture finalization and export immediately. No notice retains the 600-second wait deadline and exports partial evidence. The notice is not a GPU success verdict.",
+        "checks": "Seven production-flow fixtures, terminal format/identity/deadline helpers, no Metal after failed Vulkan, closed/partial recorder finalization, final snapshots in exported evidence and deduplicated normal/recovery-failure exports.",
+        "compiled_components": "Kernel, userland and Metal candidate tarballs are byte-for-byte unchanged.",
+        "target_runtime_verified": false
+      }
     },
     "hardware_ready": false
   }
