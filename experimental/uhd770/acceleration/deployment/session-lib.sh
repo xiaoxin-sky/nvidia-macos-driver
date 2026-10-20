@@ -3,6 +3,25 @@
 # Callers supply protected storage and exact destinations; sourcing never reads
 # a device, edits EFI, installs a kext or starts a GPU diagnostic.
 
+# Normalize a caller-validated private root-owned payload without following its
+# signed symlinks. Callers must already require root and a protected, unlinked
+# parent. "sealed" retains private modes; "readable" exposes ordinary-user read
+# and existing execute permissions. Ownership of symlinks changes with -h, but
+# ACL/mode operations apply only to regular files/directories. In particular a
+# bundle's relative AIR link may legitimately be dangling while being moved.
+session_tree_permissions() {
+    local tree=$1 policy=$2 mode invalid
+    [ ! -L "$tree" ] && { [ -d "$tree" ] || [ -f "$tree" ]; } || return 64
+    case "$policy" in sealed) mode=go-w ;; readable) mode=go-w,a+rX ;; *) return 64 ;; esac
+    invalid=$(find -P "$tree" ! \( -type d -o -type f -o -type l \) -print -quit) || return 74
+    [ -z "$invalid" ] || return 64
+    chown -hR root:wheel "$tree" || return 74
+    # The + form propagates a failing chmod invocation through find's status;
+    # a false -exec ... \; predicate alone would still let find exit zero.
+    find -P "$tree" \( -type d -o -type f \) -exec chmod -N {} + || return 74
+    find -P "$tree" \( -type d -o -type f \) -exec chmod "$mode" {} + || return 74
+}
+
 # Preserve an existing destination by rename before replacing it. The journal
 # must be on the destination filesystem and protected by the root caller.
 # A prepared payload is consumed; a failed move remains recoverable by rollback.

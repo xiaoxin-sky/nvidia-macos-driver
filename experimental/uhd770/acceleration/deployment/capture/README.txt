@@ -19,6 +19,8 @@ replaces that watchdog with an independent ten-second hard limit, and writes
 the final marker before disarming its guard. This prevents the duration deadline
 from killing normal cleanup. launchd's child-process cleanup is retained. Boot-time execution is
 asynchronous and does not make login wait for collection.
+The plist gives a stopped collector fifteen seconds, covering its ten-second
+cleanup guard instead of independently killing valid cleanup after five seconds.
 
 Permissions required before bootstrap:
   application directory and script: root:wheel, no group/other write access;

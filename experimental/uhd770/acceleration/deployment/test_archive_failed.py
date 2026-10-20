@@ -22,7 +22,12 @@ name=${0##*/}
 case "$name" in
  uname) [ "$1" != -s ] && printf 'x86_64\n' || printf 'Darwin\n' ;;
  sw_vers) printf '15.7.9\n' ;;
- stat) [ "$2" != %u ] && printf '700\n' || printf '0\n' ;;
+ stat)
+   if [ -n "${ARCHIVE_BAD_CONTROL:-}" ] && [ "${3##*/}" = "$ARCHIVE_BAD_CONTROL" ]; then
+     printf '501 700\n'
+   else
+     case "$2" in '%u %Lp') printf '0 700\n' ;; %u) printf '0\n' ;; *) printf '700\n' ;; esac
+   fi ;;
  sysctl) printf '%s\n' "${ARCHIVE_BOOTARGS:--v -nvoff}" ;;
  ioreg)
    if [ "$3" = IGPU ]; then printf '"device-id" = <80460000>\n"vendor-id" = <86800000>\n';
@@ -53,6 +58,20 @@ esac
 
 
 class ArchiveFailedTests(unittest.TestCase):
+    TARGETS = {
+        "nmxgpu": ("Library/Extensions/NMXGPU.kext", "directory"),
+        "nmxaccel": ("Library/Extensions/NMXAccel.kext", "directory"),
+        "cachegpu": ("Library/NullMoth/kexts/15/NMXGPU.kext", "directory"),
+        "cacheaccel": ("Library/NullMoth/kexts/15/NMXAccel.kext", "directory"),
+        "firmware": ("Library/NullMoth/firmware/i915", "directory"),
+        "license": ("Library/NullMoth/firmware/LICENSES/LICENSE.i915", "file"),
+        "runtime": ("Library/GPUBundles/nvmtl", "directory"),
+        "frontend": ("Library/GPUBundles/NVMTLDriver.bundle", "directory"),
+        "auxkc": ("Library/KernelCollections/AuxiliaryKernelExtensions.kc", "file"),
+        "rootjob": ("Library/LaunchDaemons/com.uhd770.mvp.session.plist", "file"),
+        "userjob": ("Library/LaunchAgents/com.uhd770.mvp.session.plist", "file"),
+    }
+
     def setUp(self):
         git_bash = pathlib.Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
         self.bash = str(git_bash) if os.name == "nt" and git_bash.is_file() else shutil.which("bash")
@@ -130,7 +149,38 @@ class ArchiveFailedTests(unittest.TestCase):
         """Run only the redirected production entry point, with a finite budget."""
         return subprocess.run([self.bash, "-p", self.posix + "/" + self.wrapper.name, *arguments],
                               env=dict(self.env, **changes), capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=30)
+                              encoding="utf-8", errors="replace", timeout=90)
+
+    def restored_entry(self, key, original="present"):
+        """Create inert old receipts and current targets using the fixed protocol.
+
+        The helper must only inspect these bytes. Replaced candidate evidence
+        remains inside the journal, and no fixture invokes restoration code.
+        """
+        relative, kind = self.TARGETS[key]
+        target = self.mac / relative
+        if original == "present":
+            if kind == "directory":
+                target.mkdir(parents=True, exist_ok=True)
+                (target / "original-bytes").write_bytes(b"restored original")
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"restored original")
+        for suffix, data in {
+            "target": f"{self.posix}/mac/{relative}\n",
+            "original": f"{original}\n",
+            "restored": "",
+            "replaced": "preserved candidate evidence\n",
+        }.items():
+            (self.journal / f"{key}.{suffix}").write_text(data, encoding="utf-8")
+        return target
+
+    def assert_refused_without_archiving(self, result):
+        """A rejected receipt must not run export/removal or rename the stage."""
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.stage.exists())
+        self.assertFalse((self.root / "events").exists())
+        self.assertEqual(hashlib.sha256(self.efi.read_bytes()).hexdigest(), self.safe)
 
     def test_archives_stage_after_export_and_recorder_removal(self):
         original_modes = (self.stage.stat().st_mode & 0o777,
@@ -153,13 +203,120 @@ class ArchiveFailedTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(self.efi.read_bytes()).hexdigest(), self.safe)
         self.assertTrue((self.mac / "Users/Shared/exported/report").is_file())
 
-    def test_nonempty_journal_is_preserved(self):
+    def test_incomplete_journal_is_preserved(self):
         (self.journal / "nmxgpu.target").write_text("installation journal", encoding="utf-8")
         result = self.run_helper()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("journal is not empty", result.stderr)
-        self.assertTrue(self.stage.exists())
-        self.assertFalse((self.root / "events").exists())
+        self.assert_refused_without_archiving(result)
+        self.assertIn("journal control", result.stderr)
+
+    def test_fully_restored_seven_target_journal_is_archived_without_live_writes(self):
+        live_bytes = {}
+        for key in ("nmxgpu", "nmxaccel", "cachegpu", "cacheaccel", "firmware", "license", "runtime"):
+            target = self.restored_entry(key, "absent" if key in ("nmxaccel", "cacheaccel") else "present")
+            if target.is_file():
+                live_bytes[target] = target.read_bytes()
+            elif target.is_dir():
+                live_bytes[target / "original-bytes"] = (target / "original-bytes").read_bytes()
+        journal_bytes = {p.name: p.read_bytes() for p in self.journal.iterdir()}
+        result = self.run_helper()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("byte equality cannot be verified", result.stdout)
+        archive = next(self.stage.parent.glob("UHD770MVP-retired.*"))
+        retained = archive / "stage/session-private/journal"
+        self.assertEqual({p.name: p.read_bytes() for p in retained.iterdir()}, journal_bytes)
+        self.assertEqual({p: p.read_bytes() for p in live_bytes}, live_bytes)
+        self.assertFalse((self.mac / self.TARGETS["nmxaccel"][0]).exists())
+        self.assertFalse((self.mac / self.TARGETS["cacheaccel"][0]).exists())
+        verification = (archive / "retirement-verification.txt").read_text()
+        self.assertIn("journal=fully-restored", verification)
+        self.assertIn("journal_entries=7", verification)
+        self.assertIn("restored_byte_equality=not-verified", verification)
+
+    def test_all_fixed_targets_accept_restored_absence_including_legacy_userjob(self):
+        for key in self.TARGETS:
+            self.restored_entry(key, "absent")
+        result = self.run_helper()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("entries=11", result.stdout)
+
+    def test_unknown_keys_and_unresolved_backups_are_preserved(self):
+        for name in ("foreign.target", "nmxgpu.backup", "runtime.backup-pending", "frontend.replaced-pending", ".hidden"):
+            with self.subTest(name=name):
+                entry = self.journal / name
+                entry.write_bytes(b"unresolved evidence")
+                result = self.run_helper()
+                self.assert_refused_without_archiving(result)
+                self.assertEqual(entry.read_bytes(), b"unresolved evidence")
+                entry.unlink()
+
+    def test_missing_receipt_bad_target_and_invalid_original_are_preserved(self):
+        self.restored_entry("nmxgpu")
+        for suffix, replacement in (("restored", None), ("restored", b"not a receipt"),
+                                    ("target", b"/Library/Extensions/Other.kext\n"),
+                                    ("original", b"unknown\n")):
+            with self.subTest(suffix=suffix, replacement=replacement):
+                path = self.journal / f"nmxgpu.{suffix}"
+                old = path.read_bytes()
+                if replacement is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(replacement)
+                result = self.run_helper()
+                self.assert_refused_without_archiving(result)
+                path.write_bytes(old)
+
+    def test_restored_presence_absence_and_type_are_checked(self):
+        target = self.restored_entry("license")
+        target.unlink()
+        self.assert_refused_without_archiving(self.run_helper())
+        target.mkdir()
+        self.assert_refused_without_archiving(self.run_helper())
+        target.rmdir()
+        target.write_bytes(b"original")
+        (self.journal / "license.original").write_text("absent\n", encoding="utf-8")
+        self.assert_refused_without_archiving(self.run_helper())
+
+    def test_untrusted_control_owner_is_refused(self):
+        self.restored_entry("nmxgpu")
+        result = self.run_helper(ARCHIVE_BAD_CONTROL="nmxgpu.restored")
+        self.assert_refused_without_archiving(result)
+        self.assertIn("Unsafe journal control owner/mode", result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "Native symlink/FIFO rejection is verified in POSIX CI")
+    def test_linked_control_linked_live_absence_and_fifo_are_rejected(self):
+        self.restored_entry("nmxgpu", "absent")
+        sentinel = self.stage.parent / "sentinel"
+        sentinel.write_bytes(b"outside bytes")
+        control = self.journal / "nmxgpu.restored"
+        control.unlink()
+        control.symlink_to(sentinel)
+        self.assert_refused_without_archiving(self.run_helper())
+        control.unlink()
+        os.mkfifo(control)
+        self.assert_refused_without_archiving(self.run_helper())
+        control.unlink()
+        control.touch()
+        target = self.mac / self.TARGETS["nmxgpu"][0]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(self.stage.parent / "missing")
+        self.assert_refused_without_archiving(self.run_helper())
+        self.assertEqual(sentinel.read_bytes(), b"outside bytes")
+
+    @unittest.skipIf(os.name == "nt", "Native sealed symlinks are preserved in POSIX CI")
+    def test_replaced_candidate_tree_preserves_dangling_relative_symlink(self):
+        self.restored_entry("frontend", "absent")
+        replaced = self.journal / "frontend.replaced"
+        replaced.unlink()
+        bundle = replaced / "Contents/MacOS"
+        bundle.mkdir(parents=True)
+        link = bundle / "air-runtime"
+        link.symlink_to("../../../nvmtl")
+        result = self.run_helper()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        archive = next(self.stage.parent.glob("UHD770MVP-retired.*"))
+        archived_link = archive / "stage/session-private/journal/frontend.replaced/Contents/MacOS/air-runtime"
+        self.assertTrue(archived_link.is_symlink())
+        self.assertEqual(os.readlink(archived_link), "../../../nvmtl")
 
     def test_nonfailed_state_is_preserved(self):
         (self.stage / "session-public/state.txt").write_text("armed\n", encoding="utf-8")

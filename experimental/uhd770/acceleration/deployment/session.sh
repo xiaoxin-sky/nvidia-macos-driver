@@ -19,6 +19,9 @@ LABEL=com.uhd770.mvp.session
 # manage.sh incorrectly treat an uninitialized stage as an existing one.
 LOCK='/Library/Application Support/.com.uhd770.mvp.prepare.lock'
 LOCK_OWNED=0
+PREPARATION_OWNED=0
+USB_SELECTION_OWNED=0
+ROOT_JOB_OWNED=0
 AUTO_EXPORT_ATTEMPTED=0
 MANUAL_ACTIVE=0
 MANUAL_CAPTURE=''
@@ -73,6 +76,58 @@ targets() {
       'rootjob|/Library/LaunchDaemons/com.uhd770.mvp.session.plist'
 }
 
+# Runtime siblings retain their final names during all private validation so
+# the signed AIR relative symlink resolves without rewriting its sealed bytes.
+prepared_path() {
+    case "$1" in
+        runtime) printf '%s/Library/GPUBundles/nvmtl\n' "$PRIVATE/prepared" ;;
+        frontend) printf '%s/Library/GPUBundles/NVMTLDriver.bundle\n' "$PRIVATE/prepared" ;;
+        nmxgpu|nmxaccel|cachegpu|cacheaccel|firmware|license|auxkc|rootjob)
+            printf '%s/%s\n' "$PRIVATE/prepared" "$1" ;;
+        *) return 64 ;;
+    esac
+}
+
+# Check only the two candidate trees, allowing unrelated system GPUBundles.
+# Modes/ACLs may change; the signed symlink text and code signatures may not.
+check_runtime() {
+    local bundles=$1 report=$2 entry magic
+    [ -d "$bundles/nvmtl" ] && [ ! -L "$bundles/nvmtl" ] || return 64
+    [ -d "$bundles/NVMTLDriver.bundle" ] && [ ! -L "$bundles/NVMTLDriver.bundle" ] || return 64
+    [ "$(readlink "$bundles/nvmtl/libvulkan.dylib")" = libvulkan.1.dylib ] || return 64
+    [ "$(readlink "$bundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime")" = ../../../nvmtl ] || return 64
+    [ -f "$bundles/nvmtl/libvulkan.dylib" ] && [ -d "$bundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime" ] || return 64
+    find -P "$bundles/nvmtl" "$bundles/NVMTLDriver.bundle" -type l -print > "$report.links.txt" || return 74
+    while IFS= read -r entry; do
+        case "$entry" in
+            "$bundles/nvmtl/libvulkan.dylib"|"$bundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime") ;;
+            *) return 64 ;;
+        esac
+    done < "$report.links.txt"
+    for entry in libvulkan.1.dylib libvulkan_intel.dylib libnvmtl_translate.dylib air-opt NVMTLDriver; do
+        [ -f "$bundles/nvmtl/$entry" ] && [ ! -L "$bundles/nvmtl/$entry" ] || return 64
+    done
+    session_bounded 20 "$report.bundle.txt" codesign --verify --strict "$bundles/NVMTLDriver.bundle" || return 1
+    find -P "$bundles/nvmtl" -type f -print > "$report.files.txt" || return 74
+    while IFS= read -r entry; do
+        magic=$(od -An -tu4 -N4 "$entry" | tr -d '[:space:]') || return 74
+        [ "$magic" = 4277009103 ] || continue
+        printf 'verifying=%s\n' "$entry" >> "$report.signatures.txt" || return 74
+        session_bounded 20 "$report.current.txt" codesign --verify --strict "$entry" || return 1
+        cat "$report.current.txt" >> "$report.signatures.txt" || return 74
+    done < "$report.files.txt"
+}
+
+# A partial bootstrap may still register its job. Only a preparation that
+# proved the label absent and attempted its own bootstrap can call this helper.
+stop_owned_root_job() {
+    [ "$ROOT_JOB_OWNED" -eq 1 ] || return 0
+    session_bounded 20 "$PRIVATE/root-job-stop.txt" launchctl bootout "system/$LABEL" || :
+    session_bounded 5 "$PRIVATE/root-job-domain.txt" launchctl print system || return 1
+    if session_bounded 5 "$PRIVATE/root-job-final.txt" launchctl print "system/$LABEL"; then return 1; fi
+    ROOT_JOB_OWNED=0
+}
+
 # Validate each existing ancestor before creating only known /Library parents.
 prepare_parent() {
     local parent=${1%/*} current='' part
@@ -101,6 +156,31 @@ export_all() {
     if [ -d "$PRIVATE" ] && [ ! -L "$PRIVATE" ]; then
         mkdir "$output/preparation"
         find "$PRIVATE" -maxdepth 1 -type f -name '*.txt' -exec cp '{}' "$output/preparation/" \;
+        if [ -d "$JOURNAL" ] && [ ! -L "$JOURNAL" ]; then
+            local journal_key journal_target receipt item size
+            mkdir "$output/preparation/journal"
+            find -P "$JOURNAL" -mindepth 1 -maxdepth 1 -print > "$output/preparation/journal/entries.txt"
+            while IFS='|' read -r journal_key journal_target; do
+                for receipt in target original restored; do
+                    item="$JOURNAL/$journal_key.$receipt"
+                    [ -f "$item" ] && [ ! -L "$item" ] || continue
+                    size=$(stat -f '%z' "$item") || continue
+                    [ "$size" -le 1024 ] || continue
+                    cp "$item" "$output/preparation/journal/$journal_key.$receipt"
+                done
+                for receipt in backup backup-pending replaced replaced-pending; do
+                    item="$JOURNAL/$journal_key.$receipt"
+                    if [ -e "$item" ] || [ -L "$item" ]; then
+                        printf '%s.%s=present\n' "$journal_key" "$receipt"
+                    else
+                        printf '%s.%s=absent\n' "$journal_key" "$receipt"
+                    fi
+                done
+            done < <(
+                targets
+                printf '%s\n' 'userjob|/Library/LaunchAgents/com.uhd770.mvp.session.plist'
+            ) > "$output/preparation/journal/retained-payloads.txt"
+        fi
     fi
     # Start records even failures before PLAN/staging exist. Keep complete
     # root-owned transcripts retrievable by a later explicit export.
@@ -204,10 +284,10 @@ capture_finalized() {
 # the export can describe capture as closed. Failure retains partial evidence.
 finish_capture() {
     local boot=$1 expected=${2:-} started=$SECONDS
-    session_bounded 10 "$PRIVATE/capture-stop-$boot.txt" \
+    session_bounded 20 "$PRIVATE/capture-stop-$boot.txt" \
         launchctl bootout system/com.uhd770.mvp.capture || :
     started=$SECONDS
-    while ! capture_finalized "$boot" "$expected" && [ $((SECONDS - started)) -lt 8 ]; do sleep 1; done
+    while ! capture_finalized "$boot" "$expected" && [ $((SECONDS - started)) -lt 12 ]; do sleep 1; done
     if capture_finalized "$boot" "$expected"; then
         printf 'capture_finalization=closed\n' > "$PRIVATE/capture-finalization-$boot.txt"
     else
@@ -262,8 +342,10 @@ prepare() {
     fi
     KIT="$ROOT/incoming"; HERE="$KIT/tools"
     [ ! -e "$PRIVATE" ] && [ ! -L "$PRIVATE" ] || die 'A session already exists; export or restore it instead of rearming.'
+    [ ! -e "$PUBLIC" ] && [ ! -L "$PUBLIC" ] || die 'Existing public session evidence was preserved; do not rearm it.'
     mkdir -m 700 "$PRIVATE" "$JOURNAL"
     mkdir -m 755 "$PUBLIC"
+    PREPARATION_OWNED=1
     cp "$KIT/session-target/identity.plist" "$PLAN"
     plutil -insert user_uid -integer "$uid" "$PLAN"
     current=$(sysctl -n kern.bootsessionuuid)
@@ -288,6 +370,7 @@ prepare() {
     # Re-read through the same UUID resolver used by recovery before proceeding.
     cfg=$(usb_config) || die 'Cannot independently resolve the selected USB.'
     [ "$(hash "$cfg")" = "$(property safe_hash)" ] || die 'USB changed during preparation.'
+    USB_SELECTION_OWNED=1
     sysctl kern.bootargs kern.bootsessionuuid > "$PRIVATE/preparation-boot.txt"
     csrutil status > "$PRIVATE/sip.txt"
     grep -Eq 'Kext Signing: disabled|System Integrity Protection status: disabled' "$PRIVATE/sip.txt" || die 'Existing kext signing policy is not confirmed suitable; no security setting was changed.'
@@ -316,8 +399,9 @@ prepare() {
     printf 'recorder=%s\nnormal_desktop_capture=passed\n' "$found" > "$PRIVATE/recorder-check.txt"
     # Use ten minutes on the next boot: attach delay plus both bounded probes.
     /usr/libexec/PlistBuddy -c 'Set :ProgramArguments:3 600' /Library/LaunchDaemons/com.uhd770.mvp.capture.plist
-    local work="$PRIVATE/prepared" repo="$PRIVATE/repository" key target
+    local work="$PRIVATE/prepared" repo="$PRIVATE/repository" key target prepared
     mkdir "$work" "$repo"
+    mkdir -p "$work/Library/GPUBundles"
     safe_directory /Library/Extensions
     ditto /Library/Extensions "$repo"
     # The two substitutions below affect only a private repository. Originals
@@ -346,8 +430,8 @@ prepare() {
     ditto "$repo/NMXAccel.kext" "$work/cacheaccel"
     ditto "$ROOT/components/firmware/i915" "$work/firmware"
     cp "$ROOT/components/firmware/LICENSES/LICENSE.i915" "$work/license"
-    ditto "$ROOT/components/Library/GPUBundles/nvmtl" "$work/runtime"
-    ditto "$ROOT/components/Library/GPUBundles/NVMTLDriver.bundle" "$work/frontend"
+    ditto "$ROOT/components/Library/GPUBundles/nvmtl" "$(prepared_path runtime)"
+    ditto "$ROOT/components/Library/GPUBundles/NVMTLDriver.bundle" "$(prepared_path frontend)"
     cp "$HERE/com.uhd770.mvp.session-root.plist" "$work/rootjob"
     mkdir -m 755 "$ROOT/session-tools"
     cp "$HERE/session-user.sh" "$HERE/session-lib.sh" "$ROOT/session-tools/"
@@ -362,28 +446,52 @@ prepare() {
         chmod 755 "$ROOT/derived-probes/$key"
         shasum -a 256 "$ROOT/components/probe/$key" "$ROOT/derived-probes/$key" >> "$PRIVATE/probe-signatures.txt"
     done
-    # Reject collisions before the first live rename, then journal every write.
-    [ ! -e /Library/LaunchDaemons/$LABEL.plist ] && [ ! -e /Library/LaunchAgents/$LABEL.plist ] || die 'An unrelated session job exists.'
-    printf 'installing\n' > "$PUBLIC/state.txt"
+    # Complete every permission/link/signature/ordinary-user gate before the
+    # first live rename. Never recurse chmod through the signed AIR symlink.
+    : > "$PRIVATE/prepared-check.txt"
     while IFS='|' read -r key target; do
         prepare_parent "$target"
-        chown -hR root:wheel "$work/$key"
-        chmod -RN "$work/$key"
-        if [ -d "$work/$key" ]; then chmod -R go-w,a+rX "$work/$key"; else chmod 644 "$work/$key"; fi
-        session_replace "$JOURNAL" "$key" "$target" "$work/$key"
+        [ ! -L "$target" ] || die "A live target is a symlink; preserved: $target"
+        prepared=$(prepared_path "$key")
+        printf 'normalizing=%s path=%s\n' "$key" "$prepared" >> "$PRIVATE/prepared-check.txt"
+        session_tree_permissions "$prepared" readable || die "Cannot normalize prepared $key; no live file changed."
     done < <(targets)
+    session_tree_permissions "$ROOT/session-tools" readable || die 'Cannot normalize selected-user session tools.'
+    session_tree_permissions "$ROOT/derived-probes" readable || die 'Cannot normalize derived diagnostic executables.'
+    check_runtime "$work/Library/GPUBundles" "$PRIVATE/prepared-runtime" || die 'Prepared runtime links/signatures failed; no live file changed.'
+    for key in nmxgpu nmxaccel; do
+        session_bounded 20 "$PRIVATE/prepared-$key-signature.txt" codesign --verify --strict "$(prepared_path "$key")" || die "Prepared $key signature failed; no live file changed."
+    done
+    session_bounded 20 "$PRIVATE/user-entrypoint-preflight.txt" \
+        sudo -n -u "#$uid" /bin/bash -p "$ROOT/session-tools/session-user.sh" preflight || die 'Selected-user manual entry preflight failed; no live file changed.'
+    local user_preflight="$home/Library/Logs/UHD770MVP/preflight-$current.txt"
+    [ -f "$user_preflight" ] && [ ! -L "$user_preflight" ] && [ "$(stat -f '%u' "$user_preflight")" = "$uid" ] || die 'Selected-user entry did not produce its preflight marker.'
+    grep -qx "boot=$current" "$user_preflight" && grep -qx 'user_job_entrypoint=passed' "$user_preflight" || die 'Selected-user entry preflight failed.'
+    cp "$user_preflight" "$PRIVATE/user-job-preflight.txt"
+    session_bounded 20 "$PRIVATE/user-payload-preflight.txt" sudo -n -u "#$uid" /bin/bash -p -c \
+        'for item do [ -r "$item" ] || exit 64; done; [ -x "$1" ] && [ -x "$2" ]' _ \
+        "$ROOT/derived-probes/uhd770-compute-probe" "$ROOT/derived-probes/uhd770-metal-probe" \
+        "$ROOT/components/Library/GPUBundles/nvmtl/libvulkan.1.dylib" \
+        "$ROOT/components/Library/GPUBundles/nvmtl/libvulkan_intel.dylib" \
+        "$ROOT/components/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver" \
+        || die 'Selected-user payload readability preflight failed; no live file changed.'
+    [ ! -e /Library/LaunchDaemons/$LABEL.plist ] && [ ! -L /Library/LaunchDaemons/$LABEL.plist ] && \
+        [ ! -e /Library/LaunchAgents/$LABEL.plist ] && [ ! -L /Library/LaunchAgents/$LABEL.plist ] || die 'An unrelated session job exists.'
+    session_bounded 5 "$PRIVATE/root-job-domain-before.txt" launchctl print system || die 'Cannot inspect the launchd system domain.'
+    if session_bounded 5 "$PRIVATE/root-job-before.txt" launchctl print "system/$LABEL"; then die 'A root session job is already registered; preserved.'; fi
+    printf 'prepared_payloads=passed\n' >> "$PRIVATE/prepared-check.txt"
+    printf 'installing\n' > "$PUBLIC/state.txt"
+    while IFS='|' read -r key target; do
+        session_replace "$JOURNAL" "$key" "$target" "$(prepared_path "$key")"
+    done < <(targets)
+    check_runtime /Library/GPUBundles "$PRIVATE/installed-runtime" || die 'Installed runtime links/signatures failed; rollback required.'
     # Only recovery/logging starts automatically. No user LaunchAgent is
     # installed: explicit manual execution is required for compute submission.
+    ROOT_JOB_OWNED=1
     launchctl bootstrap system /Library/LaunchDaemons/$LABEL.plist
     elapsed=0
     while [ ! -f "$PUBLIC/root-preflight-$current.txt" ] && [ "$elapsed" -lt 20 ]; do sleep 1; elapsed=$((elapsed + 1)); done
     grep -qx 'root_job_entrypoint=passed' "$PUBLIC/root-preflight-$current.txt" || die 'Root recovery job entry point did not pass its live preflight.'
-    session_bounded 20 "$PRIVATE/user-entrypoint-preflight.txt" \
-        sudo -n -u "#$uid" /bin/bash -p "$ROOT/session-tools/session-user.sh" preflight || die 'Selected-user manual entry preflight failed.'
-    local user_preflight="$home/Library/Logs/UHD770MVP/preflight-$current.txt"
-    [ -f "$user_preflight" ] && [ ! -L "$user_preflight" ] && [ "$(stat -f '%u' "$user_preflight")" = "$uid" ] || die 'Selected-user job did not produce its preflight marker.'
-    grep -qx "boot=$current" "$user_preflight" && grep -qx 'user_job_entrypoint=passed' "$user_preflight" || die 'Selected-user job preflight failed.'
-    cp "$user_preflight" "$PRIVATE/user-job-preflight.txt"
     restore_optout || die 'Independent opt-out check failed before arming.'
     [ "$(hash "$cfg")" = "$(property safe_hash)" ] || die 'USB changed before arming.'
     [ ! -e "$cfg.uhd770-pending" ] && [ ! -L "$cfg.uhd770-pending" ] || die 'A pending USB config already exists; preserved.'
@@ -529,13 +637,13 @@ failed() {
         printf 'boot=%s\nmanual_exit=%s\n' "$manual_boot" "$code" > "$PUBLIC/manual-result-$manual_boot.txt"
         chmod 644 "$PUBLIC/manual-result-$manual_boot.txt"
     fi
-    if [ "$MODE" = prepare ] && [ -f "$PLAN" ]; then
-        restore_optout
-        local safe_code=$?
-        restore_files
-        local restore_code=$?
+    if [ "$MODE" = prepare ] && [ "$PREPARATION_OWNED" -eq 1 ]; then
+        local safe_code=0 restore_code=0 job_code=0
+        stop_owned_root_job || job_code=$?
+        if [ "$USB_SELECTION_OWNED" -eq 1 ]; then restore_optout; safe_code=$?; fi
+        if [ "$job_code" -eq 0 ]; then restore_files; restore_code=$?; else restore_code=1; fi
         printf 'failed\n' > "$PUBLIC/state.txt"
-        printf 'prepare_exit=%s\noptout_restore_exit=%s\nfile_restore_exit=%s\n' "$code" "$safe_code" "$restore_code" > "$PRIVATE/failure.txt"
+        printf 'prepare_exit=%s\noptout_restore_exit=%s\nfile_restore_exit=%s\nroot_job_stop_exit=%s\n' "$code" "$safe_code" "$restore_code" "$job_code" > "$PRIVATE/failure.txt"
         printf 'Preparation stopped. Recovery status is in the exported report; do not reboot for a test.\n' >&2
     fi
     if [ "$AUTO_EXPORT_ATTEMPTED" -eq 0 ]; then export_all || :; fi

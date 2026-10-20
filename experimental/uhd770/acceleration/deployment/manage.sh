@@ -92,6 +92,18 @@ snapshot_package() {
     [ "$count" -gt 0 ] || die 'Empty package checksum manifest.'
 }
 
+# Source shared mutations only from the digest-verified root snapshot. The
+# download/Desktop KIT may still be writable by the ordinary user, so staging
+# must not execute its helper while trying to establish protected ownership.
+load_staged_helpers() {
+    local helper="$ROOT/incoming/tools/session-lib.sh" owner mode
+    safe_directory "$ROOT"; safe_directory "$ROOT/incoming"; safe_directory "$ROOT/incoming/tools"
+    [ -f "$helper" ] && [ ! -L "$helper" ] || die 'Missing regular staged session helpers.'
+    owner=$(stat -f '%u' "$helper"); mode=$(stat -f '%Lp' "$helper")
+    [ "$owner" = 0 ] && [ $((8#$mode & 0022)) -eq 0 ] || die 'Unsafe staged helper owner/mode.'
+    . "$helper"
+}
+
 isolated_kc() {
     local work="$ROOT/kc-preflight" original signed
     local args=(--allow-missing-kdk -a x86_64)
@@ -106,8 +118,7 @@ isolated_kc() {
     bounded 20 "$work/codesign-verify-NMXAccel.txt" codesign --verify --strict "$work/repository/NMXAccel.kext" || return 1
     signed=$(shasum -a 256 "$work/repository/NMXGPU.kext/Contents/MacOS/NMXGPU")
     printf 'original=%s\nderived_signed=%s\ninstalled=false\n' "$original" "$signed" > "$work/derived-identity.txt"
-    chown -hR root:wheel "$work/repository"
-    chmod -R go-w "$work/repository"
+    session_tree_permissions "$work/repository" sealed || return 1
     [ -s /System/Library/KernelCollections/BootKernelExtensions.kc ] || return 1
     if [ -s /System/Library/KernelCollections/SystemKernelExtensions.kc ]; then
         args+=(-S /System/Library/KernelCollections/SystemKernelExtensions.kc)
@@ -137,11 +148,10 @@ stage() {
     # Snapshot into root-owned storage before another validation/extraction. The
     # source may be on a Windows USB filesystem without native ownership bits.
     snapshot_package
-    chown -hR root:wheel "$ROOT"
-    chmod -RN "$ROOT"
-    chmod -R go-w "$ROOT"
-    chmod 700 "$ROOT/incoming"
     verify_package "$ROOT/incoming" "$ROOT/package-verification.txt"
+    load_staged_helpers
+    session_tree_permissions "$ROOT" sealed || die 'Cannot normalize protected stage permissions.'
+    chmod 700 "$ROOT/incoming"
     mkdir "$ROOT/unpacked" "$ROOT/components"
     local name
     for name in kernel userland metal; do
@@ -159,9 +169,10 @@ stage() {
     ditto "$ROOT/incoming/tools/capture" "$ROOT/capture"
     ditto "$ROOT/incoming/tools/probes" "$ROOT/probes"
     cp "$ROOT/incoming/candidate/evidence.json" "$ROOT/evidence.json"
-    chown -hR root:wheel "$ROOT"
-    chmod -RN "$ROOT"
-    chmod -R go-w,a+rX "$ROOT/components" "$ROOT/capture" "$ROOT/probes"
+    session_tree_permissions "$ROOT" sealed || die 'Cannot normalize extracted stage permissions.'
+    for name in components capture probes; do
+        session_tree_permissions "$ROOT/$name" readable || die "Cannot make $name readable without following links."
+    done
     chmod 644 "$ROOT/evidence.json"
     chmod 700 "$ROOT/incoming"
     if [ -d "$ROOT/incoming/reference-efi" ]; then

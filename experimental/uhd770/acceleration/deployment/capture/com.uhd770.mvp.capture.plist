@@ -14,7 +14,7 @@
     <key>ProcessType</key><string>Background</string>
     <key>Nice</key><integer>10</integer>
     <key>LowPriorityIO</key><true/>
-    <key>ExitTimeOut</key><integer>5</integer>
+    <key>ExitTimeOut</key><integer>15</integer>
     <key>Umask</key><integer>63</integer>
     <key>StandardOutPath</key><string>/private/var/log/UHD770MVP/launchd.stdout.txt</string>
     <key>StandardErrorPath</key><string>/private/var/log/UHD770MVP/launchd.stderr.txt</string>

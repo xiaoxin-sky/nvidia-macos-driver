@@ -58,6 +58,10 @@ jobs:
                   'test_prepare_kit', 'test_bootstrap', 'test_archive_failed',
                   'test_session_flow.SessionFlowTests.test_native_group_writable_var_run_is_not_a_preparation_lock_parent',
                   'test_session_flow.SessionFlowTests.test_export_preserves_early_root_bootstrap_without_prepared_plan',
+                  'test_session_flow.SessionFlowTests.test_all_prepared_permissions_precede_first_live_replacement',
+                  'test_session_flow.SessionFlowTests.test_late_permission_failure_occurs_before_any_live_replacement',
+                  'test_session_flow.SessionFlowTests.test_refused_existing_stage_cannot_roll_back_an_older_plan',
+                  'test_session_flow.SessionFlowTests.test_prepare_and_next_boot_restore_use_actual_flow',
               ])
           else:
               suite = unittest.defaultTestLoader.discover('experimental/uhd770/acceleration/deployment', pattern='test_*.py')
@@ -83,6 +87,9 @@ jobs:
           /bin/bash experimental/uhd770/acceleration/deployment/capture/test_capture_finish.sh
           /bin/bash experimental/uhd770/acceleration/deployment/probes/test-runner.sh
           /bin/bash experimental/uhd770/acceleration/deployment/test_session.sh
+      - name: Native macOS ACL and symbolic-link preparation regression
+        if: runner.os == 'macOS'
+        run: sudo /bin/bash experimental/uhd770/acceleration/deployment/test_permissions_macos.sh
       - name: Check launchd template without registering it
         run: |
           python3 - <<'PY'
@@ -94,6 +101,7 @@ jobs:
           assert data['RunAtLoad'] is True and data['KeepAlive'] is False
           assert data['ProgramArguments'] == ['/bin/bash', '/Library/Application Support/UHD770MVP/capture/collector.sh', '--duration', '300']
           assert data['StandardErrorPath'].startswith('/private/var/log/UHD770MVP/')
+          assert data['ExitTimeOut'] >= 15
           print('Launchd template validated only; no registration, driver load or GPU execution.')
           root = Path('experimental/uhd770/acceleration/deployment')
           for kind in ['root']:

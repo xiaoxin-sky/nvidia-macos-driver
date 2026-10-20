@@ -1,5 +1,5 @@
 #!/bin/bash -p
-# Retire only an untouched, failed preparation before retrying a newer kit.
+# Retire a failed preparation with an empty or fully restored journal.
 # This preserves the complete stage and all reports. It never restores/replaces
 # live drivers, edits EFI, starts preparation, or submits GPU work.
 set -euo pipefail
@@ -16,7 +16,7 @@ OWN_LOCK=0
 stop() { printf 'STOP: %s\n' "$*" >&2; exit 1; }
 usage() {
     printf '%s\n' 'Usage: sudo /bin/bash -p Archive-UHD770-Failed.command' \
-      'Archive only a failed preparation with no installation journal.' \
+      'Archive only a failed preparation with an empty or fully restored installation journal.' \
       'Export evidence, stop this kit recorder, and preserve the stage in a unique root-only sibling.' \
       'No deletion of reports, EFI change, driver installation, GPU test, or reboot.' \
       'After ARCHIVED, run the newer kit Start-UHD770.command yourself.'
@@ -31,19 +31,107 @@ case "$(sw_vers -productVersion)" in 15.*) ;; *) stop 'macOS 15 required.' ;; es
 # Every trusted file component must be root-owned, non-writable by other users,
 # and unlinked. These checks do not change any existing file permissions.
 trusted_path() {
-    local path=$1 current='' part uid mode parts=()
+    local path=$1 current='' part uid mode metadata parts=()
     case "$path" in /Library|/Library/*) ;; *) stop 'Unexpected protected path.' ;; esac
     IFS=/ read -r -a parts <<< "$path"
     for part in "${parts[@]}"; do
         [ -n "$part" ] || continue
         current="$current/$part"
         [ -e "$current" ] && [ ! -L "$current" ] || stop "Missing/linked path: $current"
-        uid=$(stat -f '%u' "$current"); mode=$(stat -f '%Lp' "$current")
+        metadata=$(stat -f '%u %Lp' "$current")
+        IFS=' ' read -r uid mode <<< "$metadata"
         case "$uid:$mode" in *[!0-7:]*|:*|*:) stop 'Invalid protected metadata.' ;; esac
         [ "$uid" = 0 ] && [ $((8#$mode & 0022)) -eq 0 ] || stop "Unsafe owner/mode: $current"
     done
 }
 absent() { [ ! -e "$1" ] && [ ! -L "$1" ]; }
+
+# Keep this list synchronized with session.sh targets()/legacy restoration.
+# Unknown future targets fail closed. Journal contents never supply a filesystem
+# operation or new path, including the retired user-agent entry.
+journal_targets() {
+    printf '%s\n' \
+      'nmxgpu|/Library/Extensions/NMXGPU.kext|directory' \
+      'nmxaccel|/Library/Extensions/NMXAccel.kext|directory' \
+      'cachegpu|/Library/NullMoth/kexts/15/NMXGPU.kext|directory' \
+      'cacheaccel|/Library/NullMoth/kexts/15/NMXAccel.kext|directory' \
+      'firmware|/Library/NullMoth/firmware/i915|directory' \
+      'license|/Library/NullMoth/firmware/LICENSES/LICENSE.i915|file' \
+      'runtime|/Library/GPUBundles/nvmtl|directory' \
+      'frontend|/Library/GPUBundles/NVMTLDriver.bundle|directory' \
+      'auxkc|/Library/KernelCollections/AuxiliaryKernelExtensions.kc|file' \
+      'rootjob|/Library/LaunchDaemons/com.uhd770.mvp.session.plist|file' \
+      'userjob|/Library/LaunchAgents/com.uhd770.mvp.session.plist|file'
+}
+
+# Require a protected regular receipt/control file before reading any bytes.
+# Replaced candidate trees may contain sealed relative links and are preserved
+# without walking, chmodding or resolving their descendants.
+journal_control() {
+    local metadata uid mode
+    [ -f "$1" ] && [ ! -L "$1" ] || stop "Missing/linked journal control: $1"
+    # The journal and its ancestors were already checked before this scan.
+    metadata=$(stat -f '%u %Lp' "$1")
+    IFS=' ' read -r uid mode <<< "$metadata"
+    case "$uid:$mode" in *[!0-7:]*|:*|*:) stop 'Invalid journal control metadata.' ;; esac
+    [ "$uid" = 0 ] && [ $((8#$mode & 0022)) -eq 0 ] || stop "Unsafe journal control owner/mode: $1"
+}
+
+validate_journal() {
+    local journal="$ROOT/session-private/journal" entry name key suffix known
+    local expected kind recorded original receipt found=0
+    # Scan hidden members too; no unknown entry can silently leave an unresolved
+    # transaction behind. Only top-level evidence is interpreted.
+    for entry in "$journal"/* "$journal"/.[!.]* "$journal"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        name=${entry##*/}; key=${name%.*}; suffix=${name##*.}
+        known=0
+        while IFS='|' read -r expected recorded kind; do
+            [ "$key" != "$expected" ] || { known=1; break; }
+        done < <(journal_targets)
+        [ "$known" -eq 1 ] || stop "Unknown journal key: $name"
+        case "$suffix" in
+            target|original|restored) journal_control "$entry" ;;
+            replaced)
+                [ ! -L "$entry" ] && { [ -d "$entry" ] || [ -f "$entry" ]; } || \
+                    stop "Linked/unsupported replaced candidate: $name"
+                # Candidate descendants, including signed relative symlinks,
+                # stay opaque evidence rather than restoration instructions.
+                ;;
+            *) stop "Unresolved or unknown journal member: $name" ;;
+        esac
+    done
+    while IFS='|' read -r key expected kind; do
+        if absent "$journal/$key.target" && absent "$journal/$key.original" && \
+            absent "$journal/$key.restored" && absent "$journal/$key.replaced"; then
+            continue
+        fi
+        for suffix in target original restored; do
+            [ -f "$journal/$key.$suffix" ] && [ ! -L "$journal/$key.$suffix" ] || \
+                stop "Missing/linked journal control: $journal/$key.$suffix"
+        done
+        recorded=$(cat "$journal/$key.target")
+        [ "$recorded" = "$expected" ] || stop "Journal target is not the fixed destination: $key"
+        original=$(cat "$journal/$key.original")
+        receipt="$journal/$key.restored"
+        [ ! -s "$receipt" ] || stop "Invalid restoration receipt: $key"
+        case "$original" in
+            present)
+                [ -e "$expected" ] && [ ! -L "$expected" ] || stop "Restored original is missing/linked: $key"
+                case "$kind" in
+                    directory) [ -d "$expected" ] || stop "Restored original has the wrong type: $key" ;;
+                    file) [ -f "$expected" ] || stop "Restored original has the wrong type: $key" ;;
+                esac ;;
+            absent)
+                absent "$expected" || stop "Originally absent target still exists: $key" ;;
+            *) stop "Unknown original-state receipt: $key" ;;
+        esac
+        found=$((found + 1))
+    done < <(journal_targets)
+    JOURNAL_ENTRIES=$found
+    if [ "$found" -eq 0 ]; then JOURNAL_STATE=empty; else JOURNAL_STATE=fully-restored; fi
+}
+
 cleanup() { if [ "$OWN_LOCK" -eq 1 ]; then rmdir "$LOCK" || :; fi; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
@@ -55,8 +143,7 @@ for path in "$ROOT" "$ROOT/incoming/tools/session.sh" "$ROOT/incoming/tools/mana
     "$ROOT/session-public/state.txt" "$ROOT/session-public/plan.plist" \
     "$ROOT/stage-state.txt" "$ROOT/kc-preflight/result.txt"; do trusted_path "$path"; done
 [ -d "$ROOT/session-private/journal" ] || stop 'Missing installation journal.'
-entry=$(find "$ROOT/session-private/journal" -mindepth 1 -maxdepth 1 -print -quit)
-[ -z "$entry" ] || stop 'Installation journal is not empty; use recovery, not retirement.'
+validate_journal
 [ "$(cat "$ROOT/session-public/state.txt")" = failed ] || stop 'Only failed preparations can be archived.'
 grep -Fxq 'stage=offline-ready' "$ROOT/stage-state.txt" || stop 'Stage was not offline-ready.'
 grep -Fxq 'driver_installed=false' "$ROOT/stage-state.txt" || stop 'Driver installation status is not clean.'
@@ -108,7 +195,10 @@ done
 actual=$(shasum -a 256 "$mount/EFI/OC/config.plist" | awk '{print $1}')
 [ "$actual" = "$safe" ] || stop 'USB is not the exact safe opt-out configuration.'
 
-printf 'Verified untouched failed preparation. Exporting existing evidence...\n'
+printf 'Verified failed preparation; journal=%s entries=%s. Exporting existing evidence...\n' "$JOURNAL_STATE" "$JOURNAL_ENTRIES"
+if [ "$JOURNAL_ENTRIES" -gt 0 ]; then
+    printf 'Restoration receipts and current presence/types were checked. Original byte hashes were not recorded; byte equality cannot be verified.\n'
+fi
 /bin/bash -p "$ROOT/incoming/tools/session.sh" export
 /bin/bash -p "$ROOT/incoming/tools/manage.sh" remove-recorder
 launchctl print system >/dev/null || stop 'Cannot verify launchd after recorder removal.'
@@ -127,5 +217,7 @@ done
 # another archive and keeps the old journal, scripts and signatures together.
 archive=$(mktemp -d "$PARENT/UHD770MVP-retired.XXXXXX")
 [ -d "$archive" ] && [ ! -L "$archive" ] || stop 'Cannot create protected archive.'
+printf 'journal=%s\njournal_entries=%s\nlive_driver_files_modified=false\noriginal_byte_hashes=not-recorded\nrestored_byte_equality=not-verified\n' \
+    "$JOURNAL_STATE" "$JOURNAL_ENTRIES" > "$archive/retirement-verification.txt"
 mv "$ROOT" "$archive/stage"
 printf 'ARCHIVED: %s\nAll original reports and /private/var/log/UHD770MVP were retained.\nRun the newer kit Start-UHD770.command when ready; this helper did not start preparation.\n' "$archive"

@@ -20,7 +20,7 @@ import prepare_kit
 
 
 DISPATCHER = r'''#!/usr/bin/env python3
-import os, pathlib, plistlib, shutil, subprocess, sys
+import json, os, pathlib, plistlib, shutil, subprocess, sys
 root = pathlib.Path(os.environ['SESSION_FIXTURE'])
 name, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
 failure = os.environ.get('SESSION_FAIL', '')
@@ -76,9 +76,16 @@ elif name == 'kmutil':
     else: print('com.fixture.other\ncom.nullmoth.NMXGPU\ncom.nullmoth.NMXAccel')
 elif name == 'launchctl':
     with (root / 'launchctl-calls').open('a') as stream: stream.write(' '.join(args) + '\n')
-    if failure == 'bootstrap' and args[0] == 'bootstrap': sys.exit(28)
+    registered = root / 'root-job-registered'
+    if args == ['print', 'system']: sys.exit(0)
+    if args == ['print', 'system/com.uhd770.mvp.session']:
+        sys.exit(0 if registered.exists() else 113)
+    if args == ['bootout', 'system/com.uhd770.mvp.session']:
+        if registered.exists(): registered.unlink()
     if args[0] == 'bootstrap':
         if args[1] != 'system': sys.exit(96)
+        registered.write_text('fixture registration')
+        if failure == 'bootstrap': sys.exit(28)
         installed = root / 'mac/Library/Application Support/UHD770MVP'
         command = ['/bin/bash', '-p', str(installed / 'incoming/tools/session.sh'), 'boot']
         sys.exit(subprocess.run(command, timeout=60).returncode)
@@ -101,8 +108,11 @@ elif name == 'sudo':
     # The fixture owns every temporary file. Only bounded report reads or the
     # exact copied selected-user entry point are allowed; no privilege change.
     selected = str(root / 'mac/Library/Application Support/UHD770MVP/session-tools/session-user.sh')
+    read_gate = 'for item do [ -r "$item" ] || exit 64; done; [ -x "$1" ] && [ -x "$2" ]'
+    allowed_read_gate = args[3:8] == ['/bin/bash', '-p', '-c', read_gate, '_'] and len(args[8:]) == 5 and \
+                        all(pathlib.Path(value).is_relative_to(root) for value in args[8:])
     allowed = args[3:6] == ['/usr/bin/head', '-c', '513'] or \
-              (args[3:6] == ['/bin/bash', '-p', selected] and args[6:] in (['preflight'], ['manual']))
+              (args[3:6] == ['/bin/bash', '-p', selected] and args[6:] in (['preflight'], ['manual'])) or allowed_read_gate
     if not allowed: sys.exit(95)
     with (root / 'sudo-calls').open('a') as stream: stream.write(' '.join(args) + '\n')
     # This is the fixture's process-launch budget, not a GPU/API deadline.
@@ -111,6 +121,28 @@ elif name == 'sudo':
 elif name == 'dmesg': print('fixture final kernel snapshot')
 elif name == 'codesign':
     if failure == 'signature': sys.exit(27)
+elif name == 'chmod':
+    paths = [pathlib.Path(value) for value in args if value.startswith(str(root) + '/')]
+    if any('R' in value for value in args if value.startswith('-')):
+        if any(path.is_symlink() or (path.is_dir() and any(child.is_symlink() for child in path.rglob('*'))) for path in paths):
+            print('fixture refuses recursive chmod over an alias', file=sys.stderr); sys.exit(35)
+    if '-N' in args:
+        for path in paths:
+            if path.is_symlink():
+                print('fixture refuses ACL operations on a symlink', file=sys.stderr); sys.exit(36)
+            if '/session-private/prepared/' in str(path):
+                with (root / 'prepare-events.jsonl').open('a') as stream:
+                    stream.write(json.dumps({'kind': 'normalize', 'path': str(path)}) + '\n')
+                if failure == 'normalize-late' and path.name == 'rootjob': sys.exit(37)
+elif name == 'mv':
+    arguments = [pathlib.Path(value) for value in args if not value.startswith('-')]
+    if not arguments or any(not path.is_absolute() or not path.is_relative_to(root) for path in arguments): sys.exit(97)
+    target = arguments[-1]
+    live = root / 'mac/Library'
+    if target.is_relative_to(live) and not target.is_relative_to(live / 'Application Support'):
+        with (root / 'prepare-events.jsonl').open('a') as stream:
+            stream.write(json.dumps({'kind': 'live-replace', 'path': str(target)}) + '\n')
+    os.execv('/bin/mv', ['/bin/mv', *args])
 elif name in ('sync', 'sleep', 'chown', 'chmod', 'PlistBuddy'): pass
 else: sys.exit(92)
 '''
@@ -169,12 +201,12 @@ class SessionFlowTests(unittest.TestCase):
         dispatcher.chmod(0o700)
         for name in ("uname", "sw_vers", "id", "dscl", "sysctl", "stat", "csrutil", "nvram", "ioreg",
                      "diskutil", "plutil", "ditto", "kmutil", "launchctl", "codesign", "sync", "sleep",
-                     "chown", "chmod", "PlistBuddy", "sudo", "dmesg"):
+                     "chown", "chmod", "PlistBuddy", "sudo", "dmesg", "mv"):
             (mock / name).symlink_to(dispatcher)
         # Pure no-op adapters need no interpreter startup. Retain a short real
         # polling tick so a bounded read can schedule its sibling mock process;
         # actual deadline/process-group behavior has separate real-clock tests.
-        for name in ("chown", "chmod", "sync", "PlistBuddy", "sleep"):
+        for name in ("chown", "sync", "PlistBuddy", "sleep"):
             path = mock / name
             path.unlink()
             path.write_text("#!/bin/sh\n" + ("exec /bin/sleep 0.01\n" if name == "sleep" else "exit 0\n"), encoding="utf-8")
@@ -221,7 +253,12 @@ class SessionFlowTests(unittest.TestCase):
             "components/firmware/i915/test.bin": b"firmware",
             "components/firmware/LICENSES/LICENSE.i915": b"license",
             "components/Library/GPUBundles/nvmtl/runtime": b"runtime",
-            "components/Library/GPUBundles/NVMTLDriver.bundle/frontend": b"frontend",
+            "components/Library/GPUBundles/nvmtl/libvulkan.1.dylib": b"inert real library version",
+            "components/Library/GPUBundles/nvmtl/libvulkan_intel.dylib": b"inert ANV",
+            "components/Library/GPUBundles/nvmtl/libnvmtl_translate.dylib": b"inert translator",
+            "components/Library/GPUBundles/nvmtl/air-opt": b"inert AIR reader",
+            "components/Library/GPUBundles/nvmtl/NVMTLDriver": b"inert runtime frontend",
+            "components/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver": b"frontend",
             "components/probe/uhd770-compute-probe": b"cli",
             "components/probe/uhd770-metal-probe": b"cli",
             "stage-state.txt": b"stage=offline-ready\n",
@@ -231,6 +268,11 @@ class SessionFlowTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         (seed / "probes/run-probe.sh").chmod(0o755)
+        for name in ("uhd770-compute-probe", "uhd770-metal-probe"):
+            (seed / "components/probe" / name).chmod(0o755)
+        bundles = seed / "components/Library/GPUBundles"
+        (bundles / "nvmtl/libvulkan.dylib").symlink_to("libvulkan.1.dylib")
+        (bundles / "NVMTLDriver.bundle/Contents/MacOS/air-runtime").symlink_to("../../../nvmtl")
         (self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").write_bytes(b"original KC")
         (self.mac / "System/Library/KernelCollections/BootKernelExtensions.kc").write_bytes(b"Boot KC")
 
@@ -270,6 +312,80 @@ class SessionFlowTests(unittest.TestCase):
     def automatic_reports(self):
         """Enumerate final aggregate reports, excluding manage.sh subreports."""
         return list((self.mac / "Users/Shared").glob("UHD770MVP-session-reports.*"))
+
+    def preparation_events(self):
+        """Read inert normalization/live-rename observations in execution order."""
+        source = self.root / "prepare-events.jsonl"
+        return [json.loads(line) for line in source.read_text().splitlines()] if source.exists() else []
+
+    def test_all_prepared_permissions_precede_first_live_replacement(self):
+        """Model symlink layout and transaction order, not Darwin ACL behavior."""
+        prepared = self.run_session("prepare")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
+        events = self.preparation_events()
+        first_live = next(index for index, event in enumerate(events) if event["kind"] == "live-replace")
+        expected = ["nmxgpu", "nmxaccel", "cachegpu", "cacheaccel", "firmware", "license",
+                    "Library/GPUBundles/nvmtl", "Library/GPUBundles/NVMTLDriver.bundle", "auxkc", "rootjob"]
+        work = self.installed / "session-private/prepared"
+        normalized = {event["path"] for event in events[:first_live] if event["kind"] == "normalize"}
+        self.assertTrue({str(work / name) for name in expected} <= normalized)
+        self.assertFalse(any(event["kind"] == "normalize" for event in events[first_live:]))
+        self.assertFalse(any(path.endswith(("/air-runtime", "/libvulkan.dylib")) for path in normalized))
+        bundles = self.mac / "Library/GPUBundles"
+        air = bundles / "NVMTLDriver.bundle/Contents/MacOS/air-runtime"
+        alias = bundles / "nvmtl/libvulkan.dylib"
+        self.assertTrue(air.is_symlink())
+        self.assertEqual(os.readlink(air), "../../../nvmtl")
+        self.assertEqual(air.resolve(strict=True), bundles / "nvmtl")
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(os.readlink(alias), "libvulkan.1.dylib")
+        self.assertEqual(alias.resolve(strict=True), bundles / "nvmtl/libvulkan.1.dylib")
+
+    def test_late_permission_failure_occurs_before_any_live_replacement(self):
+        """A last-target normalization error must leave originals unjournaled."""
+        prepared = self.run_session("prepare", SESSION_FAIL="normalize-late")
+        self.assertNotEqual(prepared.returncode, 0)
+        events = self.preparation_events()
+        self.assertTrue(any(event["kind"] == "normalize" and event["path"].endswith("/rootjob") for event in events))
+        self.assertFalse(any(event["kind"] == "live-replace" for event in events))
+        self.assertEqual(list((self.installed / "session-private/journal").iterdir()), [])
+        self.assertEqual((self.mac / "Library/Extensions/NMXGPU.kext/Contents/MacOS/NMXGPU").read_bytes(), b"original")
+        self.assertEqual((self.mac / "Library/Extensions/NMXAccel.kext/Contents/MacOS/NMXAccel").read_bytes(), b"original")
+        self.assertEqual((self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").read_bytes(), b"original KC")
+        # Parent validation may create the empty installation directory before
+        # normalization; neither candidate payload may be published there.
+        self.assertFalse((self.mac / "Library/GPUBundles/nvmtl").exists())
+        self.assertFalse((self.mac / "Library/GPUBundles/NVMTLDriver.bundle").exists())
+        self.assertEqual(self.usb.read_bytes(), self.safe)
+
+    def test_refused_existing_stage_cannot_roll_back_an_older_plan(self):
+        """The failing invocation owns its lock, never the earlier transaction."""
+        prepared = self.run_session("prepare")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
+        (self.kit / "SHA256SUMS").write_bytes(b"new mismatched package\n")
+        (self.installed / "incoming/SHA256SUMS").write_bytes(b"old staged package\n")
+
+        def snapshot():
+            result = {}
+            for path in self.installed.rglob("*"):
+                if path.is_symlink():
+                    value = ("link", os.readlink(path))
+                elif path.is_file():
+                    value = ("file", path.read_bytes())
+                else:
+                    value = ("directory",)
+                result[path.relative_to(self.installed).as_posix()] = value
+            return result
+
+        original = snapshot()
+        armed_usb = self.usb.read_bytes()
+        event_count = len(self.preparation_events())
+        refused = self.run_session("prepare")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(snapshot(), original)
+        self.assertEqual(self.usb.read_bytes(), armed_usb)
+        self.assertEqual(len(self.preparation_events()), event_count)
+        self.assertEqual((self.mac / "Library/Extensions/NMXGPU.kext/Contents/MacOS/NMXGPU").read_bytes(), b"candidate")
 
     def test_export_preserves_early_root_bootstrap_without_prepared_plan(self):
         """Retrieve a complete STOP transcript even before staging created PLAN."""
