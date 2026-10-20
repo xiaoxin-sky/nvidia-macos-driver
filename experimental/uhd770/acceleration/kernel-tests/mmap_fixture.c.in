@@ -46,6 +46,12 @@ typedef int vm_fault_t;
 #define round_page(value) (((value) + PAGE_MASK) & ~PAGE_MASK)
 #define unlikely(value) (value)
 #define __containerof(ptr, type, field) ((type *)((char *)(ptr) - offsetof(type, field)))
+/* Darwin string.h imports the fortified bzero macro from strings.h. The
+ * fixture supplies the kernel form after system declarations are complete.
+ */
+#ifdef bzero
+#undef bzero
+#endif
 #define bzero(ptr, size) memset((ptr), 0, (size))
 #define linux_file file
 #define fallthrough ((void)0)
@@ -133,6 +139,12 @@ static void *service_allocate(size_t size)
     return result;
 }
 static void service_free(void *value) { if (value) { heap_live--; free(value); } }
+#ifdef malloc
+#undef malloc
+#endif
+#ifdef free
+#undef free
+#endif
 #define malloc(size, pool, flags) service_allocate(size)
 #define free(value, pool) service_free(value)
 static void mtx_init(int *lock, const char *name, void *unused, int flags) { (void)name; (void)unused; (void)flags; assert(!*lock); *lock = 1; lock_live++; }

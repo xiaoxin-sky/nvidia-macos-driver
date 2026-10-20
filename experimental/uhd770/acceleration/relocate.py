@@ -25,7 +25,7 @@ def dependencies(path):
     return ids, [entry for entry in imports if entry not in ids]
 
 
-def relocate(inputs, destination, searches):
+def relocate(inputs, destination, searches, report_name):
     """Copy closure, reject conflicting basenames, rewrite and verify imports."""
     destination.mkdir(parents=True, exist_ok=True)
     records = {}
@@ -70,7 +70,8 @@ def relocate(inputs, destination, searches):
             else:
                 assert imported.startswith(("/usr/lib/", "/System/")), (name, imported)
         records[name]["output_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
-    (destination / "dependency-closure.json").write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
+    assert Path(report_name).name == report_name and report_name.endswith(".json")
+    (destination / report_name).write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
@@ -78,5 +79,6 @@ if __name__ == "__main__":
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--input", type=Path, action="append", required=True)
     parser.add_argument("--search", type=Path, action="append", default=[])
+    parser.add_argument("--report", default="dependency-closure.json")
     options = parser.parse_args()
-    relocate(options.input, options.destination, options.search)
+    relocate(options.input, options.destination, options.search, options.report)

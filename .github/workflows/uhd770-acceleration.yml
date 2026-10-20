@@ -87,10 +87,21 @@ jobs:
           done
           cp experimental/uhd770/acceleration/README.txt out/README.txt
           cp experimental/uhd770/acceleration/sources.json out/logs/pinned-inputs.json
+          for sample in "$NMX_ACCEL_ROOT/build/"*.air "$NMX_ACCEL_ROOT/build/"*.ll "$NMX_ACCEL_ROOT/build/"*.spv; do
+            [[ ! -f "$sample" ]] || cp "$sample" out/logs/
+          done
           ccache --show-stats > out/logs/ccache.txt 2>/dev/null || true
+      - name: Preserve executable modes and signed bundle links
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf 'dist/uhd770-acceleration-${{ matrix.component }}.tar.gz' -C out .
+          cp -R out/logs dist/logs
       - name: Upload separate diagnostic components
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: uhd770-acceleration-${{ matrix.component }}
-          path: out
+          path: dist
+          compression-level: 0

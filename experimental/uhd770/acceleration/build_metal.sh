@@ -16,6 +16,11 @@ export MACOSX_DEPLOYMENT_TARGET=15.0
 export CARGO_TARGET_DIR="$ROOT/build/rust"
 export RUSTFLAGS="--remap-path-prefix=$ROOT=/src --remap-path-prefix=$HOME=/build"
 cargo build --locked --release --manifest-path "$S/translator/wrapper/Cargo.toml"
+python3 "$REPO/experimental/uhd770/acceleration/compiler-smoke/translate.py" \
+  --library "$CARGO_TARGET_DIR/release/libnvmtl_translate.dylib" \
+  --input "$REPO/experimental/uhd770/acceleration/compiler-smoke/text-air.ll" \
+  --output "$ROOT/build/text-air.spv" --kind text-air \
+  2>&1 | tee "$OUT/logs/translator-smoke.txt"
 xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundle -fobjc-arc -O1 \
   -DNVMTL_RELEASE=1 -Wno-protocol -Wno-incomplete-implementation \
   -Werror=unguarded-availability-new -I"$S/vulkan-headers/include" \
@@ -50,12 +55,13 @@ codesign --force --sign - "$OUT/Library/Extensions/NMXAccel.kext"
 cp "$LLVM_PREFIX/bin/opt" "$ROOT/build/air-opt"
 python3 "$REPO/experimental/uhd770/acceleration/relocate.py" \
   --destination "$OUT/Library/GPUBundles/nvmtl" --search "${LLVM_PREFIX:?}/lib" \
+  --report dependency-closure-metal.json \
   --input "$ROOT/build/NVMTLDriver" \
   --input "$CARGO_TARGET_DIR/release/libnvmtl_translate.dylib" \
   --input "$LLVM_PREFIX/lib/libLLVM.dylib" --input "$ROOT/build/air-opt"
 PLUGIN="$OUT/Library/GPUBundles/NVMTLDriver.bundle/Contents"
 mkdir -p "$PLUGIN/MacOS"
-mv "$OUT/Library/GPUBundles/nvmtl/NVMTLDriver" "$PLUGIN/MacOS/NVMTLDriver"
+cp "$OUT/Library/GPUBundles/nvmtl/NVMTLDriver" "$PLUGIN/MacOS/NVMTLDriver"
 ln -s ../../../nvmtl "$PLUGIN/MacOS/air-runtime"
 python3 - "$PLUGIN/Info.plist" <<'PY'
 import plistlib, sys
@@ -66,6 +72,14 @@ Path(sys.argv[1]).write_bytes(plistlib.dumps({
     'CFBundleVersion':'0.1', 'CFBundleShortVersionString':'0.1'}))
 PY
 codesign --force --sign - "$OUT/Library/GPUBundles/NVMTLDriver.bundle"
+SMOKE=$REPO/experimental/uhd770/acceleration/compiler-smoke
+xcrun --sdk macosx metal -std=metal2.4 -mmacosx-version-min=15.0 -O1 \
+  -c "$SMOKE/smoke.metal" -o "$ROOT/build/apple.air"
+"$OUT/Library/GPUBundles/nvmtl/air-opt" -S "$ROOT/build/apple.air" -o "$ROOT/build/apple.ll"
+python3 "$SMOKE/translate.py" \
+  --library "$OUT/Library/GPUBundles/nvmtl/libnvmtl_translate.dylib" \
+  --input "$ROOT/build/apple.ll" --output "$ROOT/build/apple-air.spv" --kind decoded-apple-air \
+  2>&1 | tee "$OUT/logs/apple-air-smoke.txt"
 cp "$ROOT/sources.json" "$OUT/logs/acceleration-sources.json"
 bash "$REPO/experimental/uhd770/tools/check_kernel_collection.sh" \
   "$OUT/Library/Extensions/NMXAccel.kext" "$OUT/logs" NMXAccel

@@ -69,6 +69,7 @@ cp "$B/mesa/src/intel/vulkan/libvulkan_intel.dylib" "$OUT/Library/GPUBundles/nvm
 cp "$B/probe/uhd770-compute-probe" "$B/probe/verify.comp.spv" "$OUT/probe/"
 python3 "$REPO/experimental/uhd770/acceleration/relocate.py" \
   --destination "$OUT/Library/GPUBundles/nvmtl" --search "$P/lib" --search "$LLVM/lib" \
+  --report dependency-closure-userland.json \
   --input "$P/lib/libvulkan.1.dylib" \
   --input "$B/mesa/src/intel/vulkan/libvulkan_intel.dylib"
 cp "$ROOT/sources.json" "$OUT/logs/acceleration-sources.json"
@@ -78,7 +79,7 @@ python3 - "$OUT/Library/GPUBundles/nvmtl/intel_icd.json" <<'PY'
 import json, sys
 from pathlib import Path
 Path(sys.argv[1]).write_text(json.dumps({"file_format_version":"1.0.0", "ICD":{
-    "library_path":"libvulkan_intel.dylib", "api_version":"1.3.0"}}, indent=2) + "\n")
+    "library_path":"./libvulkan_intel.dylib", "api_version":"1.3.0"}}, indent=2) + "\n")
 PY
 ln -s libvulkan.1.dylib "$OUT/Library/GPUBundles/nvmtl/libvulkan.dylib"
 echo "Real Intel ICD and compute diagnostic compiled; no GPU executed."
