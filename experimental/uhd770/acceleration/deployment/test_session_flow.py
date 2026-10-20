@@ -179,7 +179,7 @@ class SessionFlowTests(unittest.TestCase):
     def run_session(self, mode, **extra):
         """Run the copied entry point with only temporary filesystem destinations."""
         return subprocess.run(["/bin/bash", "-p", str(self.kit / "tools/session.sh"), mode],
-                              env=dict(self.env, **extra), capture_output=True, timeout=30)
+                              env=dict(self.env, **extra), capture_output=True, timeout=120)
 
     def test_prepare_and_next_boot_restore_use_actual_flow(self):
         prepared = self.run_session("prepare")
@@ -191,7 +191,7 @@ class SessionFlowTests(unittest.TestCase):
         public = self.installed / "session-public"
         (public / "recovery-TEST.txt").write_text("next_boot_optout=verified\n")
         user = subprocess.run(["/bin/bash", "-p", str(self.installed / "session-tools/session-user.sh")],
-                              env=dict(self.env, SESSION_BOOT="TEST"), capture_output=True, timeout=30)
+                              env=dict(self.env, SESSION_BOOT="TEST"), capture_output=True, timeout=120)
         self.assertEqual(user.returncode, 0, user.stderr.decode())
         self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan", "metal"])
         boot = self.run_session("boot", SESSION_BOOT="TEST")

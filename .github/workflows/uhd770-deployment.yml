@@ -21,7 +21,15 @@ jobs:
       - name: Python preparation and archive boundary fixtures
         run: |
           python3 -m unittest discover -s experimental/uhd770/acceleration/kit -p 'test_*.py' -v
-          python3 -m unittest discover -s experimental/uhd770/acceleration/deployment -p 'test_*.py' -v
+          python3 - <<'PY'
+          import sys, unittest
+          suite = unittest.defaultTestLoader.discover('experimental/uhd770/acceleration/deployment', pattern='test_*.py')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          for _, failure in result.errors + result.failures:
+              message = failure[-6000:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error title=Deployment fixture failure::{message}', flush=True)
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PY
       - name: Native system Bash syntax and inert command help
         run: |
           /bin/bash --version | head -1
