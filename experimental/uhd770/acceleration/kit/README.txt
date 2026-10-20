@@ -1,0 +1,71 @@
+Offline compiled-candidate kit assembler
+
+This tool combines three explicitly chosen, independently checksum-verified
+GitHub Actions artifacts. It never installs, activates, loads or tests a GPU.
+Even a fully accepted kit has hardware_ready=false. Native device initialization,
+real GPU execution, Metal and desktop acceleration remain separate gates.
+
+Use Python 3.10 or newer on Windows or macOS. Create a JSON manifest:
+
+{
+  "components": {
+    "kernel": {
+      "zip": "D:/downloads/kernel-artifact.zip",
+      "sha256": "<64 lowercase hexadecimal characters from trusted artifact metadata>",
+      "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/<run-id>",
+      "source_commit": "<full 40-character source commit>"
+    },
+    "userland": { "zip": "...", "sha256": "...", "run_url": "...", "source_commit": "..." },
+    "metal": { "zip": "...", "sha256": "...", "run_url": "...", "source_commit": "..." }
+  }
+}
+
+Paths may be absolute or relative to the manifest. Obtain the expected ZIP
+digests and run/commit identity independently from GitHub artifact/run metadata.
+The tool verifies those supplied claims, not GitHub itself. Kernel artifacts
+currently lack an internal source-commit file; evidence explicitly labels that
+commit as manifest-declared. Userland/Metal source-commit logs must match.
+
+python experimental/uhd770/acceleration/kit/assemble.py --manifest inputs.json --output D:/UHD770-candidate
+
+The output directory must not already exist. No existing files are removed or
+overwritten. Every input ZIP digest and all evidence checks must pass before
+the tool creates the directory. Filesystem errors during writing may leave an
+incomplete directory; a subsequent attempt must use a new directory.
+
+Optional --dependency-root points to the local directory containing pristine
+mesa, libdrm, Vulkan-Loader, SPIRV-Tools and other dependency source directories.
+Available license files are copied into source-and-licenses/dependencies. The
+project LICENSE/NOTICE and translator LICENSE/COPYING are always included,
+together with immutable dependency source manifests. This is a local diagnostic
+kit, not a claim that all redistribution obligations have been audited.
+
+Required evidence
+
+- Kernel: 900 DRM/AMD + 274 i915 + 76 runtime compilation logs, no failed units,
+  successful source summaries, mapping/workqueue lifecycle tests and native KC
+  linkage preflight.
+- Userland: final real-ANV/probe build marker, ANV mapping fixture, clock boundary
+  fixture and native CLOCK_UPTIME_RAW versus mach_absolute_time comparison.
+  Earlier userland artifacts without native_clock_smoke.txt are rejected.
+- Metal: final build marker, native KC preflight and actual decoded Apple AIR
+  translated to a checksummed SPIR-V result with gpu_executed=false.
+
+Outputs
+
+- uhd770-acceleration-{kernel,userland,metal}.tar.gz
+- evidence.json and raw evidence logs
+- SHA256SUMS, README.txt, source pointers and available licenses
+
+Keep these tar.gz files intact on Windows. Userland and Metal tar bytes are
+copied verbatim so executable modes and signed bundle symlinks remain intact.
+The signed bundle air-runtime -> ../../../nvmtl link is explicitly checked.
+No Mach-O binary or symlink is extracted on Windows. The kernel ZIP has lost
+Unix modes, so its NMXGPU.kext file bytes are repackaged as a tar with 755
+directories/executable and 644 other files. Logs do not enter the kext tar.
+
+Validation checks archive paths and link targets without extracting them. The
+tool refuses duplicate paths, traversal, absolute/escaping/dangling/cyclic links,
+members nested under links and privileged/device entries.
+
+Targeted checks: python -m unittest discover -s experimental/uhd770/acceleration/kit -p "test_*.py"

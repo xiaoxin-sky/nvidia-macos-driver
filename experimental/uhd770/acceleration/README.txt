@@ -15,8 +15,9 @@ Mesa repairs route i915 BO mappings through the NMX node ioctl, preserving exact
 slice ownership for full unmap. Ordinary shmem WB/WC/UC mappings are the intended
 subset. Placed/reserved mappings and unimplemented external-FD/modifier paths
 must not be advertised as available. Non-FD internal syncobjs remain separate.
-The matching kernel page-pin lifecycle repair must pass its own source/build
-gates before hardware testing. A CPU mapping alone is not a pinned GEM object.
+The matching kernel page-pin lifecycle repair has passed its source/build
+gates. A CPU mapping alone is not a pinned GEM object; real memory visibility
+and GPU completion are still separate hardware gates.
 
 The compute diagnostic requires known varying GPU results, a matching real Intel
 device/driver, a finite fence wait and a complete readback comparison. CI only
@@ -39,3 +40,11 @@ source compilation cannot prove that it avoids those unsupported callbacks.
 Artifacts contain diagnostic files, not an installation command. Do not combine
 arbitrary older kernel/userland versions. A later reviewed test kit must record
 all source/binary identities, recovery steps and the exact test scope.
+
+The 2026-10-20 offline candidate checkpoint is recorded in audit.json. Kernel
+run 39362467512 and userland/Metal run 39363536141 passed; the kernel sources
+match across their separate source commits. kit/assemble.py checks all input
+digests/evidence and produces a candidate with hardware_ready=false. It does
+not install/activate anything. NMXGPU and the probes are unsigned; this is not
+a fully signed, directly installable package. The separate installation plan
+must address trust, independent recovery and automatic persistent logs.

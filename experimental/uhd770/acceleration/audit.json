@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "checkpoint_date": "2026-10-20",
+  "target": {
+    "pci_id": "8086:4680",
+    "gpu": "Intel UHD 770 / Alder Lake-S",
+    "architecture": "x86_64",
+    "os": "macOS 15"
+  },
+  "scope": "First ordinary-buffer application-compute candidate. No installation, activation or GPU execution.",
+  "hardware_ready": false,
+  "gpu_executed": false,
+  "acceleration_verified": false,
+  "components": {
+    "kernel": {
+      "run": "39362467512",
+      "source_commit": "ca325c359a82abc92db894362cb3b155386fe8d6",
+      "artifact_id": 12237914040,
+      "zip_sha256": "481ef24ab9553d868e8b54aa3de995d516c69660502c993812e13982898677e5",
+      "zip_bytes": 25304718,
+      "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39362467512",
+      "result": "success",
+      "digest_verification": "Downloaded ZIP SHA256 equals GitHub artifact metadata."
+    },
+    "userland": {
+      "run": "39363536141",
+      "source_commit": "2d3165db30ae53348ac796aba150ead80c86926f",
+      "artifact_id": 12238772255,
+      "zip_sha256": "0b0f7a94ca96018e5ebe7317b060a34bf64e2d1802d7b5da4f8f48b43aea7364",
+      "zip_bytes": 8333602,
+      "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39363536141",
+      "result": "success",
+      "digest_verification": "Downloaded ZIP SHA256 equals GitHub artifact metadata."
+    },
+    "metal": {
+      "run": "39363536141",
+      "source_commit": "2d3165db30ae53348ac796aba150ead80c86926f",
+      "artifact_id": 12238252326,
+      "zip_sha256": "cd63420d61f2eeca930074552cf324c1b44c27793f978da63a48e6f6983c5698",
+      "zip_bytes": 50002313,
+      "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39363536141",
+      "result": "success",
+      "digest_verification": "Downloaded ZIP SHA256 equals GitHub artifact metadata."
+    }
+  },
+  "kernel_compatibility": "git diff --exit-code confirmed kernel workflow/pins/patches/tools/kernel-tests/workqueue-tests unchanged from ca325c3 to 2d3165d. Later documentation/assembler commits are not binary rebuilds.",
+  "passed_offline_gates": [
+    "1250 native kernel units, required-symbol definitions and temporary auxiliary KC preflight",
+    "Actual source mapping-pin lifecycle and concurrent taskqueue fixtures",
+    "Real ANV/libdrm/Vulkan loader and Vulkan compute diagnostic compilation",
+    "ANV NMX offset/slice mapping ABI fixture and bounded sync clock helper tests",
+    "Native CLOCK_UPTIME_RAW compared to mach_absolute_time; no GPU accessed",
+    "NMXAccel KC linkage and actual Metal frontend/Rust translator/probe compilation",
+    "xcrun metal Apple AIR -> LLVM reader/printer -> translated SPIR-V; not a synthetic-only input",
+    "All three artifact ZIP SHA256 values independently checked before assembly",
+    "Assembler tests, candidate file SHA256 list, Mach-O x86_64 headers and Mac tar permissions/link structure"
+  ],
+  "apple_air_smoke": {
+    "input_kind": "decoded-apple-air",
+    "gpu_executed": false,
+    "ir_sha256": "836ef003f68f8dd0c605ca87048dccfcb559c275f730f4d42a8a0a32d030655f",
+    "spirv_sha256": "1b2d85167a88aa0e52508bb8784e3c81a7224f215e0de10bcd290a9df20eb973",
+    "spirv_bytes": 1440,
+    "spirv_instructions": 82
+  },
+  "cache_evidence": {
+    "userland": {
+      "hits": 1097,
+      "cacheable_calls": 1317,
+      "hit_rate_percent": 83.3
+    },
+    "metal": "First run after separate object compilation was cold (0/2); no speedup established yet."
+  },
+  "implementation_changes": [
+    "ANV uses NMX BO map/unmap with exact slice ownership",
+    "Persistent GEM shmem page pins with balanced failure/unmap lifecycle",
+    "Active taskqueue executor lifetime and cancellation/drain/free synchronization",
+    "NMX-only i915 absolute deadline conversion, preserving Mesa global clock",
+    "Disable unimplemented external FD/modifier/placed/reserved mapping capabilities",
+    "Actual Apple AIR bitcode reader without target-machine code generation"
+  ],
+  "pending_before_hardware": [
+    "Concrete matched installation/recovery and automatic persistent logs"
+  ],
+  "runtime_unverified": [
+    "Basic visible output and real device DMA/IOMMU/IRQ behavior",
+    "ANV GPU submission/completion, cache visibility and correct readback",
+    "Private MTLIOAccelDevice initialization and Metal compute/readback"
+  ],
+  "not_implemented_in_first_mvp": [
+    "Intel NMXAccel family GPUVA/VRAM management and family presentation",
+    "Intel WindowServer admission/IOSurface/resource/presentation contracts",
+    "Hardware VBL pacing, full sleep/wake, multiple outputs and video codecs"
+  ],
+  "candidate_packaging": {
+    "assembler": "kit/assemble.py",
+    "status": "Offline compiled candidate only; no installer/EFI activation",
+    "userland_and_metal_tar": "Preserved verbatim, including executable modes and signed bundle symlinks",
+    "kernel_tar": "Reconstructed Unix modes; original kext file bytes unchanged",
+    "hardware_ready": false,
+    "gpu_executed": false,
+    "signature_limit": "NMXGPU and both probe executables are unsigned. Preserve the existing NMXAccel/frontend signatures and signed symlink structure; do not claim a fully signed or directly installable kit. Signing/trust must be addressed in the separate installation plan."
+  },
+  "limitations": "Host fixtures mock IOKit/DRM services; native compiler/linker/clock/AIR checks do not prove hardware execution. Source review is targeted, not exhaustive."
+}

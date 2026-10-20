@@ -1,5 +1,5 @@
-UHD 770 experimental display bring-up
-====================================
+UHD 770 experimental display and application-compute bring-up
+==========================================================
 
 This fork's current main branch does not contain the historical Intel port.
 sources.json pins that port, drm-kmod and FreeBSD. The Actions workflow stages
@@ -9,9 +9,11 @@ small userspace compiler-cache probe.
 
 Current scope
 -------------
-Basic display on Alder Lake-S and macOS 15, with enough evidence and recovery
-to debug a failed attempt. This is not a complete Metal/desktop acceleration
-package. Passing compilation or seeing "claimed" does not establish acceleration.
+Basic display and the first application-compute candidate on Alder Lake-S and
+macOS 15. The matched NMXGPU, NMXAccel, real ANV/libdrm/loader, Metal frontend,
+translator and Vulkan/Metal readback probes now compile. The candidate is not a
+verified accelerated driver. Passing compilation or seeing "claimed" does not
+establish GPU execution, Metal device initialization or desktop acceleration.
 
 The repair batch includes:
 - consistent DP tunnel configuration;
@@ -35,10 +37,12 @@ The repair batch includes:
 
 audit.json maps the reviewed call chain and separates hardware-proven results,
 candidate repairs, known simplified interfaces and unverified paths. In particular,
-native runtime behavior, hardware VBL pacing, sleep/wake and the complete
-ANV/Metal path still require work; this batch must not be advertised as a stable,
-complete graphics driver. A missing Metal plugin in the Intel test package is
-not repaired by the display mapping patch.
+native runtime behavior remains unverified. Hardware VBL pacing, full sleep/wake,
+Intel family GPUVA/VRAM allocation and WindowServer composition still require
+implementation. The ordinary ANV buffer-compute MVP is a narrower path; it does
+not require those desktop features. See acceleration/README.txt and
+acceleration/audit.json for implemented mapping/synchronization repairs,
+component build evidence and the private Metal initialization boundary.
 ACCELERATION-GAPS.txt traces the userland boundary and the current plugin's
 explicit refusal to create an Intel WindowServer Metal device. Public plugin
 source exists; its presence and a working framebuffer do not complete that path.
@@ -85,11 +89,16 @@ flags. The bridge fixture accounts for operation-lock destruction on failure and
 unregister, and for failed-then-successful event delivery under DRM's latch rule.
 Windows host checks do not replace macOS compilation.
 
-Verified checkpoint: Actions run 39354221123, source commit 758dc75, passed all
-1,250 kernel units, host fixtures (including native display APIs), required-symbol
-checks and the temporary native KC preflight. Compiler-cache hits: 1249/1251
-(99.84%). The downloaded artifact ZIP matches GitHub's SHA256; audit.json records
-its identity. This evidence does not reopen the hardware gate or prove GPU output.
+Verified kernel checkpoint: Actions run 39362467512, source commit ca325c3,
+passed all 1,250 kernel units, host fixtures (including native display, persistent
+GEM mapping pins and concurrent taskqueue lifetime), required-symbol checks and
+the temporary native KC preflight. Userland/Metal run 39363536141 at 2d3165d
+passed the actual component builds, native clock smoke and real Apple AIR
+translation. All three downloaded ZIPs matched GitHub's artifact SHA256 values.
+The kernel inputs are unchanged between these two commits. audit.json and
+acceleration/audit.json retain the exact separate identities; later packaging or
+documentation commits do not imply that binaries were rebuilt from those commits.
+This evidence does not reopen the hardware gate or prove GPU output.
 
 Build caches
 ------------
@@ -127,6 +136,13 @@ Hardware gate remains closed during source completeness review
 The user requested code defects and incomplete contracts to be handled before
 another boot test. audit.json records the remaining review work and readiness;
 a passing build alone does not reopen that gate.
+
+The offline kit assembler in acceleration/kit/ now verifies and combines the
+matched artifacts, preserves Mac tar permissions/signed links, and records
+hardware_ready=false and gpu_executed=false. It contains no installer or EFI
+activation. A matched recovery and automatic-log plan is still required before
+the first bounded application-compute attempt. WindowServer, hardware VBL and
+full sleep/wake are separate later development milestones.
 
 Verify actual runtime build/arguments, PCI/PCH/HPD initialization, GGTT placement
 and aperture mapping, mode selection and atomic commit, IOFramebuffer publication,

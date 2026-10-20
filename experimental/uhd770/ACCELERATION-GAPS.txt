@@ -19,8 +19,9 @@ NMXGPUFB publication -> software VBL/gamma/power -> stop/unregister/unmap/detach
 
 The readable patches now address the observed tunnel/PCH/vmap blockers plus
 statically identified callback, registration, retry and resource-lifetime defects.
-Host tests exercise the patched code with mocked services, not a GPU. The current
-CI builds NMXGPU only; it does not produce a complete Intel acceleration package.
+Host tests exercise the patched code with mocked services, not a GPU. Separate
+CI workflows now build NMXGPU and the matched Intel application-compute
+components. They produce an offline candidate, without installation/activation.
 Real VBL pacing and sleep/wake remain separate work. The following display batch
 implements single-connector EDID/DDC, bounded progressive modes, mode rollback and
 queued connection notification. The physical allocation stays fixed; multihead,
@@ -29,15 +30,20 @@ and host checks do not establish native output, HiDPI or a particular refresh ra
 
 Verified code/build checkpoint
 ------------------------------
-Actions run 39354221123 at 758dc75 compiled all 1,250 kernel translation units,
+Actions run 39362467512 at ca325c3 compiled all 1,250 kernel translation units,
 passed the host behavior/concurrency/fault fixtures and required-symbol definition
 checks, and created/inspected a temporary auxiliary kernel collection against the
-runner's real kernel providers. Nothing was installed or loaded. Compiler cache
-hits were 1,249 of 1,251 cacheable calls (99.84%). The native mode/DDC/connection
-fixture and bridge recovery/ownership checks passed on macOS. The downloaded
-artifact ZIP matched GitHub's SHA256 digest (recorded in audit.json).
-These results are source/build
-evidence, not visible-output, GPU-command or acceleration evidence.
+runner's real kernel providers. Persistent GEM mapping-pin and multi-executor
+taskqueue lifetime fixtures also passed. Nothing was installed or loaded.
+Actions run 39363536141 at 2d3165d compiled real ANV/libdrm/loader, NMXAccel,
+NVMTLDriver/translator and both readback probes. NMX mapping/clock fixtures,
+native CLOCK_UPTIME_RAW comparison, NMXAccel linkage and actual Apple
+AIR-to-SPIR-V translation passed. The userland ccache hit rate was 1097/1317
+(83.30%); the newly split Metal compilation cache was cold, with no demonstrated
+hit yet. All three downloaded artifact ZIPs matched GitHub SHA256 metadata.
+The kernel inputs are unchanged between ca325c3 and 2d3165d. Exact provenance
+is recorded in audit.json and acceleration/audit.json. These are source/build
+results, not visible-output, GPU-command or acceleration evidence.
 
 Public userland materials exist; installed components are a different question
 -----------------------------------------------------------------------------
@@ -47,11 +53,21 @@ Public userland materials exist; installed components are a different question
 - Historical gpu-port/README.md records Mesa bffd919 and libdrm b97cbde, with
   gpu-port/patches/mesa-macos.patch and libdrm-macos.patch. Its mock-chip matrix is
   device/pipeline creation through a noop shim, not evidence of real GPU execution.
-- NMXAccel is the -DNMX_ACCEL form of kexts/NVRM/accel/nvrm-accel.cpp, built using
-  build/nmxaccel_build.sh in that history. This CI neither builds nor installs it.
-- The runtime path still needs a matched ANV/libdrm/loader/translation/plugin set,
-  kernel mapping and synchronization ABI checks, and real submission/readback.
-  Kernel compilation and an installed kext do not validate that path.
+- NMXAccel is the -DNMX_ACCEL form of kexts/NVRM/accel/nvrm-accel.cpp. The new
+  build_metal.sh builds it and checks native KC linkage; it does not install it.
+- acceleration/sources.json now pins the complete ANV/libdrm/loader/translation/
+  plugin source set. The real component builds and mapping/synchronization
+  fixtures passed. Kernel and userland patches connect ANV maps to NMX ioctls,
+  retain GEM page pins until native unmap and translate only NMX i915 absolute
+  wait deadlines to the kernel clock. Placed/reserved and external-FD/modifier
+  features without complete contracts are not advertised.
+- Ordinary buffers/textures use ANV allocation. NMXAccel family GPUVA/VRAM
+  callbacks still depend on NVIDIA RM and are not an Intel implementation.
+  Apple's private MTLIOAccelDevice initialization may require these callbacks;
+  whether the intended ordinary-buffer path avoids them is an unresolved native
+  runtime gate, not something a successful frontend build establishes.
+- Real device initialization, GPU submission/completion, cache visibility and
+  complete readback remain unverified on UHD 770. No GPU probe ran in CI.
 
 Explicit WindowServer restriction in current public code
 -------------------------------------------------------
@@ -74,9 +90,11 @@ Consequences and work still needed
    Intel NMXAccel/Metal/IOSurface resource, completion and presentation contracts,
    then make WindowServer admission depend on those supported capabilities.
    Removing the vendor check alone is not an implementation of those contracts.
-3. A complete userland build/package must have reproducible source/dependency
-   inputs and install the actual Intel components, not infer them from the NVIDIA
-   version number or from the kernel build succeeding.
+3. Reproducible matched userland builds and offline packaging now exist. The
+   acceleration/kit assembler checks component digests and build evidence,
+   preserves the original userland/Metal tar bytes and records hardware_ready=false.
+   A concrete installation, recovery and automatic-log plan is still required
+   before activating any of these components.
 4. Native device/IOMMU behavior, actual GPU commands and visible results cannot
    be proved by host mocks. Code review and offline checks must be completed first;
    a later hardware gate must explicitly state what is implemented and what it tests.

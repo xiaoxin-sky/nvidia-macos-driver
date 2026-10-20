@@ -1,5 +1,5 @@
 {
-  "scope": "First-pass end-to-end static review of the pinned port main paths, cross-checked against runtime reports and IOFramebuffer API docs. Not a line-by-line audit of all Linux/FreeBSD/Mesa code.",
+  "scope": "Targeted end-to-end source/build review of pinned display and ordinary-buffer application-compute paths. Not a line-by-line proof of all Linux/FreeBSD/Mesa/Apple code; no new hardware validation.",
   "hardware_proven": [
     "UHD 770 PCI matching and i915 attach progressed.",
     "H610 LPC discovery and PCH_ADP selection work after the enumeration repair.",
@@ -30,7 +30,11 @@
     "Refresh copied state from kConnectionCheckEnable, which Apple's connection-change path calls even when kConnectionProbe is not called.",
     "Destroy the operation mutex on duplicate/full-slot/client-init failure and final DRM unregister; the host fixture accounts for those resources.",
     "Keep DRM hotplug callback delivery alive after refresh errors by recording failure in the snapshot/open result instead of triggering the core's permanent hotplug_failed latch. Explicit reprobe still reports the transaction error.",
-    "Only mark NMX_MODE_PREFERRED timings as default in connectFlags, matching the mode information API."
+    "Only mark NMX_MODE_PREFERRED timings as default in connectFlags, matching the mode information API.",
+    "Connect ANV macOS BO mappings to NMX node ioctls, including nonzero offsets and whole-map ownership; do not advertise incomplete placed/reserved/external-FD/modifier paths.",
+    "Retain GEM shmem WB/WC/UC page pins through native map lifetime; unmap before page-unpin/GEM put; refuse unsupported GTT/FIXED/TTM user mappings.",
+    "Track every taskqueue active executor, serialize repeat execution, wake cancelled drain waiters and wait for worker/external executors before freeing queues.",
+    "Convert only Darwin/i915 NMX provider absolute deadlines from Mesa monotonic remaining duration to kernel-compatible uptime; preserve poll/infinite/error/overflow semantics."
   ],
   "known_display_limitations": [
     "Software VBL callback lifetime now has a real implementation and host concurrency tests; actual display-IRQ pacing is not implemented by this software timer.",
@@ -39,13 +43,12 @@
     "The GGTT mapping candidate intentionally holds an awake reference; sleep/wake is not established."
   ],
   "acceleration_gaps": [
-    "The tested install path installs the NMXGPU display/DRM layer only.",
-    "The inspected Intel package includes NMXAccel but not the NVMTLDriver bundle it references.",
-    "ANV GPU mappings, real submission/readback, Metal and accelerated WindowServer have no success evidence on this hardware.",
-    "Kernel mmap ioctl support exists, but that alone does not verify the userland ANV/libdrm calling path.",
-    "Current plugin/NVMTLDevice.m::nvmtl_process_is_allowed explicitly rejects WindowServer for non-NVIDIA vendors before NVMTL_ENABLE or the allow-list.",
-    "plugin/nvmtl_vk.c::nvmtl_gpu_headless treats Intel as app-only and disables the NVIDIA IOSurface family-sharing/page-off path.",
-    "Public Metal frontend source and historical Mesa/libdrm Darwin patches exist. Completing the Intel package and WindowServer resource/presentation contracts is additional work, not simply clearing the process check."
+    "A matched offline candidate now contains NMXGPU, NMXAccel, real ANV/libdrm/loader, Metal frontend/translator and Vulkan/Metal readback probes. It has no installer or activation and hardware_ready remains false.",
+    "NMX ioctl mapping and synchronization boundaries now have implementation and host/native clock tests. Real DMA/IOMMU behavior, GPU command completion/cache visibility and correct readback have no success evidence on this UHD 770.",
+    "The ordinary Metal buffer/texture path uses ANV allocations, but NMXAccel inherited family GPUVA/VRAM callbacks still require NVIDIA RM and are not implemented for Intel. Hardware pools and family-managed shared presentation remain out of scope.",
+    "Apple private MTLIOAccelDevice initialization may invoke unsupported family callbacks; successful source compilation cannot establish that the ordinary-buffer path avoids them.",
+    "plugin/NVMTLDevice.m::nvmtl_process_is_allowed still explicitly rejects Intel WindowServer. Removing this check is not an implementation of Intel IOSurface/resource/completion/presentation contracts.",
+    "Hardware VBL pacing, full sleep/wake, multi-output and video codecs are not completed by this application-compute candidate."
   ],
   "api_checked_not_a_bug": [
     "IOFramebuffer.getPixelFormatsForDisplayMode returning zero is required by its Apple header; it is not an unsupported-format bug.",
@@ -60,31 +63,29 @@
     "intel_fb_pin.c, i915_vma.c and nmx_i915_scanout.c: GGTT placement, aperture mapping, VMA/fence/object/wake reference pairing.",
     "intel_fbc.c, intel_frontbuffer.c and intel_fbdev.c: compression policy and missing damage/invalidate/flush integration for the macOS aperture writer.",
     "xnu/nmx_fb.cpp and Apple IOFramebuffer.cpp/.h: range/mode/DDC APIs, software VBL, interrupt registration, gated connection resense and stop/unpublish ordering. The connector code is implemented and host-tested; native scheduling/output remain hardware-unverified and hardware VBL pacing is not implemented.",
-    "Acceleration package boundary: NMXGPU display publication is separate from NMXAccel, ANV/libdrm, the missing Metal frontend and real GPU execution. This is not a full Mesa or memory/IRQ-shim audit."
+    "Acceleration paths: NMXAccel family boundary; real ANV/NMX BO map ownership, GEM page pinning, taskqueue active execution and NMX clock conversion; real frontend/translator build and offline Apple AIR decoding. Ordinary application compute is separate from unimplemented Intel family allocation/WindowServer contracts. Native device initialization and GPU execution remain unverified."
   ],
   "compilation_evidence": {
-    "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39354221123",
-    "commit": "758dc75025811e133e346fb585c11a4c2d5ca501",
-    "result": "900 DRM/AMD + 274 i915 + 76 runtime units compiled, all host fixtures including actual extracted native display methods passed, required symbol definitions verified, temporary native auxiliary kernel collection created and inspected successfully. Covers gated resense, operation-lock cleanup, hotplug recovery and preferred-mode flags. No driver was installed/loaded and no hardware was tested.",
+    "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39362467512",
+    "commit": "ca325c359a82abc92db894362cb3b155386fe8d6",
+    "result": "900 DRM/AMD + 274 i915 + 76 runtime units compiled; host fixtures including persistent GEM pins and concurrent taskqueue lifetime, required-symbol definitions and temporary native KC preflight passed. Nothing installed/loaded and no GPU executed.",
     "verified_artifact": {
-      "id": 12234628592,
+      "id": 12237914040,
       "name": "nmxgpu-build",
-      "zip_bytes": 25276517,
-      "sha256": "917eaa1fb2774c763784cfb8201b35ec19c7fc18c92dc4e49c95be29b839a601",
-      "verification": "Downloaded ZIP matched GitHub's artifact digest; native-display/bridge fixture logs, source-count logs and native KC preflight result inspected."
+      "zip_bytes": 25304718,
+      "sha256": "481ef24ab9553d868e8b54aa3de995d516c69660502c993812e13982898677e5",
+      "verification": "Downloaded ZIP matched GitHub artifact SHA256; compile/gate evidence inspected. Kernel commit is declared from independent run metadata, not an internal commit log."
     },
-    "compiler_cache": {
-      "cacheable_calls": 1251,
-      "hits": 1249,
-      "hit_rate_percent": 99.84
-    }
+    "source_compatibility": "git diff confirmed all kernel workflow/source pins/patches/tools/kernel and workqueue fixtures unchanged from ca325c3 to userland/Metal source 2d3165d.",
+    "acceleration_components": "acceleration/audit.json"
   },
   "validation_order": [
-    "Pinned patches/apply checks and host fixtures",
-    "All macOS kernel sources compile and binary/source provenance verified",
-    "Recovery is concrete before enabling a one-attempt test",
-    "One instrumented basic-display test covering map/commit/publication/visible output",
-    "Separate acceleration tests only after its dependencies and protocol are available"
+    "Pinned input/patch checks and targeted host/native ABI fixtures (passed)",
+    "All kernel and matched userland/Metal components compile; independent artifact digest verification and offline kit assembly (passed)",
+    "Prepare matched installation/recovery and automatic-log collection before activation (pending)",
+    "Bounded instrumented basic-display and real ANV submission/readback checks on 8086:4680 (not performed)",
+    "Separate private Metal device initialization and changing-input compute/readback checks (not performed)",
+    "Implement and validate Intel family resource/presentation contracts before WindowServer admission (outside this first compute MVP)"
   ],
   "policy": "No more one-reboot-per-return-code instructions. Batch statically established fixes first. Do not promise one hardware test can prove complete support.",
   "host_verification": {
@@ -97,15 +98,28 @@
     "irq_drain": "Passed filtering, reference balancing and cookie teardown injected immediately after list unlock in the actual patched BSD drain function",
     "mapping_arithmetic": "Passed zero, overflow, inclusive endpoint and page-span checks in the shared helper; native DMA/IOMMU transactions are not modeled",
     "display_protocol": "Passed actual bridge mode switch/rollback/reconnect, stable IDs, fixed-allocation limits, invalid EDID, timing bounds and one-based DDC block checks on Windows; native IOFramebuffer scheduling remains a hardware boundary.",
-    "native_display": "Actual extracted IOFramebuffer method bodies passed mode/timing/DDC/error checks, fixed pitch, disabled/pending connection notifications, unchanged catalog before notification, and state replacement through kConnectionCheckEnable on Windows. Apple service internals and controller gate scheduling are mocked, not certified."
+    "native_display": "Actual extracted IOFramebuffer method bodies passed mode/timing/DDC/error checks, fixed pitch, disabled/pending connection notifications, unchanged catalog before notification, and state replacement through kConnectionCheckEnable on Windows. Apple service internals and controller gate scheduling are mocked, not certified.",
+    "gem_mapping": "Actual generated i915 shmem mapping lifecycle fixture passed pin/unpin/native-map failure and ownership cases; native DMA/IOMMU behavior remains unverified.",
+    "taskqueue": "Extracted production taskqueue fixture passed actual multi-thread active-executor cancellation/drain/free checks under MSVC and macOS CI.",
+    "clock": "Actual NMX deadline helper fixture and macOS CLOCK_UPTIME_RAW versus mach_absolute_time smoke passed; no native GPU fence completed in this check."
   },
   "hardware_test_readiness": {
     "ready": false,
-    "policy": "Do not ask the user for another boot test while the source completeness review and remaining code blockers are open.",
-    "remaining_code_review": [
-      "Implement native hardware-VBL delivery; the current callback source is software timed",
-      "Establish native sleep/wake and per-device IOMMU/resource ownership contracts for the supported configuration",
-      "Build/package the matched Intel userland components and implement/test WindowServer admission, IOSurface and presentation contracts"
+    "policy": "Do not activate or request a reboot from build success alone. The matched offline candidate has no installer/activation; concrete recovery and automatic logs are still required.",
+    "first_mvp": "Single 8086:4680 device, ordinary ANV buffers, finite GPU compute and complete changing-input readback; separate Metal initialization/compute gate.",
+    "pending_before_activation": [
+      "Prepare reviewed installation and independent opt-out recovery for the exact matched components",
+      "Prepare persistent/automatic logs before any GPU load so signal loss does not prevent evidence collection"
+    ],
+    "unverified_runtime": [
+      "Real PCI/IRQ/DMA/IOMMU operation and basic visible output with this batch",
+      "Real ANV command submission, completion, mapping/cache visibility and readback",
+      "Private MTLIOAccelDevice initialization and ordinary-buffer Metal compute"
+    ],
+    "outside_first_compute_mvp": [
+      "Intel family GPUVA/VRAM callbacks and cross-process shared presentation",
+      "Intel WindowServer composition/admission",
+      "Hardware VBL delivery, full sleep/wake, multiple outputs and video codecs"
     ]
   }
 }
