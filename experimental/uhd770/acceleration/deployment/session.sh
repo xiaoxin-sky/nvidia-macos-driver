@@ -14,7 +14,10 @@ PRIVATE="$ROOT/session-private"
 JOURNAL="$PRIVATE/journal"
 PLAN="$PUBLIC/plan.plist"
 LABEL=com.uhd770.mvp.session
-LOCK=/private/var/run/com.uhd770.mvp.prepare.lock
+# macOS may legitimately allow its daemon group to write /private/var/run.
+# Use a private sibling of the staged tree; creating ROOT here would make
+# manage.sh incorrectly treat an uninitialized stage as an existing one.
+LOCK='/Library/Application Support/.com.uhd770.mvp.prepare.lock'
 LOCK_OWNED=0
 AUTO_EXPORT_ATTEMPTED=0
 MANUAL_ACTIVE=0
@@ -85,7 +88,7 @@ prepare_parent() {
 }
 
 export_all() {
-    local output uid account home
+    local output uid account home bootstrap owner mode
     output=$(mktemp -d /Users/Shared/UHD770MVP-session-reports.XXXXXX)
     /bin/bash -p "$HERE/manage.sh" export > "$output/manage-export.txt" 2>&1 || :
     # manage.sh prints the path of its separately created root evidence report.
@@ -99,6 +102,16 @@ export_all() {
         mkdir "$output/preparation"
         find "$PRIVATE" -maxdepth 1 -type f -name '*.txt' -exec cp '{}' "$output/preparation/" \;
     fi
+    # Start records even failures before PLAN/staging exist. Keep complete
+    # root-owned transcripts retrievable by a later explicit export.
+    for bootstrap in /Users/Shared/UHD770MVP-bootstrap.*; do
+        [ -d "$bootstrap" ] && [ ! -L "$bootstrap" ] || continue
+        owner=$(stat -f '%u' "$bootstrap" 2>/dev/null) || continue
+        mode=$(stat -f '%Lp' "$bootstrap" 2>/dev/null) || continue
+        [ "$owner" = 0 ] && [ $((8#$mode & 0022)) -eq 0 ] || continue
+        mkdir -p "$output/bootstrap"
+        ditto "$bootstrap" "$output/bootstrap/$(basename "$bootstrap")"
+    done
     if [ -f "$PLAN" ] && [ ! -L "$PLAN" ]; then
         uid=$(property user_uid)
         case "$uid" in ''|*[!0-9]*) die 'Invalid selected-user identity.' ;; esac
@@ -230,7 +243,7 @@ prepare() {
     uid=${SUDO_UID:-0}
     case "$uid" in ''|*[!0-9]*) die 'Invalid login account.' ;; esac
     [ "$uid" -ge 501 ] || die 'Launch through sudo from the intended ordinary macOS account.'
-    safe_directory /private/var/run
+    safe_directory '/Library/Application Support'
     mkdir -m 700 "$LOCK" || die 'Another preparation or an interrupted lock exists; preserved.'
     LOCK_OWNED=1
     account=$(id -nu "$uid")

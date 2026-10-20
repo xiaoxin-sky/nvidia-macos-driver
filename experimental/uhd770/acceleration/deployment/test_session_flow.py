@@ -41,7 +41,9 @@ elif name == 'stat':
               (failure == 'authorization-owner' and path.name.startswith('manual-authorization-')) else '0')
     elif args[1] == '%z': print(path.lstat().st_size)
     elif args[1] == '%Lp':
-        print('666' if failure == 'authorization-mode' and path.name.startswith('manual-authorization-') else
+        print(os.environ['SESSION_VAR_RUN_MODE'] if path == root / 'mac/private/var/run' and
+              os.environ.get('SESSION_VAR_RUN_MODE') else
+              '666' if failure == 'authorization-mode' and path.name.startswith('manual-authorization-') else
               ('700' if path.is_dir() else '600'))
     else: sys.exit(93)
 elif name == 'csrutil': print('Kext Signing: disabled')
@@ -269,6 +271,54 @@ class SessionFlowTests(unittest.TestCase):
         """Enumerate final aggregate reports, excluding manage.sh subreports."""
         return list((self.mac / "Users/Shared").glob("UHD770MVP-session-reports.*"))
 
+    def test_export_preserves_early_root_bootstrap_without_prepared_plan(self):
+        """Retrieve a complete STOP transcript even before staging created PLAN."""
+        bootstrap = self.mac / "Users/Shared/UHD770MVP-bootstrap.sample"
+        bootstrap.mkdir(mode=0o700)
+        transcript = (b"STOP: Unsafe owner/mode: /private/var/run\n" +
+                      b"early ancestor diagnostic\n" * 400 + b"final child_exit=23\n")
+        (bootstrap / "prepare.txt").write_bytes(transcript)
+        self.assertFalse((self.installed / "session-public/plan.plist").exists())
+        exported = self.run_session("export")
+        self.assertEqual(exported.returncode, 0, exported.stderr.decode())
+        reports = self.automatic_reports()
+        self.assertEqual(len(reports), 1)
+        saved = reports[0] / "bootstrap/UHD770MVP-bootstrap.sample/prepare.txt"
+        self.assertEqual(saved.read_bytes(), transcript)
+        self.assertEqual((bootstrap / "prepare.txt").read_bytes(), transcript)
+        self.assertFalse((self.installed / "session-public/plan.plist").exists())
+        self.assertEqual(self.usb.read_bytes(), self.safe)
+        self.assertFalse((self.root / "probe-calls").exists())
+
+    def test_native_group_writable_var_run_is_not_a_preparation_lock_parent(self):
+        """Keep Darwin's native /private/var/run ownership and mode untouched.
+
+        A directory timestamp also detects a temporary lock that was created
+        and removed, which a final file listing alone would fail to reveal.
+        """
+        native_run = self.mac / "private/var/run"
+        native_run.chmod(0o775)
+        sentinel = native_run / "existing-system-marker"
+        sentinel.write_bytes(b"preserve unrelated system data")
+
+        def snapshot():
+            result = {}
+            for path in (native_run, *native_run.rglob("*")):
+                info = path.lstat()
+                result[path.relative_to(native_run).as_posix()] = (
+                    info.st_mode, info.st_mtime_ns, info.st_ctime_ns,
+                    path.read_bytes() if path.is_file() else None)
+            return result
+
+        before = snapshot()
+        prepared = self.run_session("prepare", SESSION_VAR_RUN_MODE="775")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
+        self.assertIn(b"PREPARED", prepared.stdout)
+        self.assertEqual(snapshot(), before)
+        self.assertFalse((self.mac / "Library/Application Support/.com.uhd770.mvp.prepare.lock").exists())
+        self.assertFalse((self.root / "probe-calls").exists())
+        self.assertEqual(self.usb.read_bytes(), (self.kit / "session-target/config.test.plist").read_bytes())
+
     def test_prepare_and_next_boot_restore_use_actual_flow(self):
         prepared = self.run_session("prepare")
         self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
@@ -456,6 +506,7 @@ class SessionFlowTests(unittest.TestCase):
                 self.assertEqual((self.mac / "Library/Extensions/NMXGPU.kext/Contents/MacOS/NMXGPU").read_bytes(), b"original")
                 self.assertEqual((self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").read_bytes(), b"original KC")
                 self.assertFalse((self.mac / "private/var/run/com.uhd770.mvp.prepare.lock").exists())
+                self.assertFalse((self.mac / "Library/Application Support/.com.uhd770.mvp.prepare.lock").exists())
                 self.assertIn(b"Report:", result.stdout)
 
 

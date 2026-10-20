@@ -16,6 +16,8 @@ WindowServer、HiDPI 60 Hz、视频编解码、睡眠唤醒不属于本轮成功
    构建保留其他 /Library/Extensions 驱动的 KC、备份并安装本候选，最后才写入测试开关。
    准备可能需要十几分钟。没有 PREPARED 字样就不要重启测试。
    任一步失败会停止，尽力恢复改动并自动导出报告；不要自行删除 stage 或反复重跑。
+   准备入口会从最早阶段记录完整终端输出。无论成功或失败，结束后都会尝试把该份
+   日志复制到匹配 U 盘的 UHD770-prepare-logs/ 下；系统盘原件仍保留。
 4. 看到 PREPARED 后，重启一次，通过同一个 1401 U 盘选择正常 macOS 15，照常登录。
    此前不需要另执行 enable。登录不会启动 Vulkan/Metal，也不会出现倒计时后自动测试。
    驱动自身仍按测试启动参数初始化：在固件可读后延迟 180 秒接管显示。
@@ -45,6 +47,11 @@ WindowServer、HiDPI 60 Hz、视频编解码、睡眠唤醒不属于本轮成功
 
 取回报告与恢复
 --------------
+准备阶段报错时，先查看 U 盘 UHD770-prepare-logs/ 下最新报告的 prepare.txt。
+该文件包含早于安装/stage 的完整 STOP 报错，bootstrap-result.txt 记录退出码。
+U 盘暂时不可用时，原件在 /Users/Shared/UHD770MVP-bootstrap.*；再次执行下面的
+export 会把这些原件纳入汇总报告，无需重跑准备来复现。
+
 把最新的 /Users/Shared/UHD770MVP-session-reports.* 整个文件夹带回 Windows。
 如果没有自动导出的文件夹，在正常桌面执行本包 tools/session.sh export：
 
@@ -67,6 +74,9 @@ WindowServer、HiDPI 60 Hz、视频编解码、睡眠唤醒不属于本轮成功
 具体边界
 --------
 - 不改 SIP/AMFI，不重置 NVRAM，不自动重启，不开启网络或全局 Metal 注入。
+- 准备锁位于 /Library/Application Support/.com.uhd770.mvp.prepare.lock；
+  不要求 /private/var/run 禁止系统组写入，也不会修改该系统目录的权限。
+  准备成功/正常失败会清理自己创建的锁；断电留下的旧锁保留用于诊断，不自动删除。
 - 不依赖 1401 的临时跳过选项；U 盘原始 -nvoff 配置字节另存并核对哈希。
 - 不声称现在正在使用哪个 EFI；明确要求下一次从已核对的同一个 1401 USB 启动。
 - 私有 stage/KC 仍是先决检查，但正常成功路径不再每个阶段要求人工返回交日志。

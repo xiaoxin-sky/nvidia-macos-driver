@@ -1,6 +1,12 @@
 name: UHD 770 deployment tools (no GPU execution)
 on:
   workflow_dispatch:
+    inputs:
+      scope:
+        type: choice
+        description: Targeted preparation regressions or the complete deployment flow
+        default: all
+        options: [all, prepare]
   push:
     paths:
       - '.github/workflows/uhd770-deployment.yml'
@@ -19,10 +25,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Python preparation and archive boundary fixtures
+        env:
+          # Deliberate narrow regression selection for prepare/bootstrap-only
+          # fixes; ordinary pushes and dispatches retain the complete suite.
+          UHD770_TEST_SCOPE: ${{ inputs.scope || (contains(github.event.head_commit.message, '[prepare-only]') && 'prepare' || 'all') }}
         run: |
           python3 -m unittest discover -s experimental/uhd770/acceleration/kit -p 'test_*.py' -v
           python3 - <<'PY'
-          import sys, time, unittest
+          import os, sys, time, unittest
           def annotation(kind, title, text):
               message = str(text)[-6000:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
               print(f'::{kind} title={title}::{message}', flush=True)
@@ -42,7 +52,15 @@ jobs:
               def addFailure(self, test, err):
                   super().addFailure(test, err)
                   annotation('error', 'Deployment fixture failure', self.failures[-1][1])
-          suite = unittest.defaultTestLoader.discover('experimental/uhd770/acceleration/deployment', pattern='test_*.py')
+          if os.environ.get('UHD770_TEST_SCOPE') == 'prepare':
+              sys.path.insert(0, 'experimental/uhd770/acceleration/deployment')
+              suite = unittest.defaultTestLoader.loadTestsFromNames([
+                  'test_prepare_kit', 'test_bootstrap',
+                  'test_session_flow.SessionFlowTests.test_native_group_writable_var_run_is_not_a_preparation_lock_parent',
+                  'test_session_flow.SessionFlowTests.test_export_preserves_early_root_bootstrap_without_prepared_plan',
+              ])
+          else:
+              suite = unittest.defaultTestLoader.discover('experimental/uhd770/acceleration/deployment', pattern='test_*.py')
           result = unittest.TextTestRunner(verbosity=2, resultclass=ObservedResult).run(suite)
           sys.exit(0 if result.wasSuccessful() else 1)
           PY
