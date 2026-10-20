@@ -48,3 +48,11 @@ digests/evidence and produces a candidate with hardware_ready=false. It does
 not install/activate anything. NMXGPU and the probes are unsigned; this is not
 a fully signed, directly installable package. The separate installation plan
 must address trust, independent recovery and automatic persistent logs.
+
+deployment/ now provides Windows-side digest-pinned firmware/tool packaging and
+Mac-side read-only inventory, private staging/temporary KC checks, a bounded
+launchd recorder, and explicit separate compute runners. Run 39367028209 at
+defaef1 passed the targeted Python, system Bash, mocked lifecycle/timeout/UUID
+and plist checks on Ubuntu and Intel macOS. No launchd job or driver was installed
+there, and no GPU was accessed. Start with the target-machine preflight only;
+transactional live driver installation and recovery-EFI validation are pending.

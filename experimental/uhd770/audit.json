@@ -108,8 +108,9 @@
     "policy": "Do not activate or request a reboot from build success alone. The matched offline candidate has no installer/activation; concrete recovery and automatic logs are still required.",
     "first_mvp": "Single 8086:4680 device, ordinary ANV buffers, finite GPU compute and complete changing-input readback; separate Metal initialization/compute gate.",
     "pending_before_activation": [
-      "Prepare reviewed installation and independent opt-out recovery for the exact matched components",
-      "Prepare persistent/automatic logs before any GPU load so signal loss does not prevent evidence collection"
+      "Run the available read-only target preflight and private KC staging gates",
+      "Validate the available automatic recorder on a normal target-machine session",
+      "Complete matched transactional installation and verify the independent recovery EFI before opt-in"
     ],
     "unverified_runtime": [
       "Real PCI/IRQ/DMA/IOMMU operation and basic visible output with this batch",

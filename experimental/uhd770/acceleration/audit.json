@@ -80,7 +80,9 @@
     "Actual Apple AIR bitcode reader without target-machine code generation"
   ],
   "pending_before_hardware": [
-    "Concrete matched installation/recovery and automatic persistent logs"
+    "Run the read-only target preflight without enabling the driver",
+    "Validate private staging against actual target KC/security settings and one normal recorder session",
+    "Implement matched transactional live installation and independently verify the actual recovery EFI before opt-in"
   ],
   "runtime_unverified": [
     "Basic visible output and real device DMA/IOMMU/IRQ behavior",
@@ -101,5 +103,14 @@
     "gpu_executed": false,
     "signature_limit": "NMXGPU and both probe executables are unsigned. Preserve the existing NMXAccel/frontend signatures and signed symlink structure; do not claim a fully signed or directly installable kit. Signing/trust must be addressed in the separate installation plan."
   },
-  "limitations": "Host fixtures mock IOKit/DRM services; native compiler/linker/clock/AIR checks do not prove hardware execution. Source review is targeted, not exhaustive."
+  "limitations": "Host fixtures mock IOKit/DRM services; native compiler/linker/clock/AIR checks do not prove hardware execution. Source review is targeted, not exhaustive.",
+  "deployment_tools": {
+    "source_commit": "defaef134dea017a702944069fae856e878b5055",
+    "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39367028209",
+    "result": "success on ubuntu-latest and macos-15-intel",
+    "checks": "Seven assembler and six preparation Python fixtures, system Bash syntax/help, mocked persistent-capture/probe lifecycle/timeout/UUID fixtures and launchd plist structure. No job registered, driver installed/loaded or GPU accessed.",
+    "implementation": "Pinned minimal firmware payload+license, read-only target inventory, root-owned private staging and isolated target KC preflight, bounded boot recorder, explicit separate compute runners.",
+    "limits": "The production target preflight, actual launchd recorder and persistence after a black screen/reboot have not run on this hardware. Transactional live driver installation and active recovery-EFI verification remain pending.",
+    "hardware_ready": false
+  }
 }
