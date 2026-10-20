@@ -18,6 +18,7 @@ from prepare_pci_fixture import prepare
 from enable_ccache import enable
 from prepare_bridge_fixture import prepare as prepare_bridge
 from prepare_irq_fixture import prepare as prepare_irq
+from prepare_native_display_fixture import prepare as prepare_native_display
 
 
 def check(port, drm, package):
@@ -43,6 +44,7 @@ def check(port, drm, package):
         prepare(x / "xnu/nmx_pci.cpp", package / "tests/pci_class_fixture.cpp.in", root / "pci-class-test.cpp")
         prepare_bridge(x / "override/src/nmx_fb_bridge.c", package / "tests/fb_bridge_fixture.c.in", root / "fb-bridge-test.c")
         prepare_irq(x / "bsdcompat/src/nmx_bus.c", package / "tests/irq_drain_fixture.c.in", root / "irq-drain-test.c")
+        prepare_native_display(x / "xnu/nmx_fb.cpp", package / "tests/native_display_fixture.cpp.in", root / "native-display-test.cpp")
         assert (x / "xnu/nmx_fb_interrupts.h").is_file()
         assert (x / "xnu/nmx_attach_lifecycle.h").is_file()
         enable(x)

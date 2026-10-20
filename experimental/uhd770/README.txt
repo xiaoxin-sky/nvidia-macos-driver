@@ -34,8 +34,7 @@ The repair batch includes:
   switching with atomic checks/rollback, and queued connector notifications.
 
 audit.json maps the reviewed call chain and separates hardware-proven results,
-candidate repairs, known simplified
-interfaces and unverified paths. In particular, hardware VBL pacing,
+candidate repairs, known simplified interfaces and unverified paths. In particular,
 native runtime behavior, hardware VBL pacing, sleep/wake and the complete
 ANV/Metal path still require work; this batch must not be advertised as a stable,
 complete graphics driver. A missing Metal plugin in the Intel test package is
@@ -56,8 +55,10 @@ failure. Failure to restore is reported explicitly. Mode catalogs are bounded to
 
 DRM hotplug updates the bridge snapshot. A separate native worker polls only this
 snapshot (no I2C probe in VBL), queues a connection interrupt and retains pending
-changes while that interrupt is disabled. IOFramebuffer configuration probing
-applies the new catalog, preventing asynchronous resize during mode enumeration.
+changes while that interrupt is disabled. IOFramebuffer's gated connection check
+(kConnectionCheckEnable) or explicit probe applies the new catalog, preventing
+asynchronous resize during mode enumeration. A connection interrupt alone does
+not guarantee that Apple calls kConnectionProbe.
 Native DDC reads use one-based EDID blocks. Multi-output, interlaced/doublescan/
 3D modes and allocation growth are explicitly unsupported by this implementation.
 These source implementations do not establish HiDPI, 4K60 or Metal acceleration.
@@ -74,7 +75,11 @@ only, installs/loads nothing and does not distribute that KC as a live boot imag
 The actual callback/lifecycle helpers and bridge bodies also run in host fixtures
 covering concurrency, cancellation, mode fallback and injected allocation/map/
 commit/registration failures. Mocked services cannot verify kernel lock ordering
-or actual hardware state. Windows host checks do not replace macOS compilation.
+or actual hardware state. A native-side fixture extracts the real display methods
+and checks timing/DDC/mode returns, fixed pitch, error paths, notification before
+catalog replacement, and refresh through kConnectionCheckEnable. The bridge
+fixture also accounts for operation-lock destruction on failure and unregister.
+Windows host checks do not replace macOS compilation.
 
 Build caches
 ------------

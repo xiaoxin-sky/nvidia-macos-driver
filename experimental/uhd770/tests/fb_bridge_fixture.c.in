@@ -43,7 +43,9 @@ struct mode_link { struct drm_display_mode *next; };
 #define ERR_PTR(n) ((void *)(intptr_t)(n))
 struct mutex { unsigned depth; };
 #define DEFINE_MUTEX(name) struct mutex name = {0}
-static void mutex_init(struct mutex *m) { m->depth = 0; }
+static unsigned dynamic_mutexes;
+static void mutex_init(struct mutex *m) { m->depth = 0; ++dynamic_mutexes; }
+static void mutex_destroy(struct mutex *m) { assert(!m->depth && dynamic_mutexes); --dynamic_mutexes; }
 static void mutex_lock(struct mutex *m) { assert(!m->depth); m->depth = 1; }
 static void mutex_unlock(struct mutex *m) { assert(m->depth); m->depth = 0; }
 struct drm_client_dev;
@@ -274,7 +276,7 @@ static void cleanup(void) {
         struct drm_client_dev *c = registered[--registered_count];
         unregistering = 1; c->funcs->unregister(c); unregistering = 0;
     }
-    assert(!initialized && !buffers && !maps && !instances && !mode_allocations);
+    assert(!initialized && !buffers && !maps && !instances && !mode_allocations && !dynamic_mutexes);
     for (unsigned i = 0; i < MAX_FB; ++i) assert(!fbs[i].dev && !fbs[i].fb);
 }
 static void reset(void) {
@@ -306,6 +308,14 @@ int main(void) {
     reset();
     assert(nmx_fb_open(&device, NULL) == EINVAL);
     alloc_error = 1; assert(nmx_fb_open(&device, &info) == ENOMEM && !info.ok);
+    reset();
+    {
+        struct mock_device occupied[MAX_FB];
+        for (unsigned i = 0; i < MAX_FB; ++i) fbs[i].dev = &occupied[i];
+        assert(nmx_fb_open(&device, &info) == ENOSPC && !info.ok);
+        assert(!dynamic_mutexes && !instances);
+        for (unsigned i = 0; i < MAX_FB; ++i) fbs[i].dev = NULL;
+    }
     reset(); init_error = EIO;
     assert(nmx_fb_open(&device, &info) == EIO && !info.ok);
     reset(); probe_error_call = 1;

@@ -1024,7 +1024,7 @@
      bridge_free(fb);
  }
  
-@@ -116,52 +266,63 @@
+@@ -116,52 +266,64 @@
      .hotplug = bridge_hotplug,
  };
  
@@ -1059,6 +1059,7 @@
 +    for (unsigned i = 0; i < fb->catalog_count; i++)
 +        drm_mode_destroy(fb->client.dev, fb->catalog[i]);
      drm_client_release(&fb->client);
++    mutex_destroy(&fb->operation_mutex);
      kfree(fb);
  }
  
@@ -1119,7 +1120,7 @@
      if (best != NULL) {
          out->width = best->hdisplay;
          out->height = best->vdisplay;
-@@ -174,72 +335,191 @@
+@@ -174,72 +336,194 @@
          out->vsync_end = best->vsync_end;
      }
      mutex_unlock(&fb->client.modeset_mutex);
@@ -1267,6 +1268,7 @@
 +    for (int i = 0; i < MAX_FB; i++) {
 +        if (fbs[i].dev == devp) {
 +            mutex_unlock(&fbs_mutex);
++            mutex_destroy(&fb->operation_mutex);
 +            kfree(fb);
 +            return EBUSY;
 +        }
@@ -1278,6 +1280,7 @@
 +    }
 +    mutex_unlock(&fbs_mutex);
 +    if (slot < 0) {
++        mutex_destroy(&fb->operation_mutex);
 +        kfree(fb);
 +        return ENOSPC;
 +    }
@@ -1286,6 +1289,7 @@
 +    nmx_gpu_stage_record("fb.client.after", err);
 +    if (err) {
 +        bridge_forget(fb);
++        mutex_destroy(&fb->operation_mutex);
 +        kfree(fb);
 +        return err;
 +    }
@@ -1341,7 +1345,7 @@
  }
  
  /*
-@@ -248,16 +528,193 @@
+@@ -248,16 +532,193 @@
   */
  void nmx_fb_close(void *dev)
  {
@@ -1668,7 +1672,7 @@
 + * The physical allocation and pitch stay fixed. Native modes, timing and DDC
 + * come from copied DRM snapshots; mode commits preserve allocation ownership.
 + * A separate connector worker queues notifications and applies catalogs only
-+ * through IOFramebuffer's configuration probe. VBL remains software-timed.
++ * through IOFramebuffer's gated connection check/probe. VBL remains software-timed.
   */
  #include <IOKit/IOLib.h>
 +#include <IOKit/IOLocks.h>
@@ -1683,7 +1687,7 @@
  
  #define FBLOG(fmt, ...) IOLog("NullMoth display: " fmt "\n", ##__VA_ARGS__)
  
-@@ -24,64 +30,195 @@
+@@ -24,64 +30,211 @@
      OSDeclareDefaultStructors(NMXGPUFB)
      void *fDev = nullptr;
      nmx_fb_info fInfo = {};
@@ -1727,8 +1731,8 @@
 +        NMXGPUFB *me = (NMXGPUFB *)p0;
 +        if (nmx_fb_display_state(me->fDev, me->fPollState) == 0) {
 +            // Publish a connection interrupt first. Mode-list replacement is
-+            // applied by kConnectionProbe under IOFramebuffer's configuration
-+            // gate, so getDisplayModeCount/getDisplayModes cannot race a resize.
++            // applied by the gated connection check/probe, so mode count and
++            // enumeration cannot race an asynchronous catalog resize.
 +            IOLockLock(me->fDisplayLock);
 +            if (me->fPollState->generation > me->fDisplay->generation)
 +                me->fPendingGeneration = me->fPollState->generation;
@@ -1781,6 +1785,22 @@
 +    static uint32_t refresh16(const nmx_display_mode &mode) {
 +        uint64_t pixels = (uint64_t)mode.htotal * mode.vtotal;
 +        return pixels ? (uint32_t)(((uint64_t)mode.pclk_khz * 1000ull << 16) / pixels) : 0;
++    }
++
++    // Apple connection-change processing calls kConnectionCheckEnable under its
++    // controller gate; a connection interrupt need not call kConnectionProbe.
++    IOReturn refreshDisplayState() {
++        nmx_display_state *state = (nmx_display_state *)IOMalloc(sizeof(*state));
++        if (!state) return kIOReturnNoMemory;
++        int err = fDev ? nmx_fb_display_state(fDev, state) : ENODEV;
++        if (!err) {
++            acceptState(*state);
++            IOLockLock(fDisplayLock);
++            fPendingGeneration = 0;
++            IOLockUnlock(fDisplayLock);
++        }
++        IOFree(state, sizeof(*state));
++        return err ? kIOReturnNotReady : kIOReturnSuccess;
 +    }
 +
 +    static void drainTimer(thread_call_t &timer) {
@@ -1905,7 +1925,7 @@
      }
  
      IOReturn enableController() override { return kIOReturnSuccess; }
-@@ -92,21 +229,36 @@
+@@ -92,21 +245,36 @@
      }
      IODeviceMemory *getVRAMRange() override { return IODeviceMemory::withRange(fInfo.phys, fInfo.size); }
      const char *getPixelFormats() override { return IO32BitDirectPixels "\0"; }
@@ -1951,7 +1971,7 @@
          bzero(pi, sizeof(*pi));
          pi->bytesPerRow = fInfo.pitch;
          pi->bitsPerPixel = 32;
-@@ -117,21 +269,25 @@
+@@ -117,21 +285,25 @@
          pi->componentMasks[1] = 0x0000FF00;
          pi->componentMasks[2] = 0x000000FF;
          strlcpy(pi->pixelFormat, IO32BitDirectPixels, sizeof(pi->pixelFormat));
@@ -1983,7 +2003,7 @@
          IODetailedTimingInformationV2 &d = info->detailedInfo.v2;
          d.pixelClock = d.minPixelClock = d.maxPixelClock = (uint64_t)t.pclk_khz * 1000;
          d.horizontalActive = t.width;
-@@ -142,26 +298,67 @@
+@@ -142,26 +314,67 @@
          d.verticalBlanking = t.vtotal - t.height;
          d.verticalSyncOffset = t.vsync_start > t.height ? t.vsync_start - t.height : 0;
          d.verticalSyncPulseWidth = t.vsync_end > t.vsync_start ? t.vsync_end - t.vsync_start : 0;
@@ -2063,7 +2083,7 @@
      /* power acknowledged at once; left to IOFramebuffer it waits on a shared thread (seen with NVRMFB) */
      IOReturn setPowerState(unsigned long ordinal, IOService *) override {
          handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
-@@ -171,7 +368,8 @@
+@@ -171,7 +384,8 @@
          if (attribute == kIOWindowServerActiveAttribute) return kIOReturnSuccess;
          if (attribute == kIOPowerAttribute) {
              /* display sleep turns the outputs off; wake lights them again with the same buffer */
@@ -2073,7 +2093,7 @@
              if (value) {
                  IOReturn r = IOFramebuffer::setAttribute(attribute, value);
                  handleEvent(kIOFBNotifyDidPowerOn);
-@@ -184,17 +382,44 @@
+@@ -184,17 +398,33 @@
          return IOFramebuffer::setAttribute(attribute, value);
      }
      IOReturn setAttributeForConnection(IOIndex idx, IOSelect attribute, uintptr_t value) override {
@@ -2081,19 +2101,8 @@
          switch (attribute) {
 -        case kConnectionPower: case kConnectionColorModesSupported: case kConnectionColorDepthsSupported:
 -        case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported: case kConnectionColorMode:
-+        case kConnectionProbe: {
-+            nmx_display_state *state = (nmx_display_state *)IOMalloc(sizeof(*state));
-+            if (!state) return kIOReturnNoMemory;
-+            int err = fDev ? nmx_fb_display_state(fDev, state) : ENODEV;
-+            if (!err) {
-+                acceptState(*state);
-+                IOLockLock(fDisplayLock);
-+                fPendingGeneration = 0;
-+                IOLockUnlock(fDisplayLock);
-+            }
-+            IOFree(state, sizeof(*state));
-+            return err ? kIOReturnNotReady : kIOReturnSuccess;
-+        }
++        case kConnectionProbe:
++            return refreshDisplayState();
 +        case kConnectionPower:
 +            if (value > kIODisplayPowerStateOn) return kIOReturnBadArgument;
 +            return fDev && nmx_fb_power(fDev, value != kIODisplayPowerStateOff) == 0
@@ -2123,12 +2132,21 @@
          return kIOReturnSuccess;
      }
      IOReturn getAttribute(IOSelect attribute, uintptr_t *value) override {
-@@ -204,7 +429,13 @@
+@@ -204,7 +434,22 @@
      IOReturn getAttributeForConnection(IOIndex idx, IOSelect attr, uintptr_t *value) override {
          if (idx != 0 || !value) return kIOReturnBadArgument;
          switch (attr) {
 -        case kConnectionEnable: case kConnectionCheckEnable: *value = 1; return kIOReturnSuccess;
-+        case kConnectionEnable: case kConnectionCheckEnable:
++        case kConnectionCheckEnable: {
++            IOReturn result = refreshDisplayState();
++            if (result != kIOReturnSuccess) return result;
++            // ConnectionCheckEnable is the gated resense point, not a mode-list getter.
++            IOLockLock(fDisplayLock);
++            *value = fDisplay->connected && !fDisplay->error;
++            IOLockUnlock(fDisplayLock);
++            return kIOReturnSuccess;
++        }
++        case kConnectionEnable:
 +            IOLockLock(fDisplayLock);
 +            *value = fDisplay->connected && !fDisplay->error;
 +            IOLockUnlock(fDisplayLock);
@@ -2138,7 +2156,7 @@
          case kConnectionColorModesSupported: case kConnectionColorMode: *value = 0x00000001; return kIOReturnSuccess;
          case kConnectionColorDepthsSupported: case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported:
              *value = 0x00000002; return kIOReturnSuccess;
-@@ -218,7 +449,9 @@
+@@ -218,7 +463,9 @@
  IOService *nmx_fb_publish(IOService *gpu, void *dev)
  {
      nmx_fb_info info;

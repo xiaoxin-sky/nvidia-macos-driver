@@ -1,0 +1,181 @@
+/* Native method bodies, mocked Apple services. Tests cover DDC/mode contracts
+ * and the notification-before-catalog-update rule without installing a driver. */
+#include <atomic>
+#include <cassert>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <thread>
+#include <cerrno>
+#include "nmx_port.h"
+
+using UInt8 = uint8_t;
+using UInt32 = uint32_t;
+using IOSelect = uint32_t;
+using IOIndex = uint32_t;
+using IOItemCount = uint32_t;
+using IOOptionBits = uint32_t;
+using IOByteCount = uint64_t;
+using IODisplayModeID = int32_t;
+using IOPixelAperture = uint32_t;
+using IOReturn = int;
+using thread_call_t = void *;
+using thread_call_param_t = void *;
+using thread_t = std::thread::id;
+#define THREAD_NULL std::thread::id{}
+constexpr int THREAD_UNINT = 0;
+constexpr IOReturn kIOReturnSuccess = 0, kIOReturnBadArgument = 1,
+    kIOReturnUnsupported = 2, kIOReturnNotReady = 3, kIOReturnExclusiveAccess = 4,
+    kIOReturnUnsupportedMode = 5, kIOReturnNoMemory = 6, kIOReturnError = 7, kIOReturnNoSpace = 8;
+constexpr IOSelect kIOFBVBLInterruptType = 1, kIOFBConnectInterruptType = 2;
+constexpr IOSelect kConnectionCheckEnable = 1, kConnectionEnable = 2,
+    kConnectionSupportsHLDDCSense = 3, kConnectionColorModesSupported = 4,
+    kConnectionColorMode = 5, kConnectionColorDepthsSupported = 6,
+    kConnectionControllerColorDepth = 7, kConnectionControllerDepthsSupported = 8;
+constexpr uint32_t kDisplayModeValidFlag = 1, kDisplayModeSafeFlag = 2, kDisplayModeDefaultFlag = 4;
+constexpr uint32_t kIORGBDirectPixels = 1, kIOFBSystemAperture = 0, kIOTimingIDInvalid = 0;
+constexpr uint32_t kIODetailedTimingValid = 1, kIOSyncPositivePolarity = 1, kIODDCBlockTypeEDID = 0;
+constexpr uint32_t kSecondScale = 1000000000;
+#define IO32BitDirectPixels "--------RRRRRRRRGGGGGGGGBBBBBBBB"
+struct OSObject {
+    std::atomic<int> references{1};
+    void retain() { ++references; }
+    void release() { assert(--references >= 1); }
+};
+using IOFBInterruptProc = void (*)(OSObject *, void *);
+struct IOFramebuffer : OSObject {
+    IOReturn getAttributeForConnection(IOIndex, IOSelect, uintptr_t *) { return kIOReturnUnsupported; }
+};
+struct IOLock { std::mutex mutex; std::condition_variable condition; };
+static void IOLockLock(IOLock *lock) { lock->mutex.lock(); }
+static void IOLockUnlock(IOLock *lock) { lock->mutex.unlock(); }
+static void IOLockSleep(IOLock *lock, void *, int) {
+    std::unique_lock<std::mutex> guard(lock->mutex, std::adopt_lock);
+    lock->condition.wait(guard); guard.release();
+}
+static void IOLockWakeup(IOLock *lock, void *, bool) { lock->condition.notify_all(); }
+static thread_t current_thread() { return std::this_thread::get_id(); }
+static unsigned timer_arms = 0;
+static void thread_call_enter_delayed(thread_call_t, uint64_t) { ++timer_arms; }
+static void clock_interval_to_deadline(uint32_t n, uint32_t scale, uint64_t *out) { *out = uint64_t(n) * scale; }
+static bool allocation_failure = false;
+static unsigned allocations = 0;
+static void *IOMalloc(size_t size) { if (allocation_failure) return nullptr; ++allocations; return std::malloc(size); }
+static void IOFree(void *p, size_t) { assert(allocations); --allocations; std::free(p); }
+static void mock_bzero(void *p, size_t n) { std::memset(p, 0, n); }
+static void mock_strlcpy(char *to, const char *from, size_t capacity) {
+    assert(std::strlen(from) < capacity); std::memcpy(to, from, std::strlen(from) + 1);
+}
+#define bzero mock_bzero
+#define strlcpy mock_strlcpy
+struct IODisplayModeInformation { uint32_t nominalWidth, nominalHeight, refreshRate, flags; };
+struct IOPixelInformation {
+    uint32_t bytesPerRow, bitsPerPixel, pixelType, componentCount, bitsPerComponent;
+    uint32_t componentMasks[3], activeWidth, activeHeight;
+    char pixelFormat[64];
+};
+struct IODetailedTimingInformationV2 {
+    uint64_t pixelClock, minPixelClock, maxPixelClock;
+    uint32_t horizontalActive, horizontalBlanking, horizontalSyncOffset, horizontalSyncPulseWidth;
+    uint32_t verticalActive, verticalBlanking, verticalSyncOffset, verticalSyncPulseWidth;
+    uint32_t horizontalSyncConfig, verticalSyncConfig;
+};
+struct IOTimingInformation {
+    uint32_t appleTimingID, flags;
+    struct { IODetailedTimingInformationV2 v2; } detailedInfo;
+};
+static nmx_display_state remote_state{};
+static int query_error = 0, switch_error = 0;
+int nmx_fb_display_state(void *, nmx_display_state *out) {
+    *out = remote_state; return query_error;
+}
+int nmx_fb_set_mode(void *, uint32_t id, nmx_display_state *out) {
+    if (!switch_error) { remote_state.current_mode = id; ++remote_state.generation; }
+    *out = remote_state; return switch_error;
+}
+#include "nmx_fb_interrupts.h"
+class NMXGPUFB : public IOFramebuffer {
+public:
+    void *fDev = this;
+    nmx_fb_info fInfo{};
+    uint64_t fFrameNs = 16666667;
+    IOLock lock, irqLock;
+    IOLock *fDisplayLock = &lock;
+    nmx_display_state cache{}, poll{};
+    nmx_display_state *fDisplay = &cache, *fPollState = &poll;
+    uint64_t fPendingGeneration = 0;
+    thread_call_t fConnectTimer = nullptr;
+    NmxFbInterrupts fInterrupts;
+    NMXGPUFB() { fInterrupts.initialize(&irqLock); }
+    /* NMX_NATIVE_DISPLAY_METHODS */
+};
+static void connected(OSObject *, void *ref) { ++*static_cast<unsigned *>(ref); }
+int main() {
+    NMXGPUFB fb;
+    fb.fInfo.width = 3840; fb.fInfo.height = 2160; fb.fInfo.pitch = 15360;
+    remote_state.generation = 1; remote_state.connected = 1; remote_state.current_mode = 7;
+    remote_state.mode_count = 2;
+    remote_state.modes[0] = {7,3840,2160,594000,4400,2250,4016,4104,2168,2178,NMX_MODE_PREFERRED};
+    remote_state.modes[1] = {13,1920,1080,148500,2200,1125,2008,2052,1084,1089,NMX_MODE_HSYNC_POSITIVE};
+    remote_state.edid_size = 128; remote_state.edid[10] = 55;
+    assert(!fb.refreshDisplayState());
+    assert(fb.getDisplayModeCount() == 2);
+    IODisplayModeID ids[2]; assert(!fb.getDisplayModes(ids) && ids[0] == 7 && ids[1] == 13);
+    assert(fb.getDisplayModes(nullptr) == kIOReturnBadArgument);
+    IODisplayModeInformation info{};
+    assert(!fb.getInformationForDisplayMode(7, &info) && info.refreshRate == 60u << 16);
+    assert(info.nominalWidth == 3840 && (info.flags & kDisplayModeDefaultFlag));
+    assert(fb.getInformationForDisplayMode(1, &info) == kIOReturnBadArgument);
+    IOPixelInformation pixels{};
+    assert(!fb.getPixelInformation(13, 0, 0, &pixels));
+    assert(pixels.activeWidth == 1920 && pixels.bytesPerRow == 15360);
+    assert(fb.getPixelInformation(13, 1, 0, &pixels) == kIOReturnUnsupportedMode);
+    IOTimingInformation timing{};
+    assert(!fb.getTimingInfoForDisplayMode(13, &timing));
+    assert(timing.detailedInfo.v2.pixelClock == 148500000 &&
+           timing.detailedInfo.v2.horizontalSyncConfig == kIOSyncPositivePolarity);
+    assert(fb.hasDDCConnect(0) && !fb.hasDDCConnect(1));
+    uint8_t block[128]; IOByteCount length = sizeof(block);
+    assert(!fb.getDDCBlock(0, 1, 0, 0, block, &length) && length == 128 && block[10] == 55);
+    length = 127;
+    assert(fb.getDDCBlock(0, 1, 0, 0, block, &length) == kIOReturnNoSpace && length == 128);
+    assert(fb.getDDCBlock(0, 0, 0, 0, block, &length) == kIOReturnUnsupported && !length);
+    assert(fb.getDDCBlock(1, 1, 0, 0, block, &length) == kIOReturnBadArgument);
+    assert(!fb.setDisplayMode(13, 0) && fb.cache.current_mode == 13);
+    assert(fb.setDisplayMode(99, 0) == kIOReturnUnsupportedMode);
+    switch_error = EIO;
+    assert(fb.setDisplayMode(7, 0) == kIOReturnError && fb.cache.current_mode == 13);
+    switch_error = 0; allocation_failure = true;
+    assert(fb.setDisplayMode(7, 0) == kIOReturnNoMemory);
+    allocation_failure = false;
+    auto stale = fb.cache;
+
+    unsigned notifications = 0; void *irq = nullptr;
+    assert(!fb.fInterrupts.install(kIOFBConnectInterruptType, connected, &fb, &notifications, &irq));
+    assert(!fb.fInterrupts.setState(irq, 0));
+    remote_state = {}; remote_state.generation = stale.generation + 1;
+    fb.connectFire(&fb, nullptr);
+    assert(!notifications && fb.getDisplayModeCount() == 2 && fb.hasDDCConnect(0));
+    assert(fb.fPendingGeneration == remote_state.generation);
+    assert(!fb.fInterrupts.setState(irq, 1));
+    fb.connectFire(&fb, nullptr);
+    assert(notifications == 1 && fb.getDisplayModeCount() == 2);
+    // Connection check/probe owns the configuration gate and applies the state.
+    uintptr_t enabled = 99;
+    assert(!fb.getAttributeForConnection(0, kConnectionEnable, &enabled) && enabled == 1);
+    assert(fb.getDisplayModeCount() == 2);
+    assert(!fb.getAttributeForConnection(0, kConnectionCheckEnable, &enabled) && enabled == 0);
+    assert(!fb.getDisplayModeCount() && !fb.hasDDCConnect(0));
+    IODisplayModeID current = 99;
+    assert(fb.getCurrentDisplayMode(&current, nullptr) == kIOReturnNotReady && !current);
+    fb.acceptState(stale);
+    assert(!fb.getDisplayModeCount());
+    query_error = ENODEV;
+    assert(fb.refreshDisplayState() == kIOReturnNotReady);
+    assert(!fb.fInterrupts.remove(irq));
+    assert(fb.references == 1 && allocations == 0 && timer_arms == 2);
+    std::puts("Native display fixture passed: mode/DDC APIs, fixed pitch, error returns and gated connection catalog update");
+}
