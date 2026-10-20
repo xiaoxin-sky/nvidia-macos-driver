@@ -225,6 +225,10 @@ def prepare(candidate, firmware, output, source, config_backup=None, session_con
         relative = path.relative_to(source)
         if not path.is_file() or path.is_symlink() or "__pycache__" in relative.parts:
             continue
+        # Legacy login-time compute is intentionally not distributed. The
+        # manual helper is only invoked explicitly by the root test command.
+        if path.name == "com.uhd770.mvp.session-user.plist":
+            continue
         if path.suffix in {".sh", ".plist", ".txt", ".ps1", ".command"}:
             payload[f"tools/{relative.as_posix()}"] = path.read_bytes()
     for needed in ["tools/manage.sh", "tools/preflight.sh", "tools/README.txt",
@@ -247,11 +251,13 @@ def prepare(candidate, firmware, output, source, config_backup=None, session_con
                                  "note": "Saved reference only. Compare with the actual booting EFI before any later edit."}
     if session_config:
         payload.update(session_payload(session_config.read_bytes(), volume_label))
-        for name in ("Start-UHD770.command", "Restore-UHD770.ps1", "README-session.txt"):
+        for name in ("Start-UHD770.command", "Run-UHD770-Test.command", "Restore-UHD770.ps1", "README-session.txt"):
             payload[name] = (source / name).read_bytes()
-        plan.update({"classification": "opt-in-single-session-candidate",
+        plan.update({"classification": "opt-in-manual-session-candidate",
                      "driver_installation_enabled": True,
-                     "next_gate": "One automated target preparation; opt-in only after all local gates pass.",
+                     "compute_trigger": "explicit-manual-command-after-reboot",
+                     "login_compute_enabled": False,
+                     "next_gate": "Prepare, reboot through matched USB, explicitly invoke Run-UHD770-Test.command.",
                      "runtime_verified": False})
     payload["PLAN.json"] = (json.dumps(plan, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     payload["README.txt"] = (source / "README.txt").read_bytes()

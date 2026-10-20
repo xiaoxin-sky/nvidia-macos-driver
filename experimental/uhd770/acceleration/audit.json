@@ -81,8 +81,9 @@
   ],
   "pending_before_hardware": [
     "Read-only target preflight received: macOS 15.7.9/24G830, 8086:4680, -nvoff and generic framebuffer; old PCH binary remains installed and parked",
-    "Run the new single-session preparation: actual target KC/security, exact recovery USB and complete normal-desktop recorder gates run automatically before opt-in",
-    "Native installation, next-boot opt-out restoration, automatic application diagnostics and recovery remain unverified on this machine"
+    "Run the manual-session preparation: target KC/security, selected recovery USB and normal-desktop recorder gates before PREPARED",
+    "After the prepared reboot the human explicitly runs Run-UHD770-Test.command; login never starts compute",
+    "Native installation, next-boot opt-out restoration, manual application diagnostics and recovery remain unverified on this machine"
   ],
   "runtime_unverified": [
     "Basic visible output and real device DMA/IOMMU/IRQ behavior",
@@ -96,7 +97,7 @@
   ],
   "candidate_packaging": {
     "assembler": "kit/assemble.py",
-    "status": "Offline compiled candidate only; no installer/EFI activation",
+    "status": "Base compiled archives remain offline candidates. A separate matched manual deployment kit adds preparation, one-boot opt-in, explicit compute and recovery tools; none have run on this target.",
     "userland_and_metal_tar": "Preserved verbatim, including executable modes and signed bundle symlinks",
     "kernel_tar": "Reconstructed Unix modes; original kext file bytes unchanged",
     "hardware_ready": false,
@@ -110,7 +111,7 @@
     "result": "success on ubuntu-latest and macos-15-intel",
     "checks": "Seven assembler and six preparation Python fixtures, system Bash syntax/help, mocked persistent-capture/probe lifecycle/timeout/UUID fixtures and launchd plist structure. No job registered, driver installed/loaded or GPU accessed.",
     "implementation": "Pinned minimal firmware payload+license, read-only target inventory, root-owned private staging and isolated target KC preflight, bounded boot recorder, explicit separate compute runners.",
-    "limits": "Read-only target preflight completed. The new opt-in session installer journals whitelisted live files/KC, resolves a hash-matched USB, restores its next-boot opt-out and chains guarded probes only after preceding success. Its production installation, launchd and recovery behavior still require target validation; fixtures do not establish that behavior.",
+    "limits": "Read-only target preflight completed. Current deployment separates prepare/reboot/manual-test. Only recovery/capture are automatic; no user LaunchAgent is installed. A root-authorized explicit command starts fresh capture and runs guarded diagnostics as the selected ordinary user. Real target installation/capture/recovery and GPU behavior remain unverified.",
     "single_session_validation": {
       "source_commit": "7297acabbeeb40bb8ed36e4b9a879d76f5132019",
       "run_url": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39375396965",

@@ -171,8 +171,105 @@ session_compute_sequence "$TASK_TMP/runner" "$TASK_TMP/output" "$TASK_TMP/stop-p
 [ "$sequence_code" -eq 124 ] && [ "$(cat "$TASK_TMP/calls")" = vulkan ]
 grep -q metal_started=false "$TASK_TMP/output/sequence.txt"
 
+# Manual terminal streaming must preserve the runner's status through tee.
+# A visible failed Vulkan phase still prevents every Metal submission.
+rm -- "$TASK_TMP/stop-probes"
+: > "$TASK_TMP/calls"; TASK_RUN=fail-vulkan; sequence_code=0
+session_compute_sequence "$TASK_TMP/runner" "$TASK_TMP/output" '' live > "$TASK_TMP/live-terminal.txt" || sequence_code=$?
+[ "$sequence_code" -eq 31 ] && [ "$(cat "$TASK_TMP/calls")" = vulkan ]
+grep -q metal_started=false "$TASK_TMP/output/sequence.txt"
+: > "$TASK_TMP/calls"; TASK_RUN=success
+session_compute_sequence "$TASK_TMP/runner" "$TASK_TMP/output" '' live > "$TASK_TMP/live-terminal.txt"
+[ "$(wc -l < "$TASK_TMP/calls" | tr -d ' ')" = 2 ]
+grep -q exit=0 "$TASK_TMP/output/sequence.txt"
+
+# A successful runner with failed persistent logging is not accepted as a
+# successful phase, even though its terminal pipeline reached completion.
+: > "$TASK_TMP/calls"; sequence_code=0
+tee() { return 28; }
+session_compute_sequence "$TASK_TMP/runner" "$TASK_TMP/output" '' live > "$TASK_TMP/live-terminal.txt" || sequence_code=$?
+unset -f tee
+[ "$sequence_code" -eq 74 ] && [ "$(cat "$TASK_TMP/calls")" = vulkan ]
+grep -q metal_started=false "$TASK_TMP/output/sequence.txt"
+
 session_bounded 2 "$TASK_TMP/command.txt" /bin/bash -c 'exit 27' && exit 1
 grep -q command_exit_status=27 "$TASK_TMP/command.txt"
 if session_bounded 1 "$TASK_TMP/timeout.txt" /bin/bash -c 'trap "" TERM; exec sleep 8'; then exit 1; fi
 grep -q command_timeout_seconds=1 "$TASK_TMP/timeout.txt"
+
+# Real inert process trees exercise the manual watchdog. The leader, its shell
+# child and a grandchild ignore TERM so the isolated group's KILL is required;
+# the fixture's own process group must remain alive throughout.
+cat > "$TASK_TMP/group-child" <<'GROUP_CHILD'
+#!/bin/bash
+trap '' TERM
+sleep 30 &
+printf '%s\n' "$!" > "$TASK_TMP/grandchild.pid"
+wait
+GROUP_CHILD
+cat > "$TASK_TMP/group-leader" <<'GROUP_LEADER'
+#!/bin/bash
+trap '' TERM
+printf '%s\n' "$$" > "$TASK_TMP/leader.pid"
+/bin/bash "$TASK_TMP/group-child" &
+printf '%s\n' "$!" > "$TASK_TMP/child.pid"
+wait
+GROUP_LEADER
+assert_tree_stopped() {
+    local name pid state
+    for name in leader child grandchild; do
+        [ -f "$TASK_TMP/$name.pid" ] || return 1
+        pid=$(cat "$TASK_TMP/$name.pid")
+        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$pid" -gt 1 ] && [ "$pid" -ne "$$" ] || return 1
+        if kill -0 "$pid" 2>/dev/null; then
+            state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]' || :)
+            # Orphaned descendants may briefly remain zombies under the host
+            # init; they cannot execute and are not live command survivors.
+            case "$state" in
+                Z*) ;;
+                '') if kill -0 "$pid" 2>/dev/null; then return 1; fi ;;
+                *) return 1 ;;
+            esac
+        fi
+    done
+    kill -0 "$$"
+}
+group_code=0
+session_bounded_group 1 "$TASK_TMP/group-timeout.txt" /bin/bash "$TASK_TMP/group-leader" || group_code=$?
+[ "$group_code" -eq 124 ]
+grep -q command_timeout_seconds=1 "$TASK_TMP/group-timeout.txt"
+assert_tree_stopped
+
+# The same stop helper is used by the root abort trap. Signalling that isolated
+# controller must stop all descendants without signalling this fixture parent.
+rm -- "$TASK_TMP/leader.pid" "$TASK_TMP/child.pid" "$TASK_TMP/grandchild.pid"
+(
+    trap 'session_stop_group; exit 130' TERM
+    session_bounded_group 30 "$TASK_TMP/group-abort.txt" /bin/bash "$TASK_TMP/group-leader"
+) &
+controller=$!
+ticks=0
+while [ ! -f "$TASK_TMP/grandchild.pid" ] && [ "$ticks" -lt 50 ]; do sleep 0.1; ticks=$((ticks + 1)); done
+kill -TERM "$controller"
+controller_code=0
+wait "$controller" || controller_code=$?
+[ "$controller_code" -eq 130 ]
+assert_tree_stopped
+
+# Even an already-reaped successful leader must not leave a probe/logger in
+# its private group. Exercise the no-leader-PID signalling branch explicitly.
+rm -- "$TASK_TMP/leader.pid" "$TASK_TMP/child.pid" "$TASK_TMP/grandchild.pid"
+cat > "$TASK_TMP/group-exit-leader" <<'GROUP_EXIT_LEADER'
+#!/bin/bash
+printf '%s\n' "$$" > "$TASK_TMP/leader.pid"
+/bin/bash "$TASK_TMP/group-child" &
+printf '%s\n' "$!" > "$TASK_TMP/child.pid"
+ticks=0
+while [ ! -f "$TASK_TMP/grandchild.pid" ] && [ "$ticks" -lt 30 ]; do sleep 0.1; ticks=$((ticks + 1)); done
+exit 0
+GROUP_EXIT_LEADER
+session_bounded_group 5 "$TASK_TMP/group-completed.txt" /bin/bash "$TASK_TMP/group-exit-leader"
+grep -q command_exit_status=0 "$TASK_TMP/group-completed.txt"
+assert_tree_stopped
 printf 'Session transaction, terminal/deadline export, recorder and sequential failure gates passed; no GPU accessed.\n'

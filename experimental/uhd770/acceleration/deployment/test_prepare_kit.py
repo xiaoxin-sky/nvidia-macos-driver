@@ -4,6 +4,7 @@ import io
 import json
 import pathlib
 import plistlib
+import shutil
 import tarfile
 import tempfile
 import unittest
@@ -12,6 +13,95 @@ import prepare_kit as kit
 
 
 class PreparationTests(unittest.TestCase):
+    @staticmethod
+    def candidate_fixture(root):
+        """Write inert three-component archives accepted by the real kit validator.
+
+        Payload names model the compiled package contract, while their contents
+        remain plain fixture data and are never executed or installed.
+        """
+        members = {
+            "kernel": {
+                "Library/Extensions/NMXGPU.kext/Contents/MacOS/NMXGPU": b"inert-kext",
+                "Library/Extensions/NMXGPU.kext/Contents/Info.plist": b"inert-info",
+            },
+            "userland": {
+                "probe/uhd770-compute-probe": b"inert-vulkan",
+                "Library/GPUBundles/nvmtl/libvulkan_intel.dylib": b"inert-anv",
+            },
+            "metal": {
+                "probe/uhd770-metal-probe": b"inert-metal",
+                "Library/GPUBundles/nvmtl/air-opt": b"inert-reader",
+                "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver": b"inert-frontend",
+                "Library/Extensions/NMXAccel.kext/Contents/MacOS/NMXAccel": b"inert-accel",
+                "Library/GPUBundles/nvmtl": None,
+            },
+        }
+        files, components = {}, {}
+        for component, content in members.items():
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+                for name, data in content.items():
+                    entry = tarfile.TarInfo(name)
+                    entry.mode = 0o755
+                    if data is None:
+                        entry.type = tarfile.DIRTYPE
+                    else:
+                        entry.size = len(data)
+                    archive.addfile(entry, io.BytesIO(data) if data is not None else None)
+                if component == "metal":
+                    entry = tarfile.TarInfo("Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime")
+                    entry.type, entry.linkname = tarfile.SYMTYPE, "../../../nvmtl"
+                    archive.addfile(entry)
+            name = f"uhd770-acceleration-{component}.tar.gz"
+            files[name] = buffer.getvalue()
+            components[component] = {
+                "output_tar": name,
+                "output_tar_sha256": kit.sha256(files[name]),
+                "run_url": f"https://example.invalid/{component}",
+                "source_commit": "0" * 40,
+            }
+        files["evidence.json"] = json.dumps({"hardware_ready": False, "gpu_executed": False,
+                                               "installed": False, "components": components}).encode()
+        root.mkdir()
+        for name, data in files.items():
+            (root / name).write_bytes(data)
+        (root / "SHA256SUMS").write_text(
+            "".join(f"{kit.sha256(data)}  {name}\n" for name, data in files.items()), encoding="utf-8")
+
+    def test_session_package_has_explicit_manual_entrypoint_and_no_login_agent(self):
+        """Exercise real package assembly without touching a host config or GPU."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "acceleration/deployment"
+            original = pathlib.Path(__file__).resolve().parent
+            shutil.copytree(original, source, ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copytree(original.parent / "kit", source.parent / "kit",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            firmware = root / "firmware"
+            for name, data in (("i915/test.bin", b"firmware"), ("LICENSES/LICENSE.i915", b"license")):
+                path = firmware / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            (source / "firmware.json").write_text(json.dumps({"files": {
+                "i915/test.bin": kit.sha256(b"firmware"),
+                "LICENSES/LICENSE.i915": kit.sha256(b"license")}}), encoding="utf-8")
+            self.candidate_fixture(root / "candidate")
+            safe = root / "safe.plist"
+            guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
+            safe.write_bytes(plistlib.dumps({"NVRAM": {"Add": {guid: {"boot-args": "-v -nvoff"}},
+                                                         "Delete": {guid: ["boot-args"]}}}))
+            output = root / "output"
+            plan = kit.prepare(root / "candidate", firmware, output, source, session_config=safe)
+            self.assertFalse(plan["gpu_executed"])
+            self.assertEqual((output / "Run-UHD770-Test.command").read_bytes(),
+                             (source / "Run-UHD770-Test.command").read_bytes())
+            self.assertFalse((output / "tools/com.uhd770.mvp.session-user.plist").exists())
+            self.assertTrue((output / "tools/com.uhd770.mvp.session-root.plist").is_file())
+            manifest = (output / "SHA256SUMS").read_text(encoding="utf-8")
+            self.assertIn("  Run-UHD770-Test.command\n", manifest)
+            self.assertNotIn("com.uhd770.mvp.session-user.plist", manifest)
+
     def test_single_session_config_preserves_safe_bytes_and_unrelated_settings(self):
         guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
         original = {"NVRAM": {"Add": {guid: {"boot-args": "-v -igfxvesa amfi=0x80 -nvoff"}},

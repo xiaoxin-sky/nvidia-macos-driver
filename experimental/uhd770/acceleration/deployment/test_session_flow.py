@@ -35,9 +35,13 @@ elif name == 'sysctl':
     else: print('fixture boot identity')
 elif name == 'stat':
     path = pathlib.Path(args[-1])
-    if args[1] == '%u': print('501' if '/Users/fixture' in str(path) else '0')
+    if args[1] == '%u':
+        print('501' if '/Users/fixture' in str(path) or
+              (failure == 'authorization-owner' and path.name.startswith('manual-authorization-')) else '0')
     elif args[1] == '%z': print(path.lstat().st_size)
-    elif args[1] == '%Lp': print('700' if path.is_dir() else '600')
+    elif args[1] == '%Lp':
+        print('666' if failure == 'authorization-mode' and path.name.startswith('manual-authorization-') else
+              ('700' if path.is_dir() else '600'))
     else: sys.exit(93)
 elif name == 'csrutil': print('Kext Signing: disabled')
 elif name == 'nvram':
@@ -68,25 +72,36 @@ elif name == 'kmutil':
         pathlib.Path(args[args.index('-A')+1]).write_bytes(b'candidate KC')
     else: print('com.fixture.other\ncom.nullmoth.NMXGPU\ncom.nullmoth.NMXAccel')
 elif name == 'launchctl':
+    with (root / 'launchctl-calls').open('a') as stream: stream.write(' '.join(args) + '\n')
     if failure == 'bootstrap' and args[0] == 'bootstrap': sys.exit(28)
     if args[0] == 'bootstrap':
+        if args[1] != 'system': sys.exit(96)
         installed = root / 'mac/Library/Application Support/UHD770MVP'
-        command = ['/bin/bash', '-p', str(installed / 'incoming/tools/session.sh'), 'boot'] if args[1] == 'system' else \
-                  ['/bin/bash', '-p', str(installed / 'session-tools/session-user.sh')]
+        command = ['/bin/bash', '-p', str(installed / 'incoming/tools/session.sh'), 'boot']
         sys.exit(subprocess.run(command, timeout=60).returncode)
+    if args == ['kickstart', '-k', 'system/com.uhd770.mvp.capture']:
+        report = root / 'mac/private/var/log/UHD770MVP/session-manual-test'
+        report.mkdir(exist_ok=True)
+        (report / 'boot-identity.txt').write_text('kern.bootsessionuuid: TEST\n')
+        (report / 'stages.txt').write_text('elapsed_s=1 heartbeat stream_alive=1\n')
     if args == ['bootout', 'system/com.uhd770.mvp.capture']:
         with (root / 'flow-events').open('a') as stream: stream.write('capture-stop\n')
         if failure == 'capture-stop': sys.exit(26)
-        report = root / 'mac/private/var/log/UHD770MVP/session-test'
-        report.mkdir(exist_ok=True)
-        (report / 'boot-identity.txt').write_text('kern.bootsessionuuid: TEST\n')
-        with (report / 'stages.txt').open('a') as stream:
-            stream.write('elapsed_s=7 collector_end reason=deadline_or_termination\n')
+        # Close only the newly started manual recorder. An older interrupted
+        # boot recorder remains partial evidence and must not taint this close.
+        for report in (root / 'mac/private/var/log/UHD770MVP').glob('session-manual-*'):
+            if (report / 'boot-identity.txt').read_text() != 'kern.bootsessionuuid: TEST\n': continue
+            with (report / 'stages.txt').open('a') as stream:
+                stream.write('elapsed_s=7 collector_end reason=deadline_or_termination\n')
 elif name == 'sudo':
     if args[:3] != ['-n', '-u', '#501']: sys.exit(94)
-    # The real fixture already owns every temporary file; emulate only the
-    # bounded selected-user head read, never an actual privilege transition.
-    if args[3:6] != ['/usr/bin/head', '-c', '513']: sys.exit(95)
+    # The fixture owns every temporary file. Only bounded report reads or the
+    # exact copied selected-user entry point are allowed; no privilege change.
+    selected = str(root / 'mac/Library/Application Support/UHD770MVP/session-tools/session-user.sh')
+    allowed = args[3:6] == ['/usr/bin/head', '-c', '513'] or \
+              (args[3:6] == ['/bin/bash', '-p', selected] and args[6:] in (['preflight'], ['manual']))
+    if not allowed: sys.exit(95)
+    with (root / 'sudo-calls').open('a') as stream: stream.write(' '.join(args) + '\n')
     sys.exit(subprocess.run(args[3:], timeout=5).returncode)
 elif name == 'dmesg': print('fixture final kernel snapshot')
 elif name == 'codesign':
@@ -157,7 +172,9 @@ class SessionFlowTests(unittest.TestCase):
             text = re.sub(r"(?<![A-Za-z0-9_$])/(Library|private|System|Volumes|Users)(?=/)",
                           lambda match: str(self.mac / match[1]), text)
             text = text.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin", f"PATH={mock}:/usr/bin:/bin:/usr/sbin:/sbin")
-            text = text.replace('"$EUID"', '"501"' if name == "session-user.sh" else '"0"')
+            # Identity interpolation also appears inside authorization lines;
+            # adapt every exact builtin reference, not only standalone quotes.
+            text = re.sub(r"\$EUID\b", "501" if name == "session-user.sh" else "0", text)
             text = text.replace("/usr/libexec/PlistBuddy", str(mock / "PlistBuddy"))
             text = text.replace("/usr/bin/sudo", str(mock / "sudo"))
             self.assertIsNone(re.search(r"[\"'= ]/(Library|private|System|Volumes|Users)/",
@@ -213,11 +230,14 @@ class SessionFlowTests(unittest.TestCase):
         return subprocess.run(["/bin/bash", "-p", str(self.kit / "tools/session.sh"), mode],
                               env=dict(self.env, **extra), capture_output=True, timeout=120)
 
-    def run_user(self, **extra):
-        """Run the actual selected-user coordinator after preparation."""
-        return subprocess.run(["/bin/bash", "-p", str(self.installed / "session-tools/session-user.sh")],
-                              env=dict(self.env, SESSION_BOOT="TEST", **extra),
-                              capture_output=True, timeout=120)
+    def run_user(self, mode="manual", **extra):
+        """Call the copied helper explicitly or simulate a legacy login call."""
+        command = ["/bin/bash", "-p", str(self.installed / "session-tools/session-user.sh")]
+        if mode is not None:
+            command.append(mode)
+        environment = dict(self.env, SESSION_BOOT="TEST")
+        environment.update(extra)
+        return subprocess.run(command, env=environment, capture_output=True, timeout=120)
 
     def prepare_test_boot(self):
         """Model only publication/launch timing around the real boot entry points."""
@@ -235,42 +255,40 @@ class SessionFlowTests(unittest.TestCase):
         """Enumerate final aggregate reports, excluding manage.sh subreports."""
         return list((self.mac / "Users/Shared").glob("UHD770MVP-session-reports.*"))
 
-    def use_zero_deadline(self):
-        """Keep production control flow while reducing only its wait budget."""
-        path = self.kit / "tools/session.sh"
-        text = path.read_text(encoding="utf-8")
-        self.assertEqual(text.count("session_wait_terminal 600 "), 1)
-        path.write_text(text.replace("session_wait_terminal 600 ", "session_wait_terminal 0 "), encoding="utf-8")
-
     def test_prepare_and_next_boot_restore_use_actual_flow(self):
         prepared = self.run_session("prepare")
         self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
         self.assertIn(b"PREPARED", prepared.stdout)
         self.assertEqual(self.usb.read_bytes(), (self.kit / "session-target/config.test.plist").read_bytes())
-        # Model the interval after the root boot job verified recovery but
-        # before its ten-minute export, when the ordinary login agent runs.
+        self.assertFalse((self.root / "probe-calls").exists())
+        self.assertFalse((self.mac / "Library/LaunchAgents/com.uhd770.mvp.session.plist").exists())
+        self.assertNotIn("gui/", (self.root / "launchctl-calls").read_text())
+        # Boot recovery restores opt-out without authorizing GPU work. Only the
+        # separately invoked manual command may run the ordinary-user probes.
         public = self.installed / "session-public"
-        (public / "recovery-TEST.txt").write_text("next_boot_optout=verified\n")
-        user = self.run_user()
-        self.assertEqual(user.returncode, 0, user.stderr.decode())
-        self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan", "metal"])
         boot = self.run_session("boot", SESSION_BOOT="TEST")
         self.assertEqual(boot.returncode, 0, boot.stderr.decode())
         self.assertEqual(self.usb.read_bytes(), self.safe)
-        self.assertIn("trigger=coordinator-ended", (self.installed / "session-private/export-trigger-TEST.txt").read_text())
-        self.assertTrue((public / "exported-TEST.txt").is_file())
+        self.assertFalse((self.root / "probe-calls").exists())
+        self.assertFalse((self.installed / "session-private/export-trigger-TEST.txt").exists())
+        self.assertFalse((public / "deadline-TEST.txt").exists())
+        self.assertEqual(self.automatic_reports(), [])
+        manual = self.run_session("test", SESSION_BOOT="TEST")
+        self.assertEqual(manual.returncode, 0, manual.stderr.decode())
+        self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan", "metal"])
         reports = self.automatic_reports()
         self.assertEqual(len(reports), 1)
-        exported_stages = reports[0] / "system/boot-capture/session-test/stages.txt"
+        exported_stages = reports[0] / "system/boot-capture/session-manual-test/stages.txt"
         self.assertIn("collector_end", exported_stages.read_text())
         self.assertIn("capture_finalization=closed", (self.installed / "session-private/capture-finalization-TEST.txt").read_text())
         self.assertTrue((reports[0] / "preparation/final-dmesg-TEST.txt").is_file())
         self.assertEqual((self.root / "flow-events").read_text().splitlines(), ["capture-stop", "export"])
-        # Root and user launchd retries must not repeat an export or GPU work.
+        # Repeated boot recovery and a repeated manual command must not submit
+        # another compute sequence on the same test boot.
         duplicate = self.run_session("boot", SESSION_BOOT="TEST")
         self.assertEqual(duplicate.returncode, 0, duplicate.stderr.decode())
         self.assertEqual(len(self.automatic_reports()), 1)
-        self.assertEqual(self.run_user().returncode, 0)
+        self.run_session("test", SESSION_BOOT="TEST")
         self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan", "metal"])
         restored = self.run_session("restore")
         self.assertEqual(restored.returncode, 0, restored.stderr.decode())
@@ -278,44 +296,124 @@ class SessionFlowTests(unittest.TestCase):
 
     def test_failed_probe_ends_wait_without_running_metal(self):
         self.prepare_test_boot()
-        user = self.run_user(SESSION_FAIL="vulkan")
-        self.assertNotEqual(user.returncode, 0)
-        terminal = self.mac / "Users/fixture/Library/Logs/UHD770MVP/automatic-TEST/terminal.txt"
+        manual = self.run_session("test", SESSION_BOOT="TEST", SESSION_FAIL="vulkan")
+        self.assertNotEqual(manual.returncode, 0)
+        terminal = self.mac / "Users/fixture/Library/Logs/UHD770MVP/manual-TEST/terminal.txt"
         self.assertIn("coordinator_exit=1\n", terminal.read_text())
         self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan"])
-        boot = self.run_session("boot", SESSION_BOOT="TEST")
-        self.assertEqual(boot.returncode, 0, boot.stderr.decode())
-        self.assertIn("trigger=coordinator-ended", (self.installed / "session-private/export-trigger-TEST.txt").read_text())
         self.assertEqual(len(self.automatic_reports()), 1)
 
     def test_initialization_failure_publishes_terminal_without_gpu_submission(self):
         self.prepare_test_boot()
-        user = self.run_user(SESSION_FAIL="init")
-        self.assertEqual(user.returncode, 66, user.stderr.decode())
+        manual = self.run_session("test", SESSION_BOOT="TEST", SESSION_FAIL="init")
+        self.assertEqual(manual.returncode, 66, manual.stderr.decode())
         self.assertFalse((self.root / "probe-calls").exists())
-        terminal = self.mac / "Users/fixture/Library/Logs/UHD770MVP/automatic-TEST/terminal.txt"
+        terminal = self.mac / "Users/fixture/Library/Logs/UHD770MVP/manual-TEST/terminal.txt"
         self.assertIn("coordinator_exit=66\n", terminal.read_text())
-        boot = self.run_session("boot", SESSION_BOOT="TEST")
-        self.assertEqual(boot.returncode, 0, boot.stderr.decode())
-        self.assertIn("trigger=coordinator-ended", (self.installed / "session-private/export-trigger-TEST.txt").read_text())
+        self.assertEqual(len(self.automatic_reports()), 1)
 
-    def test_missing_terminal_exports_at_deadline(self):
+    def test_boot_and_legacy_login_never_start_gpu_or_probe_deadline(self):
         self.prepare_test_boot()
-        self.use_zero_deadline()
+        for _ in range(2):
+            boot = self.run_session("boot", SESSION_BOOT="TEST")
+            self.assertEqual(boot.returncode, 0, boot.stderr.decode())
+            login = self.run_user(mode=None)
+            self.assertFalse((self.root / "probe-calls").exists(), login.stderr.decode())
+        self.assertEqual(self.automatic_reports(), [])
+        self.assertFalse((self.installed / "session-public/deadline-TEST.txt").exists())
+        self.assertFalse((self.installed / "session-private/export-trigger-TEST.txt").exists())
+        self.assertFalse((self.mac / "Users/fixture/Library/Logs/UHD770MVP/manual-TEST").exists())
+
+    def test_explicit_preflight_never_starts_gpu_on_either_boot(self):
+        self.prepare_test_boot()
+        checked = self.run_user(mode="preflight", SESSION_BOOT="BASE")
+        self.assertEqual(checked.returncode, 0, checked.stderr.decode())
+        checked = self.run_user(mode="preflight", SESSION_BOOT="TEST")
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertFalse((self.root / "probe-calls").exists())
+        self.assertFalse((self.mac / "Users/fixture/Library/Logs/UHD770MVP/manual-TEST").exists())
+
+    def test_manual_mode_on_preparation_boot_refuses_gpu(self):
+        self.prepare_test_boot()
+        checked = self.run_session("test", SESSION_BOOT="BASE")
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertFalse((self.root / "probe-calls").exists())
+
+    def test_unverified_recovery_never_allows_explicit_manual_gpu(self):
+        public = self.prepare_test_boot()
+        (public / "recovery-TEST.txt").write_text("next_boot_optout=NOT_VERIFIED\n")
+        (public / "manual-authorization-TEST.txt").write_text(
+            "manual_authorization=active\nboot=TEST\nuid=501\n")
+        user = self.run_user()
+        self.assertEqual(user.returncode, 65, user.stderr.decode())
+        self.assertFalse((self.root / "probe-calls").exists())
+
+    def test_direct_user_helper_requires_current_active_root_authorization(self):
+        public = self.prepare_test_boot()
+        authorization = public / "manual-authorization-TEST.txt"
+        # Missing, stale, closed or other-user markers cannot bypass fresh
+        # capture startup by invoking the internal helper directly.
+        cases = (None, "manual_authorization=closed\nboot=TEST\nuid=501\n",
+                 "manual_authorization=active\nboot=OLD\nuid=501\n",
+                 "manual_authorization=active\nboot=TEST\nuid=502\n")
+        for data in cases:
+            if data is not None:
+                authorization.write_text(data)
+            user = self.run_user()
+            self.assertEqual(user.returncode, 64, user.stderr.decode())
+            self.assertFalse((self.root / "probe-calls").exists())
+            self.assertFalse((self.mac / "Users/fixture/Library/Logs/UHD770MVP/manual-TEST").exists())
+        authorization.write_text("manual_authorization=active\nboot=TEST\nuid=501\n")
+        for failure in ("authorization-owner", "authorization-mode"):
+            user = self.run_user(SESSION_FAIL=failure)
+            self.assertEqual(user.returncode, 64, user.stderr.decode())
+            self.assertFalse((self.root / "probe-calls").exists())
+        linked = public / "saved-authorization.txt"
+        authorization.rename(linked)
+        authorization.symlink_to(linked)
+        user = self.run_user()
+        self.assertEqual(user.returncode, 64, user.stderr.decode())
+        self.assertFalse((self.root / "probe-calls").exists())
+
+    def test_only_explicit_manual_command_owns_the_compute_deadline(self):
+        self.prepare_test_boot()
+        path = self.kit / "tools/session.sh"
+        text = path.read_text(encoding="utf-8")
+        marker = 'session_bounded_group 600 "$PRIVATE/manual-coordinator-$current.txt"'
+        self.assertEqual(text.count(marker), 1)
+        # Shrink only the explicit manual watchdog. Boot recovery must not
+        # consume it, publish its failure marker or initiate the coordinator.
+        path.write_text(text.replace(marker, marker.replace("600", "0", 1)), encoding="utf-8")
         boot = self.run_session("boot", SESSION_BOOT="TEST")
         self.assertEqual(boot.returncode, 0, boot.stderr.decode())
-        self.assertIn("trigger=deadline", (self.installed / "session-private/export-trigger-TEST.txt").read_text())
+        deadline = self.installed / "session-public/deadline-TEST.txt"
+        self.assertFalse(deadline.exists())
+        self.assertFalse((self.root / "probe-calls").exists())
+        manual = self.run_session("test", SESSION_BOOT="TEST")
+        self.assertEqual(manual.returncode, 124, manual.stderr.decode())
+        self.assertIn("trigger=manual-timeout", deadline.read_text())
         self.assertEqual(len(self.automatic_reports()), 1)
         self.assertFalse((self.root / "probe-calls").exists())
 
     def test_capture_stop_failure_still_exports_partial_report(self):
         self.prepare_test_boot()
-        self.assertEqual(self.run_user().returncode, 0)
-        boot = self.run_session("boot", SESSION_BOOT="TEST", SESSION_FAIL="capture-stop")
-        self.assertEqual(boot.returncode, 0, boot.stderr.decode())
+        manual = self.run_session("test", SESSION_BOOT="TEST", SESSION_FAIL="capture-stop")
+        self.assertEqual(manual.returncode, 0, manual.stderr.decode())
         self.assertEqual(len(self.automatic_reports()), 1)
         self.assertEqual((self.root / "flow-events").read_text().splitlines(), ["capture-stop", "export"])
         self.assertIn("capture_finalization=partial", (self.installed / "session-private/capture-finalization-TEST.txt").read_text())
+
+    def test_fresh_capture_closes_even_when_old_boot_capture_was_interrupted(self):
+        self.prepare_test_boot()
+        old_stages = self.mac / "private/var/log/UHD770MVP/session-test/stages.txt"
+        self.assertNotIn("collector_end", old_stages.read_text())
+        manual = self.run_session("test", SESSION_BOOT="TEST")
+        self.assertEqual(manual.returncode, 0, manual.stderr.decode())
+        self.assertNotIn("collector_end", old_stages.read_text())
+        self.assertIn("capture_finalization=closed",
+                      (self.installed / "session-private/capture-finalization-TEST.txt").read_text())
+        self.assertIn("manual_authorization=closed",
+                      (self.installed / "session-public/manual-authorization-TEST.txt").read_text())
 
     def test_recovery_failure_exports_once_per_boot(self):
         self.prepare_test_boot()
@@ -323,6 +421,12 @@ class SessionFlowTests(unittest.TestCase):
             boot = self.run_session("boot", SESSION_BOOT="TEST", SESSION_FAIL="usb-recovery")
             self.assertNotEqual(boot.returncode, 0)
         self.assertEqual(len(self.automatic_reports()), 1)
+        self.assertFalse((self.root / "probe-calls").exists())
+
+    def test_manual_entrypoint_refuses_failed_recovery_before_gpu(self):
+        self.prepare_test_boot()
+        manual = self.run_session("test", SESSION_BOOT="TEST", SESSION_FAIL="usb-recovery")
+        self.assertNotEqual(manual.returncode, 0)
         self.assertFalse((self.root / "probe-calls").exists())
 
     def test_failures_before_and_after_live_writes_restore_originals(self):

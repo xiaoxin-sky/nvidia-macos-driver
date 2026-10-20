@@ -97,6 +97,47 @@ session_bounded() {
     return "$code"
 }
 
+# A manually started coordinator gets its own session/process group so Ctrl-C
+# in the root terminal can stop its helpers/probes before closing evidence.
+# Perl/POSIX is provided with the system (also used by macOS shasum).
+session_stop_group() {
+    local pid=${SESSION_GROUP_PID:-} reaped=${1:-no} ticks=0
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$pid" -gt 1 ] || return 64
+    kill -TERM -- "-$pid" 2>/dev/null || :
+    # Also stop the leader if interruption arrived before setsid completed.
+    # After wait has reaped it, only the still-owned group may be signalled.
+    if [ "$reaped" != yes ]; then kill -TERM "$pid" 2>/dev/null || :; fi
+    while { kill -0 -- "-$pid" 2>/dev/null || { [ "$reaped" != yes ] && kill -0 "$pid" 2>/dev/null; }; } && [ "$ticks" -lt 20 ]; do
+        sleep 0.1; ticks=$((ticks + 1))
+    done
+    kill -KILL -- "-$pid" 2>/dev/null || :
+    if [ "$reaped" != yes ]; then kill -KILL "$pid" 2>/dev/null || :; fi
+    disown "$pid" 2>/dev/null || :
+    SESSION_GROUP_PID=''
+}
+
+session_bounded_group() {
+    local limit=$1 output=$2 elapsed=0 code pid
+    shift 2
+    SESSION_GROUP_PID=''
+    /usr/bin/perl -MPOSIX -e 'my $sid = POSIX::setsid(); die "setsid failed: $!" unless defined($sid) && $sid >= 0; exec @ARGV; die "exec failed: $!";' \
+        -- "$@" </dev/null > "$output" 2>&1 &
+    SESSION_GROUP_PID=$!; pid=$SESSION_GROUP_PID
+    while kill -0 "$pid" 2>/dev/null && [ "$elapsed" -lt $((limit * 10)) ]; do
+        sleep 0.1; elapsed=$((elapsed + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        session_stop_group
+        printf '\ncommand_timeout_seconds=%s\n' "$limit" >> "$output"
+        return 124
+    fi
+    if wait "$pid"; then code=0; else code=$?; fi
+    session_stop_group yes
+    printf '\ncommand_exit_status=%s\n' "$code" >> "$output"
+    return "$code"
+}
+
 # Accept a completed normal-desktop recorder session, never an old boot or an
 # empty/timeout-only report. GPU success is deliberately outside this predicate.
 session_recorder_valid() {
@@ -188,16 +229,33 @@ session_wait_terminal() {
     return 124
 }
 
+# Keep each selected runner's exit code when displaying its output live. A tee
+# failure is an evidence failure even if the runner itself returned success.
+session_compute_phase() {
+    local runner=$1 phase=$2 log=$3 live=$4 codes=()
+    if [ "$live" = live ]; then
+        printf '\n=== %s: checking the driver and running compute/readback ===\n' "$phase"
+        if "$runner" "$phase" 2>&1 | tee "$log"; then
+            return 0
+        else
+            codes=("${PIPESTATUS[@]}")
+            [ "${codes[0]}" -eq 0 ] || return "${codes[0]}"
+            return 74
+        fi
+    fi
+    "$runner" "$phase" > "$log" 2>&1
+}
+
 # Run the two diagnostics in order only when the preceding command actually
 # returned success. The production probe independently requires its own exact
 # readback marker, deadline and candidate UUID; callers cannot skip that gate.
 session_compute_sequence() {
-    local runner=$1 output=$2 stop=${3:-} code=0
+    local runner=$1 output=$2 stop=${3:-} live=${4:-quiet} code=0
     if [ -n "$stop" ] && [ -f "$stop" ]; then
         printf 'phase=not-started\nexit=124\nvulkan_started=false\nmetal_started=false\n' > "$output/sequence.txt"
         return 124
     fi
-    "$runner" vulkan > "$output/vulkan-runner.txt" 2>&1 || code=$?
+    session_compute_phase "$runner" vulkan "$output/vulkan-runner.txt" "$live" || code=$?
     if [ "$code" -ne 0 ]; then
         printf 'phase=vulkan\nexit=%s\nmetal_started=false\n' "$code" > "$output/sequence.txt"
         return "$code"
@@ -206,7 +264,8 @@ session_compute_sequence() {
         printf 'phase=vulkan\nexit=124\nmetal_started=false\nautomation_deadline=true\n' > "$output/sequence.txt"
         return 124
     fi
-    "$runner" metal > "$output/metal-runner.txt" 2>&1 || code=$?
+    [ "$live" != live ] || printf '\nVulkan compute/readback passed. Continuing to Metal.\n'
+    session_compute_phase "$runner" metal "$output/metal-runner.txt" "$live" || code=$?
     printf 'phase=metal\nexit=%s\nmetal_started=true\n' "$code" > "$output/sequence.txt"
     return "$code"
 }

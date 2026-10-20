@@ -17,6 +17,10 @@ LABEL=com.uhd770.mvp.session
 LOCK=/private/var/run/com.uhd770.mvp.prepare.lock
 LOCK_OWNED=0
 AUTO_EXPORT_ATTEMPTED=0
+MANUAL_ACTIVE=0
+MANUAL_CAPTURE=''
+SESSION_GROUP_PID=''
+FOLLOWER=''
 KEY='NVRAM.Add.7C436110-AB2A-4BBB-A880-FE41995C9F82.boot-args'
 KIT=$(cd "$(dirname "$0")/.." && pwd -P)
 HERE="$KIT/tools"
@@ -24,8 +28,9 @@ case "$0" in */incoming/tools/session.sh) KIT="$ROOT/incoming"; HERE="$KIT/tools
 
 die() { printf 'STOP: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: sudo /bin/bash -p tools/session.sh prepare|export|restore' \
+    printf '%s\n' 'Usage: sudo /bin/bash -p tools/session.sh prepare|test|export|restore' \
       'prepare: automatic staging, recorder validation, matched install and ONE next-boot test.' \
+      'test: explicitly run the ordinary-user compute tests after reboot; show progress and export.' \
       'export: collect all surviving system and selected-user diagnostic evidence.' \
       'restore: restore the USB opt-out and journaled original files/KC; takes effect next boot.' \
       'Requires the machine-specific session-target payload. Never reboots automatically.'
@@ -33,7 +38,7 @@ usage() {
 [ "${1:-}" != --help ] || { usage; exit 0; }
 [ "$#" -eq 1 ] || { usage >&2; exit 64; }
 MODE=$1
-case "$MODE" in prepare|export|restore|boot) ;; *) usage >&2; exit 64 ;; esac
+case "$MODE" in prepare|test|export|restore|boot) ;; *) usage >&2; exit 64 ;; esac
 [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = x86_64 ] || die 'Native x86_64 macOS required.'
 [ "$EUID" -eq 0 ] || die 'Run with sudo /bin/bash -p.'
 case $- in *p*) ;; *) die 'Use /bin/bash -p.' ;; esac
@@ -62,8 +67,7 @@ targets() {
       'runtime|/Library/GPUBundles/nvmtl' \
       'frontend|/Library/GPUBundles/NVMTLDriver.bundle' \
       'auxkc|/Library/KernelCollections/AuxiliaryKernelExtensions.kc' \
-      'rootjob|/Library/LaunchDaemons/com.uhd770.mvp.session.plist' \
-      'userjob|/Library/LaunchAgents/com.uhd770.mvp.session.plist'
+      'rootjob|/Library/LaunchDaemons/com.uhd770.mvp.session.plist'
 }
 
 # Validate each existing ancestor before creating only known /Library parents.
@@ -158,35 +162,20 @@ restore_files() {
     while IFS='|' read -r key target; do
         session_restore_one "$JOURNAL" "$key" "$target" || code=1
     done < <(targets)
+    # A journal from the earlier automatic kit may contain this legacy entry.
+    # New preparations never install it, but recovery still knows its one path.
+    session_restore_one "$JOURNAL" userjob /Library/LaunchAgents/com.uhd770.mvp.session.plist || code=1
     return "$code"
-}
-
-# A selected-user exit notice only controls when to collect evidence. Read at
-# that user's privilege after bounding its size: a concurrent symlink/FIFO swap
-# must not disclose a root-only file or stall the root coordinator indefinitely.
-terminal_for_boot() {
-    local boot=$1 uid=$2 home=$3 directory marker ancestor mode size
-    directory="$home/Library/Logs/UHD770MVP/automatic-$boot"
-    marker="$directory/terminal.txt"
-    for ancestor in "$home" "$home/Library" "$home/Library/Logs" "$home/Library/Logs/UHD770MVP" "$directory"; do
-        [ -d "$ancestor" ] && [ ! -L "$ancestor" ] || return 1
-    done
-    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-    [ "$(stat -f '%u' "$marker")" = "$uid" ] || return 1
-    mode=$(stat -f '%Lp' "$marker") || return 1
-    [ $((8#$mode & 0022)) -eq 0 ] || return 1
-    size=$(stat -f '%z' "$marker") || return 1
-    [ "$size" -le 512 ] || return 1
-    session_bounded 2 "$PRIVATE/terminal-read-$boot.txt" /bin/bash -p -c \
-        'exec /usr/bin/sudo -n -u "#$1" /usr/bin/head -c 513 "$2" > "$3"' \
-        _ "$uid" "$marker" "$PRIVATE/terminal-$boot.txt" || return 1
-    session_terminal_content_valid "$PRIVATE/terminal-$boot.txt" "$boot" "$uid"
 }
 
 # Check every matching root collector, not an ended report from an earlier boot
 # or an earlier recorder restart while another same-boot stream still writes.
 capture_finalized() {
-    local boot=$1 report found=0
+    local boot=$1 expected=${2:-} report found=0
+    if [ -n "$expected" ]; then
+        session_recorder_ended "$expected" "$boot"
+        return
+    fi
     for report in /private/var/log/UHD770MVP/session-*; do
         [ -d "$report" ] && [ ! -L "$report" ] || continue
         [ -f "$report/boot-identity.txt" ] || continue
@@ -201,12 +190,12 @@ capture_finalized() {
 # recovery boot. Even a successful bootout needs a final collector marker before
 # the export can describe capture as closed. Failure retains partial evidence.
 finish_capture() {
-    local boot=$1 started=$SECONDS
+    local boot=$1 expected=${2:-} started=$SECONDS
     session_bounded 10 "$PRIVATE/capture-stop-$boot.txt" \
         launchctl bootout system/com.uhd770.mvp.capture || :
     started=$SECONDS
-    while ! capture_finalized "$boot" && [ $((SECONDS - started)) -lt 8 ]; do sleep 1; done
-    if capture_finalized "$boot"; then
+    while ! capture_finalized "$boot" "$expected" && [ $((SECONDS - started)) -lt 8 ]; do sleep 1; done
+    if capture_finalized "$boot" "$expected"; then
         printf 'capture_finalization=closed\n' > "$PRIVATE/capture-finalization-$boot.txt"
     else
         printf 'capture_finalization=partial\n' > "$PRIVATE/capture-finalization-$boot.txt"
@@ -347,7 +336,6 @@ prepare() {
     ditto "$ROOT/components/Library/GPUBundles/nvmtl" "$work/runtime"
     ditto "$ROOT/components/Library/GPUBundles/NVMTLDriver.bundle" "$work/frontend"
     cp "$HERE/com.uhd770.mvp.session-root.plist" "$work/rootjob"
-    cp "$HERE/com.uhd770.mvp.session-user.plist" "$work/userjob"
     mkdir -m 755 "$ROOT/session-tools"
     cp "$HERE/session-user.sh" "$HERE/session-lib.sh" "$ROOT/session-tools/"
     chmod 644 "$ROOT/session-tools/"*.sh
@@ -371,20 +359,18 @@ prepare() {
         if [ -d "$work/$key" ]; then chmod -R go-w,a+rX "$work/$key"; else chmod 644 "$work/$key"; fi
         session_replace "$JOURNAL" "$key" "$target" "$work/$key"
     done < <(targets)
-    # Register only the root recovery job now. In this boot it is a no-op;
-    # launchd will start both root recovery and the user agent at the next boot.
+    # Only recovery/logging starts automatically. No user LaunchAgent is
+    # installed: explicit manual execution is required for compute submission.
     launchctl bootstrap system /Library/LaunchDaemons/$LABEL.plist
     elapsed=0
     while [ ! -f "$PUBLIC/root-preflight-$current.txt" ] && [ "$elapsed" -lt 20 ]; do sleep 1; elapsed=$((elapsed + 1)); done
     grep -qx 'root_job_entrypoint=passed' "$PUBLIC/root-preflight-$current.txt" || die 'Root recovery job entry point did not pass its live preflight.'
-    launchctl bootstrap "gui/$uid" /Library/LaunchAgents/$LABEL.plist
-    elapsed=0
-    while [ ! -f "$home/Library/Logs/UHD770MVP/preflight-$current.txt" ] && [ "$elapsed" -lt 20 ]; do sleep 1; elapsed=$((elapsed + 1)); done
+    session_bounded 20 "$PRIVATE/user-entrypoint-preflight.txt" \
+        sudo -n -u "#$uid" /bin/bash -p "$ROOT/session-tools/session-user.sh" preflight || die 'Selected-user manual entry preflight failed.'
     local user_preflight="$home/Library/Logs/UHD770MVP/preflight-$current.txt"
     [ -f "$user_preflight" ] && [ ! -L "$user_preflight" ] && [ "$(stat -f '%u' "$user_preflight")" = "$uid" ] || die 'Selected-user job did not produce its preflight marker.'
     grep -qx "boot=$current" "$user_preflight" && grep -qx 'user_job_entrypoint=passed' "$user_preflight" || die 'Selected-user job preflight failed.'
     cp "$user_preflight" "$PRIVATE/user-job-preflight.txt"
-    launchctl bootout "gui/$uid/$LABEL"
     restore_optout || die 'Independent opt-out check failed before arming.'
     [ "$(hash "$cfg")" = "$(property safe_hash)" ] || die 'USB changed before arming.'
     [ ! -e "$cfg.uhd770-pending" ] && [ ! -L "$cfg.uhd770-pending" ] || die 'A pending USB config already exists; preserved.'
@@ -395,8 +381,8 @@ prepare() {
     printf 'armed\n' > "$PUBLIC/state.txt"
     printf '\nPREPARED. Restart ONCE through the same 1401 USB and choose macOS 15.\n'
     printf 'Log in normally. GPU takeover waits 180 seconds after firmware availability.\n'
-    printf 'The next-boot opt-out is restored automatically; Vulkan then Metal run only if initialization succeeds.\n'
-    printf 'Reports export as soon as the coordinator exits; 10 minutes is only the wait deadline.\n'
+    printf 'The next-boot opt-out is restored automatically. No compute test starts at login.\n'
+    printf 'After login, run this kit Run-UHD770-Test.command with sudo /bin/bash -p when YOU choose.\n'
     printf 'If black, wait 6 minutes after signal loss, then restart through the same USB.\n'
     printf 'If that recovery boot fails, return to Windows and run the package Restore-UHD770.ps1.\n'
     printf 'No automatic reboot or claim of acceleration success.\n'
@@ -404,7 +390,7 @@ prepare() {
 
 boot() {
     safe_directory "$ROOT"; safe_directory "$PRIVATE"; safe_directory "$PUBLIC"
-    local current prepare_boot args attempt recovered=0 uid account home wait_code=0
+    local current prepare_boot args attempt recovered=0
     current=$(sysctl -n kern.bootsessionuuid); prepare_boot=$(property preparation_boot)
     case "$current" in ''|*[!a-zA-Z0-9-]*) die 'Invalid current boot identity.' ;; esac
     if [ "$current" = "$prepare_boot" ]; then
@@ -435,32 +421,101 @@ boot() {
         *' nmxintel=1 '*) ;;
         *) automatic_export "$current"; exit 0 ;;
     esac
-    # Same-boot launch retries cannot create duplicate automatic reports. Manual
-    # export/restore never use this lock and remain available after interruption.
-    if ! mkdir -m 700 "$PUBLIC/automatic-$current"; then exit 0; fi
+    # This task never invokes a user entry point. Leaving it armed lets the
+    # human start later without an arbitrary login-to-test countdown.
+    printf 'boot=%s\ncompute=not_started\ntrigger=manual_only\n' "$current" > "$PUBLIC/waiting-for-manual-$current.txt"
+    chmod 644 "$PUBLIC/waiting-for-manual-$current.txt"
+    printf 'Recovery checked. Compute is waiting for explicit Run-UHD770-Test.command.\n'
+}
+
+# An explicit root invocation owns capture/export; GPU work runs only as the
+# selected ordinary user. The boot job above cannot reach this function.
+run_manual_test() {
+    safe_directory "$ROOT"; safe_directory "$PRIVATE"; safe_directory "$PUBLIC"
+    local current uid code=0 report ready='' count=0
+    current=$(sysctl -n kern.bootsessionuuid)
+    case "$current" in ''|*[!a-zA-Z0-9-]*) die 'Invalid boot identity.' ;; esac
+    [ "$current" != "$(property preparation_boot)" ] || die 'Restart through the prepared USB before running compute.'
     uid=$(property user_uid)
-    case "$uid" in ''|*[!0-9]*) die 'Invalid selected-user identity.' ;; esac
-    account=$(id -nu "$uid")
-    home=$(dscl . -read "/Users/$account" NFSHomeDirectory | sed 's/^NFSHomeDirectory: //')
-    case "$home" in /Users/*) ;; *) die 'Selected account home is unavailable.' ;; esac
-    session_wait_terminal 600 "$PRIVATE/export-trigger-$current.txt" \
-        terminal_for_boot "$current" "$uid" "$home" || wait_code=$?
-    if [ "$wait_code" -ne 0 ]; then
-        printf 'boot=%s\ntrigger=deadline\npartial=true\n' "$current" > "$PUBLIC/deadline-$current.txt"
+    [ "${SUDO_UID:-0}" = "$uid" ] || die 'Use sudo from the same ordinary account that prepared this test.'
+    [ "$(cat "$PUBLIC/state.txt")" = armed ] || die 'This session is not armed, or its test already ended.'
+    local args
+    args=$(sysctl -n kern.bootargs)
+    case " $args " in *' -nvoff '*) die 'This is an opt-out recovery boot; compute was not started.' ;; esac
+    case " $args " in *' nmxintel=1 '*) ;; *) die 'The prepared Intel opt-in is not active in this boot.' ;; esac
+    restore_optout || die 'Next-boot recovery cannot be verified; compute was not started.'
+    printf 'next_boot_optout=verified\nboot=%s\n' "$current" > "$PUBLIC/recovery-$current.txt"
+    chmod 644 "$PUBLIC/recovery-$current.txt"
+    mkdir -m 700 "$PRIVATE/manual-$current" || die 'A manual test was already started in this boot; preserved.'
+    MANUAL_ACTIVE=1
+    printf 'manual_boot=%s\ncompute_trigger=explicit_command\n' "$current" > "$PRIVATE/manual-current.txt"
+    printf '\nManual test requested. Verifying a fresh persistent recorder before compute...\n'
+    # A person may start long after the boot recorder has finished. Record the
+    # old directory names so a new capture is required, never stale evidence.
+    : > "$PRIVATE/manual-$current/previous-captures.txt"
+    for report in /private/var/log/UHD770MVP/session-*; do
+        if [ -d "$report" ]; then printf '%s\n' "$report" >> "$PRIVATE/manual-$current/previous-captures.txt"; fi
+    done
+    session_bounded 10 "$PRIVATE/manual-capture-start-$current.txt" \
+        launchctl kickstart -k system/com.uhd770.mvp.capture || die 'Cannot start the recorder; compute was not started.'
+    while [ "$count" -lt 25 ]; do
+        for report in /private/var/log/UHD770MVP/session-*; do
+            [ -d "$report" ] && [ ! -L "$report" ] || continue
+            grep -Fxq "$report" "$PRIVATE/manual-$current/previous-captures.txt" && continue
+            [ -f "$report/boot-identity.txt" ] && [ -f "$report/stages.txt" ] || continue
+            grep -Fxq "kern.bootsessionuuid: $current" "$report/boot-identity.txt" || continue
+            grep -q 'heartbeat stream_alive=1' "$report/stages.txt" || continue
+            grep -Eq 'startup_failed|kernel-stream exited|sync_failed|collector_end' "$report/stages.txt" && continue
+            ready=$report; break
+        done
+        [ -z "$ready" ] || break
+        sleep 1; count=$((count + 1))
+    done
+    [ -n "$ready" ] || die 'The new recorder did not confirm startup; compute was not started.'
+    MANUAL_CAPTURE=$ready
+    printf 'capture=%s\ncompute=explicit_manual\n' "$ready" > "$PRIVATE/manual-capture-$current.txt"
+    printf 'manual_authorization=active\nboot=%s\nuid=%s\n' "$current" "$uid" > "$PRIVATE/manual-$current/authorization.pending"
+    chmod 644 "$PRIVATE/manual-$current/authorization.pending"
+    mv "$PRIVATE/manual-$current/authorization.pending" "$PUBLIC/manual-authorization-$current.txt"
+    printf 'Recorder is ready. Waiting for driver checks, then Vulkan and Metal in this terminal.\n'
+    : > "$PRIVATE/manual-coordinator-$current.txt"
+    tail -n +1 -f "$PRIVATE/manual-coordinator-$current.txt" & FOLLOWER=$!
+    session_bounded_group 600 "$PRIVATE/manual-coordinator-$current.txt" \
+        sudo -n -u "#$uid" /bin/bash -p "$ROOT/session-tools/session-user.sh" manual || code=$?
+    kill -TERM "$FOLLOWER" 2>/dev/null || :; FOLLOWER=''
+    if [ "$code" -eq 124 ]; then
+        printf 'boot=%s\ntrigger=manual-timeout\npartial=true\n' "$current" > "$PUBLIC/deadline-$current.txt"
         chmod 644 "$PUBLIC/deadline-$current.txt"
-        # Do not leave an unrecorded later phase running after this deadline.
-        session_bounded 8 "$PRIVATE/user-stop-$current.txt" \
-            launchctl bootout "gui/$uid/$LABEL" || :
     fi
-    finish_capture "$current"
+    printf '\nManual coordinator exit=%s. Finishing logs and exporting reports...\n' "$code"
+    printf 'manual_authorization=closed\nboot=%s\n' "$current" > "$PUBLIC/manual-authorization-$current.txt"
+    finish_capture "$current" "$MANUAL_CAPTURE"
     printf 'finished\n' > "$PUBLIC/state.txt"
-    automatic_export "$current"
+    printf 'boot=%s\nmanual_exit=%s\n' "$current" "$code" > "$PUBLIC/manual-result-$current.txt"
+    chmod 644 "$PUBLIC/manual-result-$current.txt"
+    MANUAL_ACTIVE=0
+    export_all
+    AUTO_EXPORT_ATTEMPTED=1
+    return "$code"
 }
 
 failed() {
     local code=$1
     trap - EXIT INT TERM HUP
     set +e
+    [ -z "$FOLLOWER" ] || kill -TERM "$FOLLOWER" 2>/dev/null || :
+    if [ "$MODE" = test ] && [ "$MANUAL_ACTIVE" -eq 1 ]; then
+        local manual_boot
+        manual_boot=$(sysctl -n kern.bootsessionuuid)
+        printf 'boot=%s\ntrigger=manual-interrupted\npartial=true\n' "$manual_boot" > "$PUBLIC/deadline-$manual_boot.txt"
+        printf 'manual_authorization=closed\nboot=%s\n' "$manual_boot" > "$PUBLIC/manual-authorization-$manual_boot.txt"
+        chmod 644 "$PUBLIC/deadline-$manual_boot.txt" "$PUBLIC/manual-authorization-$manual_boot.txt"
+        session_stop_group
+        finish_capture "$manual_boot" "$MANUAL_CAPTURE"
+        printf 'finished\n' > "$PUBLIC/state.txt"
+        printf 'boot=%s\nmanual_exit=%s\n' "$manual_boot" "$code" > "$PUBLIC/manual-result-$manual_boot.txt"
+        chmod 644 "$PUBLIC/manual-result-$manual_boot.txt"
+    fi
     if [ "$MODE" = prepare ] && [ -f "$PLAN" ]; then
         restore_optout
         local safe_code=$?
@@ -478,6 +533,7 @@ trap 'code=$?; if [ "$code" -ne 0 ]; then failed "$code"; elif [ "$LOCK_OWNED" -
 trap 'exit 130' INT TERM HUP
 case "$MODE" in
     prepare) prepare ;;
+    test) run_manual_test ;;
     export) export_all ;;
     restore)
         safe_directory "$ROOT"; safe_directory "$PRIVATE"

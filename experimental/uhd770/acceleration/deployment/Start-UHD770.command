@@ -5,7 +5,8 @@ set -euo pipefail
 KIT=$(cd "$(dirname "$0")" && pwd -P)
 if [ "${1:-}" = --help ]; then
     printf '%s\n' 'Usage: sudo /bin/bash -p Start-UHD770.command' \
-      'One preparation invocation; no automatic reboot. Read README-session.txt first.'
+      'Prepare only. After PREPARED and reboot, use Run-UHD770-Test.command to explicitly start compute.' \
+      'No automatic reboot or login-time compute. Read README-session.txt first.'
     exit 0
 fi
 [ "$#" -eq 0 ] || exit 64
