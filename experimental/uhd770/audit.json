@@ -28,7 +28,9 @@
     "Implement native DDC/mode enumeration, atomic interactive mode commits with rollback, and generation-based connection notifications.",
     "Serialize hotplug, mode switch, gamma and power transactions; mode catalog replacement runs through IOFramebuffer's gated connection check/probe rather than asynchronously racing count/enumeration.",
     "Refresh copied state from kConnectionCheckEnable, which Apple's connection-change path calls even when kConnectionProbe is not called.",
-    "Destroy the operation mutex on duplicate/full-slot/client-init failure and final DRM unregister; the host fixture accounts for those resources."
+    "Destroy the operation mutex on duplicate/full-slot/client-init failure and final DRM unregister; the host fixture accounts for those resources.",
+    "Keep DRM hotplug callback delivery alive after refresh errors by recording failure in the snapshot/open result instead of triggering the core's permanent hotplug_failed latch. Explicit reprobe still reports the transaction error.",
+    "Only mark NMX_MODE_PREFERRED timings as default in connectFlags, matching the mode information API."
   ],
   "known_display_limitations": [
     "Software VBL callback lifetime now has a real implementation and host concurrency tests; actual display-IRQ pacing is not implemented by this software timer.",
@@ -81,7 +83,7 @@
   "host_verification": {
     "platform": "Windows MSVC 2022 with /W4 /WX; actual patched helper headers and complete bridge function bodies, mocked IOKit/DRM services only",
     "callback_lifetime": "Passed dispatch, disable, invalid handles, concurrent/self unregister, retained targets and stop/rearm checks",
-    "display_bridge": "Passed fault/ownership/mode scenarios, including registered-client failure, partial allocation, generic AMD mapping and operation-lock cleanup on early failures/unregister",
+    "display_bridge": "Passed fault/ownership/mode scenarios, including registered-client failure, partial allocation, generic AMD mapping, operation-lock cleanup, explicit reprobe errors and failed-then-successful connector delivery under DRM's sticky callback-error contract",
     "attach_lifetime": "Passed cancellation/admission/drain checks and 200 concurrent completion/stop races",
     "limits": "These tests do not model IOKit scheduling, actual DRM locking, GPU/IOMMU transactions or visible output. macOS compilation is a separate gate.",
     "gamma": "Passed 1/3-channel 8/16-bit, interpolation, unaligned input, maximum/invalid metadata and bridge commit/error tests",

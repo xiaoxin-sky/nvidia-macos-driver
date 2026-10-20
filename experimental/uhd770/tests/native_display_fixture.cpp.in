@@ -128,6 +128,10 @@ int main() {
     IODisplayModeInformation info{};
     assert(!fb.getInformationForDisplayMode(7, &info) && info.refreshRate == 60u << 16);
     assert(info.nominalWidth == 3840 && (info.flags & kDisplayModeDefaultFlag));
+    IOOptionBits flags = 0;
+    assert(!fb.connectFlags(0, 7, &flags) && (flags & kDisplayModeDefaultFlag));
+    assert(!fb.connectFlags(0, 13, &flags) && !(flags & kDisplayModeDefaultFlag));
+    assert(fb.connectFlags(1, 7, &flags) == kIOReturnBadArgument);
     assert(fb.getInformationForDisplayMode(1, &info) == kIOReturnBadArgument);
     IOPixelInformation pixels{};
     assert(!fb.getPixelInformation(13, 0, 0, &pixels));

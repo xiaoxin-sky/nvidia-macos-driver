@@ -20,6 +20,7 @@ def prepare(source_path, template_path, output_path):
         "IOReturn getCurrentDisplayMode(", "IOReturn getTimingInfoForDisplayMode(",
         "IOReturn setDisplayMode(", "bool hasDDCConnect(", "IOReturn getDDCBlock(",
         "IOReturn getAttributeForConnection(",
+        "IOReturn connectFlags(",
     ]
     bodies = []
     for signature in names:

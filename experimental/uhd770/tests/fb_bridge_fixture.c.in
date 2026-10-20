@@ -93,6 +93,7 @@ struct drm_client_dev {
     struct drm_mode_set modes[1];
     const struct drm_client_funcs *funcs;
     int registered;
+    int hotplug_failed;
 };
 struct drm_client_buffer {
     struct drm_framebuffer *fb;
@@ -213,6 +214,14 @@ static void drm_client_register(struct drm_client_dev *c) {
     register_width = c->modes[0].mode->hdisplay;
     register_height = c->modes[0].mode->vdisplay;
     c->funcs->hotplug(c);
+}
+/* Model pinned drm_client_dev_hotplug's sticky-error contract: a nonzero
+ * callback return removes this client from all later connector events. */
+static void mock_drm_hotplug(void) {
+    for (int i = 0; i < registered_count; ++i) {
+        struct drm_client_dev *c = registered[i];
+        if (!c->hotplug_failed && c->funcs->hotplug(c)) c->hotplug_failed = 1;
+    }
 }
 int nmx_drm_gamma_set(struct drm_crtc *crtc, uint16_t *red, uint16_t *green,
                        uint16_t *blue, unsigned size) {
@@ -381,6 +390,19 @@ int main(void) {
         assert(!nmx_fb_open(&device, &info));
         assert(!nmx_fb_display_state(&device, &state));
         assert(state.connected && !state.error && state.mode_count == 4 && state.edid_size == 256);
+        probe_error_call = probe_calls + 1;
+        mock_drm_hotplug();
+        assert(!registered[0]->hotplug_failed);
+        assert(!nmx_fb_display_state(&device, &after) && after.error == -EIO);
+        probe_error_call = 0;
+        mock_drm_hotplug();
+        assert(!nmx_fb_display_state(&device, &after) && !after.error && after.connected);
+        probe_error_call = probe_calls + 1;
+        assert(nmx_fb_reprobe(&device) == EIO);
+        assert(!nmx_fb_display_state(&device, &after) && after.error == -EIO);
+        probe_error_call = 0;
+        mock_drm_hotplug();
+        assert(!nmx_fb_display_state(&device, &after) && !after.error);
         assert(nmx_display_edid_block(&state, 2, block, sizeof(block)));
         uint32_t smaller = state.modes[1].id, initial = state.current_mode;
         uint64_t generation = state.generation;

@@ -59,6 +59,9 @@ changes while that interrupt is disabled. IOFramebuffer's gated connection check
 (kConnectionCheckEnable) or explicit probe applies the new catalog, preventing
 asynchronous resize during mode enumeration. A connection interrupt alone does
 not guarantee that Apple calls kConnectionProbe.
+DRM callback delivery stays enabled after a failed refresh: failures are exposed
+in the copied state and initial-open result instead of permanently setting DRM's
+hotplug_failed latch. An explicit reprobe still returns its transaction error.
 Native DDC reads use one-based EDID blocks. Multi-output, interlaced/doublescan/
 3D modes and allocation growth are explicitly unsupported by this implementation.
 These source implementations do not establish HiDPI, 4K60 or Metal acceleration.
@@ -77,8 +80,9 @@ covering concurrency, cancellation, mode fallback and injected allocation/map/
 commit/registration failures. Mocked services cannot verify kernel lock ordering
 or actual hardware state. A native-side fixture extracts the real display methods
 and checks timing/DDC/mode returns, fixed pitch, error paths, notification before
-catalog replacement, and refresh through kConnectionCheckEnable. The bridge
-fixture also accounts for operation-lock destruction on failure and unregister.
+catalog replacement, refresh through kConnectionCheckEnable and per-mode default
+flags. The bridge fixture accounts for operation-lock destruction on failure and
+unregister, and for failed-then-successful event delivery under DRM's latch rule.
 Windows host checks do not replace macOS compilation.
 
 Build caches

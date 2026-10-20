@@ -841,11 +841,12 @@
  
  /*
   * amdgpu may put scan-out buffers in system memory on APUs (scatter-gather display); the bridge needs them in
-@@ -68,22 +92,135 @@
+@@ -68,21 +92,145 @@
      return drm;
  }
  
 -/* a monitor plugged or unplugged: probe again and light what is there now with the same buffer */
+-static int bridge_hotplug(struct drm_client_dev *client)
 +/* Snapshot IDs survive connector reprobes: never reuse a catalog entry for a
 + * different timing while macOS may still have an outstanding mode ID. */
 +static int bridge_export_mode(struct nmx_fb *fb, const struct drm_display_mode *mode,
@@ -935,7 +936,7 @@
 +
 +/* Registration calls this synchronously, too. info must already describe the
 + * allocated buffer; probe bounds prevent later modes from exceeding its size. */
- static int bridge_hotplug(struct drm_client_dev *client)
++static int bridge_refresh_modes(struct drm_client_dev *client)
  {
      struct nmx_fb *fb = container_of(client, struct nmx_fb, client);
      struct drm_mode_set *ms;
@@ -964,7 +965,6 @@
              ms->fb = fb->buffer->fb;
      mutex_unlock(&client->modeset_mutex);
 -    drm_client_modeset_commit(client);
--    return 0;
 +    ret = drm_client_modeset_check(client);
 +    if (!ret) {
 +        nmx_gpu_stage_record("fb.hotplug.commit.before", 0);
@@ -981,10 +981,20 @@
 +    }
 +    mutex_unlock(&fb->operation_mutex);
 +    return ret;
++}
++
++/* DRM permanently latches hotplug_failed on a nonzero callback return. Keep
++ * this registered client eligible for a later event after a transient failure.
++ * Errors remain in hotplug_error/display.error: open still rejects failed
++ * registration and native consumers never acknowledge that state as working.
++ * Explicit reprobe uses bridge_refresh_modes to receive the transaction error. */
++static int bridge_hotplug(struct drm_client_dev *client)
++{
++    bridge_refresh_modes(client);
+     return 0;
  }
  
- static void bridge_free(struct nmx_fb *fb);
-@@ -91,21 +228,34 @@
+@@ -91,21 +239,34 @@
  /* a userland KMS client (a DRM master) closed: put our scan-out back on the outputs */
  static int bridge_restore(struct drm_client_dev *client)
  {
@@ -1024,7 +1034,7 @@
      bridge_free(fb);
  }
  
-@@ -116,52 +266,64 @@
+@@ -116,52 +277,64 @@
      .hotplug = bridge_hotplug,
  };
  
@@ -1120,7 +1130,7 @@
      if (best != NULL) {
          out->width = best->hdisplay;
          out->height = best->vdisplay;
-@@ -174,72 +336,194 @@
+@@ -174,72 +347,194 @@
          out->vsync_end = best->vsync_end;
      }
      mutex_unlock(&fb->client.modeset_mutex);
@@ -1345,7 +1355,7 @@
  }
  
  /*
-@@ -248,16 +532,193 @@
+@@ -248,16 +543,193 @@
   */
  void nmx_fb_close(void *dev)
  {
@@ -1471,7 +1481,7 @@
 +    for (int i = 0; i < MAX_FB; i++) {
 +        struct nmx_fb *fb = fbs[i].fb;
 +        if (fbs[i].dev == dev && fb && fb->published && !READ_ONCE(fb->closed)) {
-+            err = -bridge_hotplug(&fb->client);
++            err = -bridge_refresh_modes(&fb->client);
 +            break;
 +        }
 +    }
@@ -2093,7 +2103,7 @@
              if (value) {
                  IOReturn r = IOFramebuffer::setAttribute(attribute, value);
                  handleEvent(kIOFBNotifyDidPowerOn);
-@@ -184,17 +398,33 @@
+@@ -184,17 +398,34 @@
          return IOFramebuffer::setAttribute(attribute, value);
      }
      IOReturn setAttributeForConnection(IOIndex idx, IOSelect attribute, uintptr_t value) override {
@@ -2128,11 +2138,12 @@
 +    IOReturn connectFlags(IOIndex index, IODisplayModeID mode, IOOptionBits *flags) override {
 +        nmx_display_mode timing;
 +        if (index != 0 || !flags || !copyMode(mode, timing)) return kIOReturnBadArgument;
-+        *flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
++        *flags = kDisplayModeValidFlag | kDisplayModeSafeFlag;
++        if (timing.flags & NMX_MODE_PREFERRED) *flags |= kDisplayModeDefaultFlag;
          return kIOReturnSuccess;
      }
      IOReturn getAttribute(IOSelect attribute, uintptr_t *value) override {
-@@ -204,7 +434,22 @@
+@@ -204,7 +435,22 @@
      IOReturn getAttributeForConnection(IOIndex idx, IOSelect attr, uintptr_t *value) override {
          if (idx != 0 || !value) return kIOReturnBadArgument;
          switch (attr) {
@@ -2156,7 +2167,7 @@
          case kConnectionColorModesSupported: case kConnectionColorMode: *value = 0x00000001; return kIOReturnSuccess;
          case kConnectionColorDepthsSupported: case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported:
              *value = 0x00000002; return kIOReturnSuccess;
-@@ -218,7 +463,9 @@
+@@ -218,7 +464,9 @@
  IOService *nmx_fb_publish(IOService *gpu, void *dev)
  {
      nmx_fb_info info;
