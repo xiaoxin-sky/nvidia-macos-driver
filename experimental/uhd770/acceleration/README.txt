@@ -30,6 +30,12 @@ hardware VBL delivery, full sleep/wake and video codecs are outside this first
 application MVP. No claim of working Metal, desktop acceleration or 4K60 follows
 from a successful component build.
 
+The node-identity repair requires a matched new kernel and libdrm. XNU's dynamic
+published/clone minors differ from logical DRM indices. libdrm-nmx-node.patch
+uses real node paths and NMX_DRM_IOCTL_NODE_INFO instead of treating those IDs as
+renderD suffixes. The native interposed-inventory test opens only /dev/null;
+it verifies the compiled library's discovery contract, not GPU execution.
+
 The ordinary Metal buffer/texture/compute path uses ANV allocations. NMXAccel's
 inherited family GPUVA/VRAM callbacks still depend on NVIDIA RM and are not an
 Intel allocation implementation. Hardware resource pools, cross-process shared

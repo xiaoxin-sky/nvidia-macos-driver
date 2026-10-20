@@ -3039,3 +3039,70 @@
          if (n > 0 && ranges[n - 1].address + ranges[n - 1].length == pages[i]) {
              ranges[n - 1].length += PAGE_SIZE;
          } else {
+--- a/bsdcompat/include/nmx_drm_uapi.h
++++ b/bsdcompat/include/nmx_drm_uapi.h
+@@ -23,6 +23,16 @@
+     uint64_t size;      /* the size it was mapped with */
+ };
+ 
++/* Logical DRM identity of this open file. Darwin devfs node minors and its
++ * per-open clone minors are transport IDs, not card/renderD suffixes. Keep
++ * this 8-byte ABI and the command synchronized with libdrm nmx_drm_node.h. */
++#define NMX_DRM_NODE_PRIMARY 0
++#define NMX_DRM_NODE_RENDER 2
++struct nmx_drm_node_info {
++    uint32_t type;      /* NMX_DRM_NODE_PRIMARY or NMX_DRM_NODE_RENDER */
++    uint32_t index;     /* DRM core index used in card%u or renderD%u */
++};
++
+ /*
+  * Reads one sysfs attribute of the node's device, as Linux userland reads /sys/bus/pci/devices/<bdf>/<name>. The port
+  * keeps a driver's attributes in its own tree (not xnu's sysctl), so runtimes that discover a device through sysfs
+@@ -43,4 +53,5 @@
+ #define NMX_DRM_IOCTL_SYSFS_GET _IOWR('N', 0x42, struct nmx_drm_sysfs_get)
+ /* writes 'len' bytes of 'value' to the attribute (root only, and only a writable attribute, as on Linux) */
+ #define NMX_DRM_IOCTL_SYSFS_PUT _IOW('N', 0x43, struct nmx_drm_sysfs_get)
++#define NMX_DRM_IOCTL_NODE_INFO _IOR('N', 0x44, struct nmx_drm_node_info)
+ #endif
+--- a/override/src/nmx_drm_os.c
++++ b/override/src/nmx_drm_os.c
+@@ -289,15 +289,38 @@
+  * The port's libdrm uses it to enumerate GPUs (drmGetDevices2), which is how Mesa's RADV and ANV find their device;
+  * drm-kmod leaves it to FreeBSD's own drm code, so the port answers it at the node. Returns -1 for any other ioctl.
+  */
++/* Resolve from the retained DRM file, never the XNU clone dev_t. Metadata
++ * only: render clients need no primary-node privileges. The shared UAPI is
++ * consumed by libdrm before ANV can create a physical/logical device. */
++static int nmx_drm_node_identity(struct linux_file *filp,
++                               struct nmx_drm_node_info *info)
++{
++    struct drm_file *df = filp != NULL ? filp->private_data : NULL;
++    if (df == NULL || df->minor == NULL || df->minor->index < 0)
++        return ENODEV;
++    memset(info, 0, sizeof(*info));
++    if (df->minor->type == DRM_MINOR_PRIMARY)
++        info->type = NMX_DRM_NODE_PRIMARY;
++    else if (df->minor->type == DRM_MINOR_RENDER)
++        info->type = NMX_DRM_NODE_RENDER;
++    else
++        return ENODEV;
++    info->index = df->minor->index;
++    return 0;
++}
++
+ int nmx_drm_node_ioctl(struct linux_file *filp, unsigned long cmd, void *data)
+ {
+ 	struct drm_file *df;
+ 	struct drm_pciinfo *pi = data;
+ 	struct pci_dev *pdev;
+ 
+-	if (cmd != DRM_IOCTL_GET_PCIINFO && cmd != NMX_DRM_IOCTL_SYSFS_GET && cmd != NMX_DRM_IOCTL_SYSFS_PUT)
++	if (cmd != DRM_IOCTL_GET_PCIINFO && cmd != NMX_DRM_IOCTL_SYSFS_GET &&
++	    cmd != NMX_DRM_IOCTL_SYSFS_PUT && cmd != NMX_DRM_IOCTL_NODE_INFO)
+ 		return -1;
+ 	df = filp != NULL ? filp->private_data : NULL;
++	if (cmd == NMX_DRM_IOCTL_NODE_INFO)
++		return nmx_drm_node_identity(filp, data);
+ 	if (cmd == NMX_DRM_IOCTL_SYSFS_GET || cmd == NMX_DRM_IOCTL_SYSFS_PUT) {
+ 		/* an attribute of the node's device (the PCI function), through its show/store handler */
+ 		struct nmx_drm_sysfs_get *sg = data;

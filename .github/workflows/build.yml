@@ -120,6 +120,10 @@ jobs:
           git -C "$X" apply "$GITHUB_WORKSPACE/experimental/uhd770/patches/xkpi.patch"
           git -C "$S/kpi/drm-kmod" apply "$GITHUB_WORKSPACE/experimental/uhd770/patches/drm-kmod.patch"
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/enable_ccache.py" "$X"
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_drm_node_fixture.py" \
+            "$X" /tmp/nmx-drm-node-test.c
+          cc -std=c11 -Wall -Wextra -Werror /tmp/nmx-drm-node-test.c -o /tmp/nmx-drm-node-test
+          /tmp/nmx-drm-node-test | tee /tmp/nmx-drm-node-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_pci_fixture.py" \
             "$X/xnu/nmx_pci.cpp" \
             "$GITHUB_WORKSPACE/experimental/uhd770/tests/pci_class_fixture.cpp.in" \
@@ -288,6 +292,7 @@ jobs:
           X=$S/xkpi
           mkdir -p "$GITHUB_WORKSPACE/out/logs"
           cp /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log /tmp/genflags.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-drm-node-test.c /tmp/nmx-drm-node-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/amd.flags" "$GITHUB_WORKSPACE/out/logs/amd.flags" 2>/dev/null || true
           for d in logs logs-i915 lklogs; do
             [ -d "$X/$d" ] && cp -R "$X/$d" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
@@ -300,6 +305,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out/logs/diagnostic-source"
           cp "$X/xnu/nmx_kext.cpp" "$X/xnu/nmx_fb.cpp" "$X/override/src/nmx_fb_bridge.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/xnu/nmx_pci.cpp" "$X/bsdcompat/src/nmx_bus.c" "$X/bsdcompat/include/nmx_xnu.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
+          cp "$X/override/src/nmx_drm_os.c" "$X/bsdcompat/include/nmx_drm_uapi.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_ddi.c" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_hotplug_irq.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp /tmp/nmx-pci-class-test.cpp /tmp/nmx-pci-class-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-fb-interrupt-test.log /tmp/nmx-fb-bridge-test.c /tmp/nmx-fb-bridge-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true

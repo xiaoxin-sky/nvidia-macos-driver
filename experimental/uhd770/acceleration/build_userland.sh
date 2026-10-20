@@ -37,6 +37,18 @@ CC="ccache $CC" CXX="ccache $CXX" meson setup "$B/libdrm" "$S/libdrm" --prefix="
   -Dinstall-test-programs=false -Dudev=false
 meson compile -C "$B/libdrm" -j 3
 meson install -C "$B/libdrm"
+# Exercise the actual compiled library with XNU-like node/clone identities.
+# The injected inventory redirects every /dev/dri open to /dev/null.
+xcrun clang -std=c11 -Wall -Wextra -Werror -dynamiclib -DNMX_NODE_SHIM \
+  -I"$S/libdrm" -I"$S/libdrm/include/drm" \
+  "$REPO/experimental/uhd770/acceleration/node-tests/darwin_nodes.c" \
+  -o "$B/nmx-node-fixture.dylib"
+xcrun clang -std=c11 -Wall -Wextra -Werror \
+  -I"$S/libdrm" -I"$S/libdrm/include/drm" \
+  "$REPO/experimental/uhd770/acceleration/node-tests/darwin_nodes.c" \
+  -L"$P/lib" -Wl,-rpath,"$P/lib" -ldrm -o "$B/nmx-node-test"
+DYLD_INSERT_LIBRARIES="$B/nmx-node-fixture.dylib" "$B/nmx-node-test" \
+  | tee "$OUT/logs/nmx-node-test.txt"
 cmake -S "$S/spirv-tools" -B "$B/spirv-tools" "${COMMON[@]}" \
   -DSPIRV-Headers_SOURCE_DIR="$S/spirv-headers" -DSPIRV_SKIP_TESTS=ON \
   -DSPIRV_SKIP_EXECUTABLES=ON -DSPIRV_WERROR=OFF

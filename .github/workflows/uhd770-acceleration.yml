@@ -42,7 +42,7 @@ jobs:
               for path in paths:
                   if path in shared:
                       selected.update(['userland', 'metal'])
-                  elif path.startswith(tuple(root+x for x in ['probe/', 'tests/', 'patches/'])) or path == root+'build_userland.sh':
+                  elif path.startswith(tuple(root+x for x in ['probe/', 'tests/', 'patches/', 'node-tests/'])) or path == root+'build_userland.sh':
                       selected.add('userland')
                   elif path.startswith(root+'compiler-smoke/') or path == root+'build_metal.sh':
                       selected.add('metal')

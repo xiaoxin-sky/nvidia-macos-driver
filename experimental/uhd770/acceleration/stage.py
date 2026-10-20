@@ -82,6 +82,9 @@ def stage(repository, root, cache, group):
             assert patch.is_file(), f"required Darwin ANV repair is missing: {name}"
             subprocess.run(["git", "-C", str(sources / "mesa"), "apply", "--check", str(patch)], check=True)
             subprocess.run(["git", "-C", str(sources / "mesa"), "apply", str(patch)], check=True)
+        patch = package / "patches/libdrm-nmx-node.patch"
+        subprocess.run(["git", "-C", str(sources / "libdrm"), "apply", "--check", str(patch)], check=True)
+        subprocess.run(["git", "-C", str(sources / "libdrm"), "apply", str(patch)], check=True)
     else:
         raw = subprocess.check_output(["git", "-C", str(repository), "archive", pins["frontend_revision"], "kexts/NVRM", "plugin", "translator"])
         with tarfile.open(fileobj=io.BytesIO(raw)) as stream:

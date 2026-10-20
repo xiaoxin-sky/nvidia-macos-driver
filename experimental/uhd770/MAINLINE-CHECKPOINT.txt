@@ -73,3 +73,29 @@ or ask for repeated blind reboots. Same-boot module UUID/service evidence is nee
 to resolve the remaining loading uncertainty. Once attach runs again, the existing
 igtt.pin/lock/iomap and fb.check/commit stages locate the next hardware boundary.
 Real command completion and correct readback remain the first acceleration gate.
+
+3. Compute-path device discovery blocker found after the loading audit
+--------------------------------------------------------------------
+The pinned nmx_devfs.cpp allocates published node minors from 0..255 and gives
+each open a distinct clone minor starting at 256. Neither is the logical DRM
+index in /dev/dri/cardN or renderDN. Historical libdrm-macos.patch recognized
+dynamic majors but still used that XNU minor in drmGetMinorType/drmOpenMinor;
+fd discovery also tried to find a published node with the clone's dev_t.
+
+Consequently enumeration could search renderD1 for the actual renderD128, and
+drmGetDevice2(fd) could reject an already-open device. Intel device initialization
+calls drmGetDevice2 before creating an ANV context. This is a source-level compute
+blocker distinct from r8's missing kernel service; it cannot explain that earlier
+service absence.
+
+The repair adds an 8-byte NMX_DRM_IOCTL_NODE_INFO response (0x40084e44) containing
+the opened DRM file's logical type/index. Libdrm uses real directory basenames
+for published-node enumeration and this ioctl for clone descriptors. It checks
+the opened file's PCI identity against the resolved device to reject replacement
+by another GPU. Kernel and libdrm must be updated together: an older kernel's
+ENOTTY is an explicit failure, never fabricated identity.
+
+Targeted validation covers the actual kernel helper and compiled Darwin libdrm
+with an inert two-GPU devfs inventory, differing published/clone/logical IDs,
+multiple opens, inaccessible primary nodes and removed/replaced/unsupported
+nodes. These are interface tests; they do not execute a GPU or establish readback.
