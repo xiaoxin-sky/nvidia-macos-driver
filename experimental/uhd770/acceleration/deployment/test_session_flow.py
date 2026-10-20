@@ -19,13 +19,13 @@ import prepare_kit
 
 
 DISPATCHER = r'''#!/usr/bin/env python3
-import os, pathlib, plistlib, shutil, sys
+import os, pathlib, plistlib, shutil, subprocess, sys
 root = pathlib.Path(os.environ['SESSION_FIXTURE'])
 name, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
 failure = os.environ.get('SESSION_FAIL', '')
 if name == 'uname': print('Darwin' if args == ['-s'] else 'x86_64')
 elif name == 'sw_vers': print('15.7.9')
-elif name == 'id': print('fixture' if args[0] == '-nu' else '20')
+elif name == 'id': print('fixture' if args[0] in ('-nu', '-un') else '20')
 elif name == 'dscl': print('NFSHomeDirectory: ' + str(root / 'mac/Users/fixture'))
 elif name == 'sysctl':
     boot = os.environ.get('SESSION_BOOT', 'BASE')
@@ -64,6 +64,11 @@ elif name == 'kmutil':
     else: print('com.fixture.other\ncom.nullmoth.NMXGPU\ncom.nullmoth.NMXAccel')
 elif name == 'launchctl':
     if failure == 'bootstrap' and args[0] == 'bootstrap': sys.exit(28)
+    if args[0] == 'bootstrap':
+        installed = root / 'mac/Library/Application Support/UHD770MVP'
+        command = ['/bin/bash', '-p', str(installed / 'incoming/tools/session.sh'), 'boot'] if args[1] == 'system' else \
+                  ['/bin/bash', '-p', str(installed / 'session-tools/session-user.sh')]
+        sys.exit(subprocess.run(command, timeout=60).returncode)
 elif name == 'codesign':
     if failure == 'signature': sys.exit(27)
 elif name in ('sync', 'sleep', 'chown', 'chmod', 'PlistBuddy'): pass
@@ -129,7 +134,8 @@ class SessionFlowTests(unittest.TestCase):
             text = text.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin", f"PATH={mock}:/usr/bin:/bin:/usr/sbin:/sbin")
             text = text.replace('"$EUID"', '"501"' if name == "session-user.sh" else '"0"')
             text = text.replace("/usr/libexec/PlistBuddy", str(mock / "PlistBuddy"))
-            self.assertIsNone(re.search(r"[\"'= ]/(Library|private|System|Volumes|Users)/", text))
+            self.assertIsNone(re.search(r"[\"'= ]/(Library|private|System|Volumes|Users)/",
+                                       text.replace(str(self.root), "$FIXTURE")))
             path.write_text(text, encoding="utf-8")
         (self.kit / "tools/manage.sh").write_text(MANAGER, encoding="utf-8")
         for name in ("Library/Application Support", "Library/Extensions", "Library/LaunchDaemons",

@@ -161,7 +161,7 @@ restore_files() {
 }
 
 prepare() {
-    local args current uid account volume='' cfg candidate n=0 label uuid
+    local args current uid account home volume='' cfg candidate n=0 label uuid
     args=$(sysctl -n kern.bootargs)
     case " $args " in *' -nvoff '*) ;; *) die 'Current boot must contain -nvoff.' ;; esac
     case " $args " in *' nmxintel='*|*' nmxdiagdelay='*) die 'Remove stale test boot arguments before preparing.' ;; esac
@@ -172,6 +172,8 @@ prepare() {
     mkdir -m 700 "$LOCK" || die 'Another preparation or an interrupted lock exists; preserved.'
     LOCK_OWNED=1
     account=$(id -nu "$uid")
+    home=$(dscl . -read "/Users/$account" NFSHomeDirectory | sed 's/^NFSHomeDirectory: //')
+    case "$home" in /Users/*) ;; *) die 'Selected account must have a normal system-disk home.' ;; esac
     [ -f "$KIT/session-target/identity.plist" ] || die 'Use the machine-specific single-session package.'
     # Stage is still the authoritative archive/runtime/KC gate. Its failure is
     # exported by the outer trap; no live file or USB config has changed yet.
@@ -299,6 +301,17 @@ prepare() {
     # Register only the root recovery job now. In this boot it is a no-op;
     # launchd will start both root recovery and the user agent at the next boot.
     launchctl bootstrap system /Library/LaunchDaemons/$LABEL.plist
+    elapsed=0
+    while [ ! -f "$PUBLIC/root-preflight-$current.txt" ] && [ "$elapsed" -lt 20 ]; do sleep 1; elapsed=$((elapsed + 1)); done
+    grep -qx 'root_job_entrypoint=passed' "$PUBLIC/root-preflight-$current.txt" || die 'Root recovery job entry point did not pass its live preflight.'
+    launchctl bootstrap "gui/$uid" /Library/LaunchAgents/$LABEL.plist
+    elapsed=0
+    while [ ! -f "$home/Library/Logs/UHD770MVP/preflight-$current.txt" ] && [ "$elapsed" -lt 20 ]; do sleep 1; elapsed=$((elapsed + 1)); done
+    local user_preflight="$home/Library/Logs/UHD770MVP/preflight-$current.txt"
+    [ -f "$user_preflight" ] && [ ! -L "$user_preflight" ] && [ "$(stat -f '%u' "$user_preflight")" = "$uid" ] || die 'Selected-user job did not produce its preflight marker.'
+    grep -qx "boot=$current" "$user_preflight" && grep -qx 'user_job_entrypoint=passed' "$user_preflight" || die 'Selected-user job preflight failed.'
+    cp "$user_preflight" "$PRIVATE/user-job-preflight.txt"
+    launchctl bootout "gui/$uid/$LABEL"
     restore_optout || die 'Independent opt-out check failed before arming.'
     [ "$(hash "$cfg")" = "$(property safe_hash)" ] || die 'USB changed before arming.'
     [ ! -e "$cfg.uhd770-pending" ] && [ ! -L "$cfg.uhd770-pending" ] || die 'A pending USB config already exists; preserved.'
@@ -319,7 +332,11 @@ boot() {
     safe_directory "$ROOT"; safe_directory "$PRIVATE"; safe_directory "$PUBLIC"
     local current prepare_boot args
     current=$(sysctl -n kern.bootsessionuuid); prepare_boot=$(property preparation_boot)
-    [ "$current" != "$prepare_boot" ] || exit 0
+    if [ "$current" = "$prepare_boot" ]; then
+        printf 'root_job_entrypoint=passed\nboot=%s\n' "$current" > "$PUBLIC/root-preflight-$current.txt"
+        chmod 644 "$PUBLIC/root-preflight-$current.txt"
+        exit 0
+    fi
     # Restore the persistent USB opt-out first, even on an aborted test boot.
     if restore_optout; then
         printf 'next_boot_optout=verified\nboot=%s\n' "$current" > "$PUBLIC/recovery-$current.txt"
