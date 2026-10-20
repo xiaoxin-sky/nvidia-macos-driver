@@ -121,6 +121,11 @@ session_bounded_group() {
     local limit=$1 output=$2 elapsed=0 code pid
     shift 2
     SESSION_GROUP_PID=''
+    case "$limit" in ''|*[!0-9]*) return 64 ;; esac
+    if [ "$limit" -eq 0 ]; then
+        printf 'command_timeout_seconds=0\n' > "$output"
+        return 124
+    fi
     /usr/bin/perl -MPOSIX -e 'my $sid = POSIX::setsid(); die "setsid failed: $!" unless defined($sid) && $sid >= 0; exec @ARGV; die "exec failed: $!";' \
         -- "$@" </dev/null > "$output" 2>&1 &
     SESSION_GROUP_PID=$!; pid=$SESSION_GROUP_PID

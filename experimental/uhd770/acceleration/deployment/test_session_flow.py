@@ -169,6 +169,14 @@ class SessionFlowTests(unittest.TestCase):
                      "diskutil", "plutil", "ditto", "kmutil", "launchctl", "codesign", "sync", "sleep",
                      "chown", "chmod", "PlistBuddy", "sudo", "dmesg"):
             (mock / name).symlink_to(dispatcher)
+        # Pure no-op adapters need no interpreter startup. Retain a short real
+        # polling tick so a bounded read can schedule its sibling mock process;
+        # actual deadline/process-group behavior has separate real-clock tests.
+        for name in ("chown", "chmod", "sync", "PlistBuddy", "sleep"):
+            path = mock / name
+            path.unlink()
+            path.write_text("#!/bin/sh\n" + ("exec /bin/sleep 0.01\n" if name == "sleep" else "exit 0\n"), encoding="utf-8")
+            path.chmod(0o700)
         shutil.copytree(source, self.kit / "tools", ignore=shutil.ignore_patterns("__pycache__"))
         # Only platform adapters differ in these copies. All literal filesystem
         # destinations, including rollback, are verified below to stay here.

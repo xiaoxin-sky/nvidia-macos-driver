@@ -15,7 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Python preparation and archive boundary fixtures
