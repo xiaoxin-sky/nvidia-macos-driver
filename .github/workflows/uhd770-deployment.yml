@@ -87,9 +87,6 @@ jobs:
           /bin/bash experimental/uhd770/acceleration/deployment/capture/test_capture_finish.sh
           /bin/bash experimental/uhd770/acceleration/deployment/probes/test-runner.sh
           /bin/bash experimental/uhd770/acceleration/deployment/test_session.sh
-      - name: Native macOS ACL and symbolic-link preparation regression
-        if: runner.os == 'macOS'
-        run: sudo /bin/bash experimental/uhd770/acceleration/deployment/test_permissions_macos.sh
       - name: Check launchd template without registering it
         run: |
           python3 - <<'PY'
@@ -111,6 +108,28 @@ jobs:
               assert job['ProgramArguments'][:2] == ['/bin/bash', '-p']
           print('Only root recovery/capture template validated; compute requires an explicit manual command.')
           PY
+  native-macos:
+    name: Native macOS filesystem and signing
+    runs-on: macos-15-intel
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Real ACL, symlink and ad-hoc signature regression
+        run: |
+          set +e
+          sudo -n /bin/bash -p experimental/uhd770/acceleration/deployment/test_permissions_macos.sh > "$RUNNER_TEMP/uhd770-native-permissions.log" 2>&1
+          code=$?
+          cat "$RUNNER_TEMP/uhd770-native-permissions.log"
+          if [ "$code" -ne 0 ]; then
+            python3 - <<'PY'
+          import os
+          from pathlib import Path
+          message = (Path(os.environ['RUNNER_TEMP']) / 'uhd770-native-permissions.log').read_text(errors='replace')[-6000:]
+          message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print(f'::error title=Native macOS permissions::{message}')
+          PY
+          fi
+          exit "$code"
   windows-recovery:
     runs-on: windows-latest
     timeout-minutes: 5

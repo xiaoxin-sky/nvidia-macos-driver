@@ -136,8 +136,10 @@ class ArchiveFailedTests(unittest.TestCase):
             path.chmod(0o700)
         source = pathlib.Path(__file__).with_name("Archive-UHD770-Failed.command")
         text = source.read_text(encoding="utf-8")
-        for name in ("Library", "Volumes", "private"):
-            text = text.replace("/" + name, self.posix + "/mac/" + name)
+        # Darwin temporary roots themselves start with /private. Rewrite only
+        # original source tokens once, never rescan a previously inserted root.
+        text = re.sub(r"(?<![A-Za-z0-9_$])/(Library|Volumes|private)(?=/|[ \t'\";]|$)",
+                      lambda match: self.posix + "/mac/" + match[1], text)
         text = text.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin",
                             f"PATH={self.posix}/mock-bin:/usr/bin:/bin:/usr/sbin:/sbin")
         text = re.sub(r"\$EUID\b", "0", text)
