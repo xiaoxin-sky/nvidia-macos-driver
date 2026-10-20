@@ -1,6 +1,12 @@
 name: UHD 770 acceleration components (offline build only)
 on:
   workflow_dispatch:
+    inputs:
+      component:
+        type: choice
+        description: Component to compile without GPU execution
+        default: all
+        options: [all, userland, metal]
   push:
     paths:
       - '.github/workflows/uhd770-acceleration.yml'
@@ -8,11 +14,50 @@ on:
 permissions:
   contents: read
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      components: ${{ steps.select.outputs.components }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: select
+        env:
+          REQUESTED_COMPONENT: ${{ inputs.component }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
+              requested = os.environ['REQUESTED_COMPONENT']
+              selected = ['userland', 'metal'] if requested == 'all' else [requested]
+          else:
+              base = event['before']
+              paths = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines() if base.strip('0') else ['.github/workflows/uhd770-acceleration.yml']
+              root = 'experimental/uhd770/acceleration/'
+              shared = {'.github/workflows/uhd770-acceleration.yml', root+'sources.json', root+'stage.py', root+'relocate.py'}
+              selected = set()
+              for path in paths:
+                  if path in shared:
+                      selected.update(['userland', 'metal'])
+                  elif path.startswith(tuple(root+x for x in ['probe/', 'tests/', 'patches/'])) or path == root+'build_userland.sh':
+                      selected.add('userland')
+                  elif path.startswith(root+'compiler-smoke/') or path == root+'build_metal.sh':
+                      selected.add('metal')
+              selected = sorted(selected)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              stream.write('components='+json.dumps(selected)+'\n')
+          print('Selected build components:', selected)
+          PY
   components:
+    needs: plan
+    if: needs.plan.outputs.components != '[]'
     strategy:
       fail-fast: false
       matrix:
-        component: [userland, metal]
+        component: ${{ fromJSON(needs.plan.outputs.components) }}
     runs-on: macos-15-intel
     timeout-minutes: 120
     steps:
@@ -39,18 +84,21 @@ jobs:
           echo 'CCACHE_COMPILERCHECK=content' >> "$GITHUB_ENV"
           echo 'CCACHE_NODIRECT=true' >> "$GITHUB_ENV"
       - name: Restore compiler objects
-        uses: actions/cache@v4
+        id: objects
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/uhd770-acceleration/ccache
           key: uhd770-accel-objects-${{ matrix.component }}-${{ steps.identity.outputs.fingerprint }}-${{ github.run_id }}
           restore-keys: |
             uhd770-accel-objects-${{ matrix.component }}-${{ steps.identity.outputs.fingerprint }}-
       - name: Restore checksum-verified source archive cache
-        uses: actions/cache@v4
+        id: archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/uhd770-acceleration/archives
           key: uhd770-accel-sources-${{ matrix.component }}-${{ hashFiles('experimental/uhd770/acceleration/sources.json') }}
       - name: Prepare native build tools
+        id: native_tools
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/uhd770-python"
@@ -63,12 +111,19 @@ jobs:
           ccache --set-config=max_size=1G
           ccache --set-config=sloppiness=
           ccache --zero-stats
+          bash experimental/uhd770/tools/check_ccache.sh
           if [[ '${{ matrix.component }}' == metal ]]; then rustc --version; cargo --version; fi
       - name: Stage immutable dependencies and apply Darwin repairs
         run: |
           set -euo pipefail
           python3 experimental/uhd770/acceleration/stage.py \
             --root "$NMX_ACCEL_ROOT" --cache "$NMX_ACCEL_CACHE" --group '${{ matrix.component }}'
+      - name: Save verified pristine source archives
+        if: steps.archives.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/uhd770-acceleration/archives
+          key: ${{ steps.archives.outputs.cache-primary-key }}
       - name: Compile components without installing or loading
         run: |
           set -euo pipefail
@@ -91,6 +146,14 @@ jobs:
             [[ ! -f "$sample" ]] || cp "$sample" out/logs/
           done
           ccache --show-stats > out/logs/ccache.txt 2>/dev/null || true
+      # Compiler objects are content-keyed even when a later configure/link check
+      # fails. Final drivers/bundles never enter this cache.
+      - name: Save compiler objects for the next targeted build
+        if: always() && steps.native_tools.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/uhd770-acceleration/ccache
+          key: ${{ steps.objects.outputs.cache-primary-key }}
       - name: Preserve executable modes and signed bundle links
         if: always()
         run: |

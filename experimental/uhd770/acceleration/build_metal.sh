@@ -83,7 +83,7 @@ Path(sys.argv[1]).write_bytes(plistlib.dumps({
 PY
 codesign --force --sign - "$OUT/Library/GPUBundles/NVMTLDriver.bundle"
 SMOKE=$REPO/experimental/uhd770/acceleration/compiler-smoke
-xcrun --sdk macosx metal -std=metal2.4 -mmacosx-version-min=15.0 -O1 \
+xcrun --sdk macosx metal -std=macos-metal2.4 -mmacosx-version-min=15.0 -O1 \
   -c "$SMOKE/smoke.metal" -o "$ROOT/build/apple.air"
 "$OUT/Library/GPUBundles/nvmtl/air-opt" -S "$ROOT/build/apple.air" -o "$ROOT/build/apple.ll"
 python3 "$SMOKE/translate.py" \

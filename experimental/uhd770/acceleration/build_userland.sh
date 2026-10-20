@@ -10,6 +10,9 @@ P=$ROOT/prefix
 LLVM=${LLVM_PREFIX:?LLVM 18 prefix required}
 mkdir -p "$B" "$P" "$OUT/logs" "$OUT/Library/GPUBundles/nvmtl" "$OUT/probe"
 export MACOSX_DEPLOYMENT_TARGET=15.0
+export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+export CFLAGS="-isysroot $SDKROOT -mmacosx-version-min=15.0"
+export CXXFLAGS="$CFLAGS" LDFLAGS="$CFLAGS"
 export CC="$(xcrun --find clang)" CXX="$(xcrun --find clang++)"
 export PATH="$P/bin:$LLVM/bin:$PATH"
 export PKG_CONFIG_PATH="$P/lib/pkgconfig:$LLVM/lib/pkgconfig"
@@ -24,6 +27,11 @@ COMMON=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON)
 cmake -S "$S/vulkan-headers" -B "$B/vulkan-headers" "${COMMON[@]}"
 cmake --install "$B/vulkan-headers"
+CC="ccache $CC" CXX="ccache $CXX" meson setup "$B/libdrm" "$S/libdrm" --prefix="$P" --libdir=lib \
+  -Dauto_features=disabled -Dbuildtype=release -Dtests=false \
+  -Dinstall-test-programs=false -Dudev=false
+meson compile -C "$B/libdrm" -j 3
+meson install -C "$B/libdrm"
 cmake -S "$S/spirv-tools" -B "$B/spirv-tools" "${COMMON[@]}" \
   -DSPIRV-Headers_SOURCE_DIR="$S/spirv-headers" -DSPIRV_SKIP_TESTS=ON \
   -DSPIRV_SKIP_EXECUTABLES=ON -DSPIRV_WERROR=OFF
@@ -43,11 +51,6 @@ cmake -S "$S/spirv-llvm-translator" -B "$B/spirv-llvm" "${COMMON[@]}" \
   -DLLVM_SPIRV_INCLUDE_TESTS=OFF -DBUILD_SHARED_LIBS=ON -DLLVM_LINK_LLVM_DYLIB=ON
 cmake --build "$B/spirv-llvm" -j 3
 cmake --install "$B/spirv-llvm"
-CC="ccache $CC" CXX="ccache $CXX" meson setup "$B/libdrm" "$S/libdrm" --prefix="$P" --libdir=lib \
-  -Dauto_features=disabled -Dbuildtype=release -Dtests=false \
-  -Dinstall-test-programs=false -Dudev=false
-meson compile -C "$B/libdrm" -j 3
-meson install -C "$B/libdrm"
 CC="ccache $CC" CXX="ccache $CXX" meson setup "$B/mesa" "$S/mesa" --prefix="$P" --libdir=lib \
   -Dauto_features=disabled -Dbuildtype=release -Dvulkan-drivers=intel \
   -Dgallium-drivers= -Dplatforms= -Dopengl=false -Dgles1=disabled -Dgles2=disabled \

@@ -22,7 +22,7 @@ still a separate spirv-val check when that tool has been built.
 2. Real Apple Metal source -> AIR bitcode -> LLVM reader -> translator
 
   xcrun --sdk macosx --find metal
-  xcrun --sdk macosx metal -std=metal2.4 -mmacosx-version-min=15.0 -O1 \
+  xcrun --sdk macosx metal -std=macos-metal2.4 -mmacosx-version-min=15.0 -O1 \
     -c "$SMOKE/smoke.metal" -o "$OUT/logs/compiler-smoke/apple.air"
   "$OUT/Library/GPUBundles/nvmtl/air-opt" -S \
     "$OUT/logs/compiler-smoke/apple.air" \
