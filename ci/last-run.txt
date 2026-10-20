@@ -1,33 +1,11 @@
-run 39353973832 attempt 1
-commit f3a5650a83fc982821be9aef88fc97ca79ab0b70
+run 39358699329 attempt 1
+commit dcf6bef1a7cebd7b5f37f0fb2e487cf320d5681d
 freebsd-src 7668705cb9837d4c3a6db9b3434b3a522220c8ea
 
-===== /tmp/genflags.log
-40 CONFIG defines, 56 include dirs -> amd.flags
-
-===== /tmp/all.log
-sources: 900  compiled: 900  failed: 0
-
-===== /tmp/i915.log
-sources: 274  compiled: 274  failed: 0
-
-===== /tmp/rt.log
-runtime sources: 76  failed: 0
-
-===== /tmp/link.log
-NMXGPU 5e4beba7 13543992 B
-
 ===== /Users/runner/work/nvidia-macos-driver/nvidia-macos-driver/out/logs/ccache-statistics.txt
-Cacheable calls:   1251 / 1251 (100.0%)
-  Hits:            1249 / 1251 (99.84%)
-    Direct:           0 / 1249 ( 0.00%)
-    Preprocessed:  1249 / 1249 (100.0%)
-  Misses:             2 / 1251 ( 0.16%)
 Local storage:
-  Cache size (GB):  0.0 /  0.5 ( 6.41%)
-  Hits:            1249 / 1251 (99.84%)
-  Misses:             2 / 1251 ( 0.16%)
+  Cache size (GB): 0.0 / 0.5 ( 6.41%)
 
 ===== first failing sources
 ===== kext
--rwxr-xr-x  1 runner  staff  13543992 Oct 20 01:36 /Users/runner/work/nvidia-macos-driver/nvidia-macos-driver/out/NMXGPU.kext/Contents/MacOS/NMXGPU
+no NMXGPU binary
