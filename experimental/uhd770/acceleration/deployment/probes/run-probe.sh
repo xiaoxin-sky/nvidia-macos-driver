@@ -179,6 +179,20 @@ else
     command=("$binary" --metallib "$shader" --deadline 45)
     verified=METAL_COMPUTE_READBACK_VERIFIED
 fi
+# The one-session installer signs separate CLI copies; original component bytes
+# remain untouched. Accept only its protected, signature-verified derivation.
+derived="$ROOT/derived-probes/$(basename "$binary")"
+if [ -e "$derived" ]; then
+    [ -d "$ROOT/derived-probes" ] && [ ! -L "$ROOT/derived-probes" ] || fail 'Unsafe derived probe directory.'
+    check_owned "$ROOT/derived-probes"
+    [ -f "$derived" ] && [ ! -L "$derived" ] && [ -x "$derived" ] || fail 'Unsafe derived probe.'
+    check_owned "$derived"
+    codesign --verify --strict "$derived" > "$session/derived-signature.txt" 2>&1 || fail 'Derived signature is invalid.'
+    # Ad-hoc signing changes the Mach-O signature, not its native LC_UUID.
+    [ "$(uhd_macho_uuid "$derived")" = "$(uhd_macho_uuid "$binary")" ] || fail 'Derived probe UUID differs.'
+    shasum -a 256 "$derived" >> "$session/payload-SHA256SUMS"
+    command[0]="$derived"
+fi
 printf '%s\n' "${command[@]}" > "$session/argv.txt"
 printf 'PREPARATION_COMPLETE\n' > "$session/preparation-complete.marker"
 sync

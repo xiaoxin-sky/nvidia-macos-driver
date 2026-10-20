@@ -30,10 +30,13 @@ jobs:
           done
           /bin/bash -p experimental/uhd770/acceleration/deployment/manage.sh --help
           /bin/bash -p experimental/uhd770/acceleration/deployment/preflight.sh --help
+          /bin/bash -p experimental/uhd770/acceleration/deployment/session.sh --help
+          /bin/bash -p experimental/uhd770/acceleration/deployment/Start-UHD770.command --help
       - name: Mock capture and probe supervision (never opens a GPU)
         run: |
           /bin/bash experimental/uhd770/acceleration/deployment/capture/test_capture.sh
           /bin/bash experimental/uhd770/acceleration/deployment/probes/test-runner.sh
+          /bin/bash experimental/uhd770/acceleration/deployment/test_session.sh
       - name: Check launchd template without registering it
         run: |
           python3 - <<'PY'
@@ -46,4 +49,18 @@ jobs:
           assert data['ProgramArguments'] == ['/bin/bash', '/Library/Application Support/UHD770MVP/capture/collector.sh', '--duration', '300']
           assert data['StandardErrorPath'].startswith('/private/var/log/UHD770MVP/')
           print('Launchd template validated only; no registration, driver load or GPU execution.')
+          root = Path('experimental/uhd770/acceleration/deployment')
+          for kind in ['root', 'user']:
+              job = plistlib.loads((root / f'com.uhd770.mvp.session-{kind}.plist').read_bytes())
+              assert job['Label'] == 'com.uhd770.mvp.session'
+              assert job['RunAtLoad'] is True and job['KeepAlive'] is False
+              assert job['ProgramArguments'][:2] == ['/bin/bash', '-p']
+          print('Session job templates validated only; no registration or GPU execution.')
           PY
+  windows-recovery:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Recovery against temporary fake USB inventory only
+        run: python -m unittest discover -s experimental/uhd770/acceleration/deployment -p test_windows_recovery.py -v

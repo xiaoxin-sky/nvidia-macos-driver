@@ -11,6 +11,12 @@ separate, later explicit invocation after Vulkan results and kernel evidence
 have been reviewed. A successful Vulkan test never starts Metal automatically.
 Neither test proves WindowServer rendering or scanout acceleration.
 
+The optional machine-specific single-session package supersedes that manual
+sequence: session-user.sh runs these same guarded entry points in order after
+the root job verifies next-boot recovery and NMXGPU reports attach.complete.
+Only a successful Vulkan invocation proceeds to Metal. Neither runner itself
+chains the next phase. See ../README-session.txt for installation/recovery.
+
 Installer contract
 ------------------
 Install these scripts as root:wheel, executable/readable, without group/other

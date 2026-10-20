@@ -12,6 +12,39 @@ import prepare_kit as kit
 
 
 class PreparationTests(unittest.TestCase):
+    def test_single_session_config_preserves_safe_bytes_and_unrelated_settings(self):
+        guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
+        original = {"NVRAM": {"Add": {guid: {"boot-args": "-v -igfxvesa amfi=0x80 -nvoff"}},
+                              "Delete": {guid: ["boot-args"]}},
+                    "DeviceProperties": {"Add": {"GPU": {"device-id": b"\x80\x46\x00\x00"}}},
+                    "Kernel": {"Add": [{"Enabled": True, "BundlePath": "Lilu.kext"}]}}
+        raw = plistlib.dumps(original, fmt=plistlib.FMT_BINARY)
+        payload = kit.session_payload(raw, "1401")
+        self.assertEqual(payload["session-target/config.safe.plist"], raw)
+        test = plistlib.loads(payload["session-target/config.test.plist"])
+        self.assertEqual(test["DeviceProperties"], original["DeviceProperties"])
+        self.assertEqual(test["Kernel"], original["Kernel"])
+        self.assertEqual(test["NVRAM"]["Delete"], original["NVRAM"]["Delete"])
+        self.assertEqual(test["NVRAM"]["Add"][guid]["boot-args"],
+                         "-v -igfxvesa amfi=0x80 nmxintel=1 nmxdiagdelay=180")
+        identity = json.loads(payload["session-target/identity.json"])
+        self.assertEqual(identity["safe_hash"], kit.sha256(raw))
+        self.assertEqual(plistlib.loads(payload["session-target/identity.plist"]), identity)
+
+    def test_single_session_refuses_missing_recovery_and_competing_kexts(self):
+        guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
+        def configuration(args="-v -nvoff", deletes=None, entries=None):
+            return plistlib.dumps({"NVRAM": {"Add": {guid: {"boot-args": args}},
+                                             "Delete": {guid: deletes if deletes is not None else ["boot-args"]}},
+                                   "Kernel": {"Add": entries or []}})
+        for raw in (configuration("-v"), configuration(deletes=[]),
+                    configuration("-nvoff nmxintel=1"),
+                    configuration(entries=[{"Enabled": True, "BundlePath": "NMXGPU.kext"}])):
+            with self.subTest(raw=raw), self.assertRaises(kit.InvalidKit):
+                kit.session_payload(raw, "1401")
+        with self.assertRaises(kit.InvalidKit):
+            kit.session_payload(configuration(), "../USB")
+
     def test_recovery_copy_preserves_unrelated_settings_and_source(self):
         guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
         original = {"NVRAM": {"Add": {guid: {"boot-args": "-v nmxintel=1 nmxdiagdelay=90 debug=0x100 -nvoff"}},

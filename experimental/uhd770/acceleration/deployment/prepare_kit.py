@@ -173,7 +173,38 @@ def recovery_copy(source):
     return plistlib.dumps(data, sort_keys=False)
 
 
-def prepare(candidate, firmware, output, source, config_backup=None):
+def session_payload(source, volume_label):
+    """Build a one-boot opt-in and independent recovery from an explicit USB.
+
+    The input must already be an opt-out OpenCore config with a boot-args Delete
+    rule. All unrelated settings and raw safe-config bytes are retained. These
+    private machine files must never be committed with the generic tools.
+    """
+    data = plistlib.loads(source)
+    guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
+    args = data["NVRAM"]["Add"][guid]["boot-args"]
+    deletes = data["NVRAM"]["Delete"][guid]
+    require(isinstance(args, str) and isinstance(deletes, list) and
+            "boot-args" in deletes, "session USB requires an existing boot-args refresh rule")
+    words = args.split()
+    require("-nvoff" in words and not any(w.startswith(("nmxintel=", "nmxdiagdelay=")) for w in words),
+            "session USB must already be in clean -nvoff recovery mode")
+    for entry in data.get("Kernel", {}).get("Add", []):
+        require(not (entry.get("Enabled") and
+                     entry.get("BundlePath", "").split("/")[0] in {"NMXGPU.kext", "NMXAccel.kext"}),
+                "session cannot replace a competing EFI-injected NMX bundle")
+    require(re.fullmatch(r"[A-Za-z0-9_-]{1,32}", volume_label) is not None, "invalid USB label")
+    data["NVRAM"]["Add"][guid]["boot-args"] = " ".join(
+        [w for w in words if w != "-nvoff"] + ["nmxintel=1", "nmxdiagdelay=180"])
+    test = plistlib.dumps(data, sort_keys=False)
+    identity = {"safe_hash": sha256(source), "test_hash": sha256(test), "volume_label": volume_label}
+    return {"session-target/config.safe.plist": source,
+            "session-target/config.test.plist": test,
+            "session-target/identity.plist": plistlib.dumps(identity),
+            "session-target/identity.json": (json.dumps(identity, indent=2) + "\n").encode()}
+
+
+def prepare(candidate, firmware, output, source, config_backup=None, session_config=None, volume_label="1401"):
     """Validate all inputs, then write a fresh offline preparation directory.
 
     Existing output is never overwritten. Component archives are copied whole;
@@ -194,7 +225,7 @@ def prepare(candidate, firmware, output, source, config_backup=None):
         relative = path.relative_to(source)
         if not path.is_file() or path.is_symlink() or "__pycache__" in relative.parts:
             continue
-        if path.suffix in {".sh", ".plist", ".txt"}:
+        if path.suffix in {".sh", ".plist", ".txt", ".ps1", ".command"}:
             payload[f"tools/{relative.as_posix()}"] = path.read_bytes()
     for needed in ["tools/manage.sh", "tools/preflight.sh", "tools/README.txt",
                    "tools/capture/collector.sh", "tools/capture/com.uhd770.mvp.capture.plist",
@@ -214,6 +245,14 @@ def prepare(candidate, firmware, output, source, config_backup=None):
         plan["reference_efi"] = {"source_sha256": sha256(original), "installed": False,
                                  "current_boot_efi_verified": False,
                                  "note": "Saved reference only. Compare with the actual booting EFI before any later edit."}
+    if session_config:
+        payload.update(session_payload(session_config.read_bytes(), volume_label))
+        for name in ("Start-UHD770.command", "Restore-UHD770.ps1", "README-session.txt"):
+            payload[name] = (source / name).read_bytes()
+        plan.update({"classification": "opt-in-single-session-candidate",
+                     "driver_installation_enabled": True,
+                     "next_gate": "One automated target preparation; opt-in only after all local gates pass.",
+                     "runtime_verified": False})
     payload["PLAN.json"] = (json.dumps(plan, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     payload["README.txt"] = (source / "README.txt").read_bytes()
     payload["SHA256SUMS"] = "".join(f"{sha256(data)}  {name}\n" for name, data in sorted(payload.items())).encode("utf-8")
@@ -232,10 +271,13 @@ if __name__ == "__main__":
     parser.add_argument("--firmware", required=True, type=pathlib.Path)
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument("--config-backup", type=pathlib.Path)
+    parser.add_argument("--session-config", type=pathlib.Path)
+    parser.add_argument("--usb-label", default="1401")
     arguments = parser.parse_args()
     try:
         prepare(arguments.candidate.resolve(), arguments.firmware.resolve(), arguments.output.resolve(),
-                pathlib.Path(__file__).resolve().parent, arguments.config_backup)
+                pathlib.Path(__file__).resolve().parent, arguments.config_backup,
+                arguments.session_config, arguments.usb_label)
     except (InvalidKit, OSError, ValueError, KeyError, plistlib.InvalidFileException, tarfile.TarError) as error:
         parser.exit(1, f"preparation refused: {error}\n")
     print(f"Prepared {arguments.output}; no driver installed, hardware_ready=false")

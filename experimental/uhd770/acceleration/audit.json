@@ -80,9 +80,9 @@
     "Actual Apple AIR bitcode reader without target-machine code generation"
   ],
   "pending_before_hardware": [
-    "Run the read-only target preflight without enabling the driver",
-    "Validate private staging against actual target KC/security settings and one normal recorder session",
-    "Implement matched transactional live installation and independently verify the actual recovery EFI before opt-in"
+    "Read-only target preflight received: macOS 15.7.9/24G830, 8086:4680, -nvoff and generic framebuffer; old PCH binary remains installed and parked",
+    "Run the new single-session preparation: actual target KC/security, exact recovery USB and complete normal-desktop recorder gates run automatically before opt-in",
+    "Native installation, next-boot opt-out restoration, automatic application diagnostics and recovery remain unverified on this machine"
   ],
   "runtime_unverified": [
     "Basic visible output and real device DMA/IOMMU/IRQ behavior",
@@ -110,7 +110,7 @@
     "result": "success on ubuntu-latest and macos-15-intel",
     "checks": "Seven assembler and six preparation Python fixtures, system Bash syntax/help, mocked persistent-capture/probe lifecycle/timeout/UUID fixtures and launchd plist structure. No job registered, driver installed/loaded or GPU accessed.",
     "implementation": "Pinned minimal firmware payload+license, read-only target inventory, root-owned private staging and isolated target KC preflight, bounded boot recorder, explicit separate compute runners.",
-    "limits": "The production target preflight, actual launchd recorder and persistence after a black screen/reboot have not run on this hardware. Transactional live driver installation and active recovery-EFI verification remain pending.",
+    "limits": "Read-only target preflight completed. The new opt-in session installer journals whitelisted live files/KC, resolves a hash-matched USB, restores its next-boot opt-out and chains guarded probes only after preceding success. Its production installation, launchd and recovery behavior still require target validation; fixtures do not establish that behavior.",
     "hardware_ready": false
   }
 }
