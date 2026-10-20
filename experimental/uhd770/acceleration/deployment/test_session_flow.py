@@ -103,7 +103,9 @@ elif name == 'sudo':
               (args[3:6] == ['/bin/bash', '-p', selected] and args[6:] in (['preflight'], ['manual']))
     if not allowed: sys.exit(95)
     with (root / 'sudo-calls').open('a') as stream: stream.write(' '.join(args) + '\n')
-    sys.exit(subprocess.run(args[3:], timeout=5).returncode)
+    # This is the fixture's process-launch budget, not a GPU/API deadline.
+    # Native macOS may legitimately take longer than Linux for many short mocks.
+    sys.exit(subprocess.run(args[3:], timeout=30).returncode)
 elif name == 'dmesg': print('fixture final kernel snapshot')
 elif name == 'codesign':
     if failure == 'signature': sys.exit(27)

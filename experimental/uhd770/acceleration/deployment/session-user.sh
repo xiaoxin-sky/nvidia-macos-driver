@@ -63,9 +63,9 @@ fi
 SESSION="$OUTPUT/manual-$BOOT"
 mkdir -m 700 "$SESSION" || refuse "A manual session already exists for this boot. Preserve its logs: $SESSION"
 . "$ROOT/session-tools/session-lib.sh"
-exec 3>&1 4>&2
-exec > >(tee "$SESSION/coordinator.txt" >&3) 2>&1
-LOGGER=$!
+# Root already streams this command to its protected transcript and terminal;
+# each compute phase also writes its own user-owned log. A second asynchronous
+# tee would add an unnecessary EOF/wait dependency on older system Bash.
 printf 'boot=%s\nmode=manual\ngpu_started=false\n' "$BOOT" > "$SESSION/session.txt"
 finish() {
     local code=$?
@@ -77,11 +77,8 @@ finish() {
         printf '\nSTOPPED: manual test exited with status %s. This is not a GPU success result.\n' "$code"
     fi
     printf 'User evidence: %s\n' "$SESSION"
-    # Close the streaming pipe and wait for tee before publishing completion.
-    # A blocked logger leaves no completed terminal marker; a failed logger
-    # cannot convert a successful probe return into a fully recorded session.
-    exec 1>&3 2>&4
-    wait "$LOGGER" || { [ "$code" -ne 0 ] || code=74; }
+    # Foreground phase pipelines have already exited. Root waits for this
+    # process and closes capture before exporting the authoritative transcript.
     printf 'coordinator_exit=%s\n' "$code" >> "$SESSION/session.txt"
     session_write_terminal "$SESSION" "$BOOT" "$EUID" "$code" || { [ "$code" -ne 0 ] || code=74; }
     exit "$code"
