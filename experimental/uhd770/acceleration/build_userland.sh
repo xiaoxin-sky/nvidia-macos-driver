@@ -21,6 +21,11 @@ xcrun clang -std=c11 -Wall -Wextra -Werror -I"$S/mesa/src/intel/vulkan" \
   "$REPO/experimental/uhd770/acceleration/tests/nmx-mmap-fixture.c" \
   -o "$ROOT/build/nmx-mmap-test"
 "$ROOT/build/nmx-mmap-test" | tee "$OUT/logs/nmx-mmap-test.txt"
+for name in clock_fixture native_clock_smoke; do
+  xcrun clang -std=c11 -Wall -Wextra -Werror -I"$S/mesa/src" \
+    "$REPO/experimental/uhd770/acceleration/clock-tests/$name.c" -o "$ROOT/build/$name"
+  "$ROOT/build/$name" | tee "$OUT/logs/$name.txt"
+done
 COMMON=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
   -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DCMAKE_INSTALL_PREFIX="$P"
   -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache

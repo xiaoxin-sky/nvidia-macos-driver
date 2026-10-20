@@ -1,0 +1,213 @@
+diff --git a/src/util/u_nmx_sync_clock.h b/src/util/u_nmx_sync_clock.h
+new file mode 100644
+--- /dev/null
++++ b/src/util/u_nmx_sync_clock.h
+@@ -0,0 +1,68 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * NMX's Darwin DRM ioctls interpret absolute wait deadlines in mach uptime
++ * nanoseconds. Mesa's public/runtime deadlines remain CLOCK_MONOTONIC, as do
++ * its condition variables. Translate only at the explicitly selected NMX
++ * sync-provider boundary; never change the global userspace clock epoch.
++ */
++#ifndef U_NMX_SYNC_CLOCK_H
++#define U_NMX_SYNC_CLOCK_H
++
++#include <errno.h>
++#include <stdint.h>
++#include <time.h>
++
++static inline int
++util_nmx_timespec_ns(const struct timespec *time, int64_t *nanoseconds)
++{
++   const int64_t scale = INT64_C(1000000000);
++   if (time->tv_sec < 0 || time->tv_nsec < 0 || time->tv_nsec >= scale ||
++       (uint64_t)time->tv_sec > (uint64_t)INT64_MAX / (uint64_t)scale ||
++       ((uint64_t)time->tv_sec == (uint64_t)INT64_MAX / (uint64_t)scale &&
++        time->tv_nsec > INT64_MAX % scale)) {
++      errno = EOVERFLOW;
++      return -1;
++   }
++   *nanoseconds = (int64_t)time->tv_sec * scale + time->tv_nsec;
++   return 0;
++}
++
++/* Preserve the remaining duration, polling and the infinite-timeout sentinel.
++ * Sampling uptime after monotonic can add only the local sampling interval;
++ * it cannot make a finite wait inherit a historical wall/uptime epoch offset.
++ * Clock failures are returned, never converted into an infinite wait.
++ */
++static inline int
++util_nmx_sync_abs_timeout(int64_t monotonic_deadline, int64_t *uptime_deadline)
++{
++   if (monotonic_deadline <= 0 || monotonic_deadline == INT64_MAX) {
++      *uptime_deadline = monotonic_deadline <= 0 ? 0 : INT64_MAX;
++      return 0;
++   }
++
++   struct timespec monotonic, uptime;
++   if (clock_gettime(CLOCK_MONOTONIC, &monotonic) != 0 ||
++       clock_gettime(CLOCK_UPTIME_RAW, &uptime) != 0)
++      return -1;
++
++   int64_t monotonic_now, uptime_now;
++   if (util_nmx_timespec_ns(&monotonic, &monotonic_now) != 0 ||
++       util_nmx_timespec_ns(&uptime, &uptime_now) != 0)
++      return -1;
++
++   if (monotonic_deadline <= monotonic_now) {
++      *uptime_deadline = 0;
++      return 0;
++   }
++
++   const int64_t remaining = monotonic_deadline - monotonic_now;
++   if (remaining > INT64_MAX - uptime_now) {
++      errno = EOVERFLOW;
++      return -1;
++   }
++   *uptime_deadline = uptime_now + remaining;
++   return 0;
++}
++
++#endif
+diff --git a/src/util/u_sync_provider.c b/src/util/u_sync_provider.c
+--- a/src/util/u_sync_provider.c
++++ b/src/util/u_sync_provider.c
+@@ -6,10 +6,17 @@
+ #include "util/u_memory.h"
+ #include "util/u_sync_provider.h"
+ #include <xf86drm.h>
++#ifdef __APPLE__
++#include <stdbool.h>
++#include "util/u_nmx_sync_clock.h"
++#endif
+ 
+ struct util_sync_provider_drm {
+    struct util_sync_provider base;
+    int drm_fd;
++#ifdef __APPLE__
++   bool nmx_clock;
++#endif
+ };
+ 
+ static int
+@@ -59,6 +66,11 @@
+ drm_syncobj_wait(struct util_sync_provider *p, uint32_t *handles, unsigned num_handles,
+                  int64_t timeout_nsec, unsigned flags, uint32_t *first_signaled)
+ {
++#ifdef __APPLE__
++   struct util_sync_provider_drm *d = (struct util_sync_provider_drm *)p;
++   if (d->nmx_clock && util_nmx_sync_abs_timeout(timeout_nsec, &timeout_nsec) != 0)
++      return -errno;
++#endif
+    return drmSyncobjWait(drm_fd(p), handles, num_handles, timeout_nsec, flags, first_signaled);
+ }
+ 
+@@ -86,6 +98,11 @@
+                           unsigned num_handles, int64_t timeout_nsec, unsigned flags,
+                           uint32_t *first_signaled)
+ {
++#ifdef __APPLE__
++   struct util_sync_provider_drm *d = (struct util_sync_provider_drm *)p;
++   if (d->nmx_clock && util_nmx_sync_abs_timeout(timeout_nsec, &timeout_nsec) != 0)
++      return -errno;
++#endif
+    return drmSyncobjTimelineWait(drm_fd(p), handles, points, num_handles, timeout_nsec, flags, first_signaled);
+ }
+ 
+@@ -112,6 +129,10 @@
+ static struct util_sync_provider *
+ drm_sync_provider_clone(struct util_sync_provider *p)
+ {
++#ifdef __APPLE__
++   if (((struct util_sync_provider_drm *)p)->nmx_clock)
++      return util_sync_provider_nmx(drm_fd(p));
++#endif
+    return util_sync_provider_drm(drm_fd(p));
+ }
+ 
+@@ -120,6 +141,8 @@
+ util_sync_provider_drm(int drm_fd)
+ {
+    struct util_sync_provider_drm *d = CALLOC_STRUCT(util_sync_provider_drm);
++   if (d == NULL)
++      return NULL;
+ 
+    d->drm_fd = drm_fd;
+    d->base = (struct util_sync_provider) {
+@@ -147,3 +170,14 @@
+ 
+    return &d->base;
+ }
++
++#ifdef __APPLE__
++struct util_sync_provider *
++util_sync_provider_nmx(int drm_fd)
++{
++   struct util_sync_provider *provider = util_sync_provider_drm(drm_fd);
++   if (provider)
++      ((struct util_sync_provider_drm *)provider)->nmx_clock = true;
++   return provider;
++}
++#endif
+diff --git a/src/util/u_sync_provider.h b/src/util/u_sync_provider.h
+--- a/src/util/u_sync_provider.h
++++ b/src/util/u_sync_provider.h
+@@ -39,6 +39,12 @@
+ 
+ #if HAVE_LIBDRM
+ struct util_sync_provider * util_sync_provider_drm(int drm_fd);
++#ifdef __APPLE__
++/* Native NMX DRM uses mach uptime for absolute waits; opt in only for that
++ * transport. Other providers and Mesa's global monotonic epoch are unchanged.
++ */
++struct util_sync_provider * util_sync_provider_nmx(int drm_fd);
++#endif
+ #else
+ static inline struct util_sync_provider *
+ util_sync_provider_drm(int drm_fd)
+diff --git a/src/intel/vulkan/anv_physical_device.c b/src/intel/vulkan/anv_physical_device.c
+--- a/src/intel/vulkan/anv_physical_device.c
++++ b/src/intel/vulkan/anv_physical_device.c
+@@ -3170,6 +3170,17 @@
+       struct util_sync_provider *sync = intel_virtio_sync_provider(fd);
+       device->sync_syncobj_type = vk_drm_syncobj_get_type_from_provider(sync);
+    } else {
++#ifdef __APPLE__
++      if (device->info.kmd_type == INTEL_KMD_TYPE_I915) {
++         struct util_sync_provider *sync = util_sync_provider_nmx(fd);
++         if (sync == NULL) {
++            result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
++            goto fail_drirc;
++         }
++         device->sync_syncobj_type = vk_drm_syncobj_get_type_from_provider(sync);
++         sync->finalize(sync);
++      } else
++#endif
+       device->sync_syncobj_type = vk_drm_syncobj_get_type(fd);
+    }
+ 
+diff --git a/src/intel/vulkan/anv_device.c b/src/intel/vulkan/anv_device.c
+--- a/src/intel/vulkan/anv_device.c
++++ b/src/intel/vulkan/anv_device.c
+@@ -956,8 +956,18 @@
+ 
+    if (physical_device->info.is_virtio)
+       device->vk.sync = intel_virtio_sync_provider(device->fd);
+-   else
++   else {
++#ifdef __APPLE__
++      if (device->info->kmd_type == INTEL_KMD_TYPE_I915)
++         device->vk.sync = util_sync_provider_nmx(device->fd);
++      else
++#endif
+       vk_device_set_drm_fd(&device->vk, device->fd);
++   }
++   if (device->vk.sync == NULL) {
++      result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
++      goto fail_fd;
++   }
+ 
+    uint32_t num_queues = 0;
+    for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++)

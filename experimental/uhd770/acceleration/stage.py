@@ -77,10 +77,11 @@ def stage(repository, root, cache, group):
             patch.write_bytes(git_bytes(repository, pins["historical_revision"], "gpu-port/patches/" + name + "-macos.patch"))
             subprocess.run(["git", "-C", str(sources / name), "apply", "--check", str(patch)], check=True)
             subprocess.run(["git", "-C", str(sources / name), "apply", str(patch)], check=True)
-        patch = package / "patches/mesa-anv-nmx.patch"
-        assert patch.is_file(), "required Darwin ANV mapping repair is missing"
-        subprocess.run(["git", "-C", str(sources / "mesa"), "apply", "--check", str(patch)], check=True)
-        subprocess.run(["git", "-C", str(sources / "mesa"), "apply", str(patch)], check=True)
+        for name in ("mesa-anv-nmx.patch", "mesa-nmx-clock.patch"):
+            patch = package / "patches" / name
+            assert patch.is_file(), f"required Darwin ANV repair is missing: {name}"
+            subprocess.run(["git", "-C", str(sources / "mesa"), "apply", "--check", str(patch)], check=True)
+            subprocess.run(["git", "-C", str(sources / "mesa"), "apply", str(patch)], check=True)
     else:
         raw = subprocess.check_output(["git", "-C", str(repository), "archive", pins["frontend_revision"], "kexts/NVRM", "plugin", "translator"])
         with tarfile.open(fileobj=io.BytesIO(raw)) as stream:

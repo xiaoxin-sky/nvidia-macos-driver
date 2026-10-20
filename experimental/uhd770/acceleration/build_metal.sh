@@ -39,7 +39,7 @@ INCLUDES=("$N" "$A" "$A/iofam" "$A/re" "$G/src/common/sdk/nvidia/inc"
   "$G/src/common/inc/displayport" "$G/src/common/nvlink/inband/interface")
 ARGS=()
 for directory in "${INCLUDES[@]}"; do ARGS+=(-I"$directory"); done
-xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -mkernel \
+ccache "$(xcrun --find clang++)" -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -mkernel \
   -nostdinc -I"$K" "${ARGS[@]}" -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE \
   -DAPPLE -DNeXT -DNMX_ACCEL \
   -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -O2 \
@@ -57,11 +57,14 @@ python3 "$REPO/experimental/uhd770/acceleration/compiler-smoke/translate.py" \
   --input "$REPO/experimental/uhd770/acceleration/compiler-smoke/text-air.ll" \
   --output "$ROOT/build/text-air.spv" --kind text-air \
   2>&1 | tee "$OUT/logs/translator-smoke.txt"
-xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundle -fobjc-arc -O1 \
+ccache "$(xcrun --find clang)" -arch x86_64 -isysroot "$SDK" \
+  -mmacosx-version-min=15.0 -fobjc-arc -fPIC -O1 \
   -DNVMTL_RELEASE=1 -Wno-protocol -Wno-incomplete-implementation \
   -Werror=unguarded-availability-new -I"$S/vulkan-headers/include" \
-  -o "$ROOT/build/NVMTLDriver" "$S/plugin/NVMTLDevice.m" \
-  -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation
+  -c "$S/plugin/NVMTLDevice.m" -o "$ROOT/build/NVMTLDevice.o"
+xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundle \
+  "$ROOT/build/NVMTLDevice.o" -o "$ROOT/build/NVMTLDriver" \
+  -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation -lobjc
 xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -std=c11 -Wall -Wextra -Werror \
   -I"$LLVM_PREFIX/include" "$REPO/experimental/uhd770/acceleration/compiler-smoke/air_reader.c" \
   "$LLVM_PREFIX/lib/libLLVM.dylib" -Wl,-headerpad_max_install_names -o "$ROOT/build/air-opt"
