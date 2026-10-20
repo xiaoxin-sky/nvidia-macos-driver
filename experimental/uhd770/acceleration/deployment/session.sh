@@ -558,7 +558,29 @@ prepare() {
     printf 'prepared_payloads=passed\n' >> "$PRIVATE/prepared-check.txt"
     printf 'installing\n' > "$PUBLIC/state.txt"
     while IFS='|' read -r key target; do
-        session_replace "$JOURNAL" "$key" "$target" "$(prepared_path "$key")"
+        prepared=$(prepared_path "$key")
+        if [ "$key" = auxkc ]; then
+            # The private-repository KC proves linkage only. Its bundle paths
+            # name staging copies, so it must not become the boot collection.
+            # Match the previously working installer: build from final kext
+            # locations after their journaled replacement, preserving the old
+            # live KC until this output and its embedded paths both pass.
+            prepared="$work/auxkc-installed"
+            session_bounded 300 "$PRIVATE/installed-kc-build.txt" kmutil create -n aux --volume-root / "${ka[@]}" \
+                -B /System/Library/KernelCollections/BootKernelExtensions.kc --repository /Library/Extensions \
+                -A "$prepared" -z || die 'Installed-repository KC build failed; restoring original files.'
+            session_bounded 30 "$PRIVATE/installed-kc-inspect.txt" kmutil inspect -a x86_64 -A "$prepared" \
+                || die 'Cannot inspect the final KC; restoring original files.'
+            for candidate in /Library/Extensions/*.kext; do
+                [ -d "$candidate" ] || continue
+                label=$(plutil -extract CFBundleIdentifier raw -o - "$candidate/Contents/Info.plist")
+                awk -F '\t' -v id="$label" -v path="$candidate" \
+                    '$1 == id && $3 == path { found=1 } END { exit !found }' "$PRIVATE/installed-kc-inspect.txt" \
+                    || die "Final KC does not name the installed bundle $candidate; restoring original files."
+            done
+            session_tree_permissions "$prepared" readable || die 'Cannot normalize final KC; restoring original files.'
+        fi
+        session_replace "$JOURNAL" "$key" "$target" "$prepared"
     done < <(targets)
     check_runtime /Library/GPUBundles "$PRIVATE/installed-runtime" || die 'Installed runtime links/signatures failed; rollback required.'
     # Only recovery/logging starts automatically. No user LaunchAgent is
@@ -646,6 +668,10 @@ run_manual_test() {
     mkdir -m 700 "$PRIVATE/manual-$current" || die 'A manual test was already started in this boot; preserved.'
     MANUAL_ACTIVE=1
     printf 'manual_boot=%s\ncompute_trigger=explicit_command\n' "$current" > "$PRIVATE/manual-current.txt"
+    # An empty IORegistry service is not proof that its kext was never loaded.
+    # Keep the actual loaded UUIDs from this test boot, including query failures;
+    # a later -nvoff recovery boot cannot provide this missing evidence.
+    session_bounded 10 "$PRIVATE/manual-loaded-before-$current.txt" kmutil showloaded || :
     printf '\nManual test requested. Verifying a fresh persistent recorder before compute...\n'
     # A person may start long after the boot recorder has finished. Record the
     # old directory names so a new capture is required, never stale evidence.
@@ -680,6 +706,7 @@ run_manual_test() {
     session_bounded_group 600 "$PRIVATE/manual-coordinator-$current.txt" \
         sudo -n -u "#$uid" /bin/bash -p "$ROOT/session-tools/session-user.sh" manual || code=$?
     kill -TERM "$FOLLOWER" 2>/dev/null || :; FOLLOWER=''
+    session_bounded 10 "$PRIVATE/manual-loaded-after-$current.txt" kmutil showloaded || :
     if [ "$code" -eq 124 ]; then
         printf 'boot=%s\ntrigger=manual-timeout\npartial=true\n' "$current" > "$PUBLIC/deadline-$current.txt"
         chmod 644 "$PUBLIC/deadline-$current.txt"

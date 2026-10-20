@@ -60,6 +60,7 @@ jobs:
                   'test_session_flow.SessionFlowTests.test_native_group_writable_var_run_is_not_a_preparation_lock_parent',
                   'test_session_flow.SessionFlowTests.test_export_preserves_early_root_bootstrap_without_prepared_plan',
                   'test_session_flow.SessionFlowTests.test_all_prepared_permissions_precede_first_live_replacement',
+                  'test_session_flow.SessionFlowTests.test_final_kc_uses_installed_paths_after_kext_replacement',
                   'test_session_flow.SessionFlowTests.test_late_permission_failure_occurs_before_any_live_replacement',
                   'test_session_flow.SessionFlowTests.test_refused_existing_stage_cannot_roll_back_an_older_plan',
                   'test_session_flow.SessionFlowTests.test_prepare_and_next_boot_restore_use_actual_flow',

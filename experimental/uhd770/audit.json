@@ -43,7 +43,7 @@
     "The GGTT mapping candidate intentionally holds an awake reference; sleep/wake is not established."
   ],
   "acceleration_gaps": [
-    "A matched offline candidate now contains NMXGPU, NMXAccel, real ANV/libdrm/loader, Metal frontend/translator and Vulkan/Metal readback probes. It has no installer or activation and hardware_ready remains false.",
+    "A matched candidate contains NMXGPU, NMXAccel, real ANV/libdrm/loader, Metal frontend/translator and Vulkan/Metal probes. Installation and recovery exist; r8 prepared but captured no NMXGPU service and ran no compute. See MAINLINE-CHECKPOINT.txt for the binary and deployment audit.",
     "NMX ioctl mapping and synchronization boundaries now have implementation and host/native clock tests. Real DMA/IOMMU behavior, GPU command completion/cache visibility and correct readback have no success evidence on this UHD 770.",
     "The ordinary Metal buffer/texture path uses ANV allocations, but NMXAccel inherited family GPUVA/VRAM callbacks still require NVIDIA RM and are not implemented for Intel. Hardware pools and family-managed shared presentation remain out of scope.",
     "Apple private MTLIOAccelDevice initialization may invoke unsupported family callbacks; successful source compilation cannot establish that the ordinary-buffer path avoids them.",
@@ -82,7 +82,7 @@
   "validation_order": [
     "Pinned input/patch checks and targeted host/native ABI fixtures (passed)",
     "All kernel and matched userland/Metal components compile; independent artifact digest verification and offline kit assembly (passed)",
-    "Prepare matched installation/recovery and automatic-log collection before activation (pending)",
+    "Matched installation/recovery and automatic logs implemented; r8 preparation passed, but actual module loading/attachment needs same-boot verification after the final-KC path correction.",
     "Bounded instrumented basic-display and real ANV submission/readback checks on 8086:4680 (not performed)",
     "Separate private Metal device initialization and changing-input compute/readback checks (not performed)",
     "Implement and validate Intel family resource/presentation contracts before WindowServer admission (outside this first compute MVP)"
@@ -122,5 +122,6 @@
       "Intel WindowServer composition/admission",
       "Hardware VBL delivery, full sleep/wake, multiple outputs and video codecs"
     ]
-  }
+  },
+  "latest_mainline_audit": "MAINLINE-CHECKPOINT.txt"
 }

@@ -1,0 +1,75 @@
+UHD 770 mainline checkpoint, 2026-10-20
+=====================================
+
+Objective: first real GPU submission and correct readback on 8086:4680, then
+application Metal. Installer success is not this milestone. Intel WindowServer
+resource/presentation support remains a separate implementation gap.
+
+1. The October 19 scanout mapping failure
+---------------------------------------
+Hardware baseline: Actions 39240931203, source ab811169fe1e13f72458643bbba53d5b8f5bfb99.
+NMXGPU executable SHA256:
+22cac749172c8376d624e1e9f2a7f6b3780881177ab2daef0a73d31956bda880
+Mach-O UUID: C9897B0E-D3A1-3D34-9C1E-17EE1E094094.
+
+The real run passed PCH/HPD discovery, GEM/display probe and framebuffer allocation,
+then reported fb.vmap.after ret=102. The generic drm_gem_vmap path requires a GEM
+object vmap callback; the pinned i915 object table has none. This is distinct from
+the earlier DP tunnel initialization -102 and the optional OpRegion result.
+
+r8 contains the kernel from Actions 39362467512 at ca325c3, not a later script-only
+commit. The unsigned artifact executable SHA256 is:
+d0df040440454ac5b87de467852168dbdf0f375cb1011a314addba9273d547cb
+Mach-O UUID: B9557074-096A-3194-990A-C9FF0F7B15CD.
+The installation derives an ad-hoc signed copy; its hash need not equal this
+unsigned artifact hash. r4 through r8 used the same kernel artifact.
+
+Direct x86_64 disassembly of that artifact confirms:
+- nmx_fb_open contains the i915-name conditional and a direct call at 0x879657
+  to nmx_i915_scanout_map (0x845340); the generic fallback remains for other drivers.
+- nmx_i915_scanout_map calls nmx_intel_fb_pin_mappable and i915_vma_pin_iomap.
+- nmx_intel_fb_pin_mappable passes force_mappable=true into nmx_fb_pin_impl.
+- The old executable has none of the added scanout-map/pin-mappable definitions.
+- Both bundles have identical Info.plist contents, including Intel PCI matching
+  and kernel dependencies. The source probe/opt-in policy is unchanged.
+
+Conclusion: the replacement for the old missing-vmap path is present and wired
+into the shipped binary. This is not evidence that GGTT pinning/mapping, modeset,
+visible output or GPU readback passed on hardware. Other unsupported paths can
+still return 102; no claim is made that every occurrence of that errno is fixed.
+
+2. Why r8 did not reproduce the earlier service
+---------------------------------------------
+The r8 preparation completed. Its test boot had nmxintel=1 nmxdiagdelay=180 and
+no -nvoff, but no NMXGPU/NMXAccel IORegistry service was captured; no compute probe
+ran. That test omitted kmutil showloaded. A later -nvoff recovery boot's empty
+module list cannot establish what loaded during the actual test boot.
+
+One concrete deployment difference is the final collection's bundle identity:
+- Working old installer: copy kext into /Library/Extensions, then build AuxKC
+  from that live repository.
+- r8: build against session-private/repository, then publish that temporary KC.
+  Its real kmutil inspect output names the private copies for NMXGPU, NMXAccel
+  and the copied HighPoint bundles. Verifying bundle IDs alone missed this.
+
+The deployment change now retains that private KC only as a linkage preflight.
+After journaled installation of the final kexts, it rebuilds to a temporary
+output using /Library/Extensions, checks every installed top-level bundle ID AND
+path, and only then atomically publishes the final AuxKC. The old collection
+remains in place until verification; any failure restores journaled files before
+arming the test. Unrelated installed extensions remain included.
+
+This removes the staging-path difference; it is not proof of r8's sole root cause.
+Boot collection selection, actual module loading and probe/start rejection cannot
+be distinguished conclusively from the existing r8 report. The manual test now
+records bounded showloaded snapshots before/after its coordinator, named with
+that same boot identity. It does not force a live kext load or run compute at login.
+
+Next evidence boundary
+----------------------
+Finish targeted deployment checks before preparing another candidate. Do not
+reuse r8 as if it contains this deployment change, erase the installed r8 journal,
+or ask for repeated blind reboots. Same-boot module UUID/service evidence is needed
+to resolve the remaining loading uncertainty. Once attach runs again, the existing
+igtt.pin/lock/iomap and fb.check/commit stages locate the next hardware boundary.
+Real command completion and correct readback remain the first acceleration gate.

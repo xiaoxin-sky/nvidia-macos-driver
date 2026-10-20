@@ -7,7 +7,8 @@ This review follows the port/DRM/display/userland entry points relevant to
 Alder Lake-S. It is not a line-by-line proof of all Linux, Mesa or Apple code.
 sources.json pins the kernel inputs. Current plugin/ is the fork's public Metal
 frontend; historical gpu-port/ at 7222618 contains the AMD/Intel userland patches.
-Hardware test readiness remains false in audit.json while code blockers are open.
+Hardware success remains unverified. MAINLINE-CHECKPOINT.txt records the binary
+mapping audit and the r8 loading/deployment regression separately from code gaps.
 
 Kernel/display path reviewed
 ----------------------------
@@ -90,11 +91,11 @@ Consequences and work still needed
    Intel NMXAccel/Metal/IOSurface resource, completion and presentation contracts,
    then make WindowServer admission depend on those supported capabilities.
    Removing the vendor check alone is not an implementation of those contracts.
-3. Reproducible matched userland builds and offline packaging now exist. The
-   acceleration/kit assembler checks component digests and build evidence,
-   preserves the original userland/Metal tar bytes and records hardware_ready=false.
-   A concrete installation, recovery and automatic-log plan is still required
-   before activating any of these components.
+3. Reproducible matched builds, installation, recovery and manual compute entry
+   now exist. The r8 preparation completed, but its test captured no NMXGPU service
+   and executed no compute. The final KC's staging paths and missing same-boot
+   loaded-module evidence are addressed in MAINLINE-CHECKPOINT.txt. A passing
+   preparation or CI run does not establish hardware readiness.
 4. Native device/IOMMU behavior, actual GPU commands and visible results cannot
    be proved by host mocks. Code review and offline checks must be completed first;
    a later hardware gate must explicitly state what is implemented and what it tests.

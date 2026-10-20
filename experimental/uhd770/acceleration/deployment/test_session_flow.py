@@ -76,9 +76,28 @@ elif name == 'ditto':
     else: shutil.copy2(source, target)
 elif name == 'kmutil':
     if args[0] == 'create':
-        if failure == 'kc': sys.exit(29)
-        pathlib.Path(args[args.index('-A')+1]).write_bytes(b'candidate KC')
-    else: print('com.fixture.other\ncom.nullmoth.NMXGPU\ncom.nullmoth.NMXAccel')
+        repo = pathlib.Path(args[args.index('--repository')+1])
+        installed = repo == root / 'mac/Library/Extensions'
+        if failure == 'kc' or (installed and failure == 'installed-kc'): sys.exit(29)
+        entries = []
+        for bundle in sorted(repo.glob('*.kext')):
+            data = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
+            entries.append({'id': data['CFBundleIdentifier'], 'path': str(bundle),
+                            'payload': (bundle / 'Contents/MacOS' / bundle.stem).read_text()})
+        with (root / 'kc-builds.jsonl').open('a') as stream:
+            stream.write(json.dumps({'repo': str(repo), 'entries': entries}) + '\n')
+        pathlib.Path(args[args.index('-A')+1]).write_text(json.dumps(entries))
+    elif args[0] == 'inspect':
+        entries = json.loads(pathlib.Path(args[args.index('-A')+1]).read_text())
+        for entry in entries:
+            installed = entry['path'].startswith(str(root / 'mac/Library/Extensions') + '/')
+            if installed and failure == 'installed-kc-omit' and entry['id'] == 'com.fixture.other': continue
+            path = entry['path']
+            if installed and failure == 'installed-kc-path': path = str(root / 'wrong-repository' / pathlib.Path(path).name)
+            print(entry['id'] + '\t1.0\t' + path + '\t')
+    elif args[0] == 'showloaded':
+        print('fixture loaded UUID TEST-CANDIDATE com.nullmoth.NMXGPU')
+    else: sys.exit(98)
 elif name == 'launchctl':
     with (root / 'launchctl-calls').open('a') as stream: stream.write(' '.join(args) + '\n')
     registered = root / 'root-job-registered'
@@ -356,7 +375,10 @@ class SessionFlowTests(unittest.TestCase):
         work = self.installed / "session-private/prepared"
         normalized = {event["path"] for event in events[:first_live] if event["kind"] == "normalize"}
         self.assertTrue({str(work / name) for name in expected} <= normalized)
-        self.assertFalse(any(event["kind"] == "normalize" for event in events[first_live:]))
+        # Only the final KC is generated after kext publication. Every other
+        # payload still passes all permission checks before any live change.
+        late = [event["path"] for event in events[first_live:] if event["kind"] == "normalize"]
+        self.assertEqual(late, [str(work / "auxkc-installed")])
         self.assertFalse(any(path.endswith(("/air-runtime", "/libvulkan.dylib")) for path in normalized))
         bundles = self.mac / "Library/GPUBundles"
         air = bundles / "NVMTLDriver.bundle/Contents/MacOS/air-runtime"
@@ -367,6 +389,25 @@ class SessionFlowTests(unittest.TestCase):
         self.assertTrue(alias.is_symlink())
         self.assertEqual(os.readlink(alias), "libvulkan.1.dylib")
         self.assertEqual(alias.resolve(strict=True), bundles / "nvmtl/libvulkan.1.dylib")
+
+    def test_final_kc_uses_installed_paths_after_kext_replacement(self):
+        """A linkable staging KC must never be published as the boot collection.
+
+        The fake builder retains its inputs so this checks the production order,
+        final paths, new kext bytes and preservation of unrelated extensions. It
+        does not claim that macOS loaded the resulting collection.
+        """
+        prepared = self.run_session("prepare")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
+        builds = [json.loads(line) for line in (self.root / "kc-builds.jsonl").read_text().splitlines()]
+        self.assertEqual([build["repo"] for build in builds], [
+            str(self.installed / "session-private/repository"), str(self.mac / "Library/Extensions")])
+        live = json.loads((self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").read_text())
+        self.assertEqual(live, builds[-1]["entries"])
+        self.assertEqual({entry["id"]: entry["payload"] for entry in live}, {
+            "com.nullmoth.NMXGPU": "candidate", "com.nullmoth.NMXAccel": "candidate", "com.fixture.other": "unrelated"})
+        self.assertTrue(all(pathlib.Path(entry["path"]).parent == self.mac / "Library/Extensions" for entry in live))
+        self.assertEqual((self.installed / "session-private/journal/auxkc.backup").read_bytes(), b"original KC")
 
     def test_late_permission_failure_occurs_before_any_live_replacement(self):
         """A last-target normalization error must leave originals unjournaled."""
@@ -489,6 +530,9 @@ class SessionFlowTests(unittest.TestCase):
         self.assertIn("collector_end", exported_stages.read_text())
         self.assertIn("capture_finalization=closed", (self.installed / "session-private/capture-finalization-TEST.txt").read_text())
         self.assertTrue((reports[0] / "preparation/final-dmesg-TEST.txt").is_file())
+        for when in ("before", "after"):
+            loaded = reports[0] / f"preparation/manual-loaded-{when}-TEST.txt"
+            self.assertIn("TEST-CANDIDATE com.nullmoth.NMXGPU", loaded.read_text())
         self.assertEqual((self.root / "flow-events").read_text().splitlines(), ["capture-stop", "export"])
         # Repeated boot recovery and a repeated manual command must not submit
         # another compute sequence on the same test boot.
@@ -637,9 +681,9 @@ class SessionFlowTests(unittest.TestCase):
         self.assertFalse((self.root / "probe-calls").exists())
 
     def test_failures_before_and_after_live_writes_restore_originals(self):
-        for failure in ("kc", "bootstrap"):
+        for failure in ("kc", "installed-kc", "installed-kc-path", "installed-kc-omit", "bootstrap"):
             with self.subTest(failure=failure):
-                if failure == "bootstrap":
+                if failure != "kc":
                     # Fresh fixture after the first intentionally failed session.
                     self.temporary.cleanup()
                     self.setUp()
