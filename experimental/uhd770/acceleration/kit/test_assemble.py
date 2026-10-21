@@ -64,6 +64,7 @@ def fixtures(root, missing_clock=False):
         "logs/nmx-taskqueue-test.log": "concurrency, requeue, cancel, drain and worker free passed\n",
         "logs/kernel-collection-preflight.txt": "Native KC symbol/dependency preflight passed\n",
         "logs/nmx-drm-node-test.log": "NMX DRM file identity: actual helper, ABI, shared opens and invalid minors passed\n",
+        "logs/nmx-fb-start-test.log": "NMX framebuffer start identity/order/failure tests passed\n",
         "NMXGPU.kext/Contents/MacOS/NMXGPU": b"synthetic Mach-O placeholder" * 100,
         "NMXGPU.kext/Contents/Info.plist": plistlib.dumps({"CFBundleExecutable": "NMXGPU", "CFBundleIdentifier": "com.nullmoth.NMXGPU"}),
     }

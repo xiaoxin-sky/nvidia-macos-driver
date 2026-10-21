@@ -220,6 +220,13 @@ export_stop_reports() {
 export_all() {
     local output uid account home bootstrap owner mode
     output=$(mktemp -d /Users/Shared/UHD770MVP-session-reports.XXXXXX)
+    # Always retain same-boot evidence even if session directories cannot be
+    # copied. The r9 failure export lacked both preparation and user records.
+    { printf 'mode=%s\nmanual_active=%s\nroot=%s\npublic=%s\nprivate=%s\n' \
+          "$MODE" "$MANUAL_ACTIVE" "$ROOT" "$PUBLIC" "$PRIVATE"
+      ls -ld "$ROOT" "$PUBLIC" "$PRIVATE" "$PLAN"; } > "$output/export-context.txt" 2>&1 || :
+    session_bounded 5 "$output/boot-identity.txt" sysctl kern.bootsessionuuid kern.bootargs || :
+    session_bounded 10 "$output/loaded-kexts.txt" kmutil showloaded || :
     /bin/bash -p "$HERE/manage.sh" export > "$output/manage-export.txt" 2>&1 || :
     # manage.sh prints the path of its separately created root evidence report.
     local managed

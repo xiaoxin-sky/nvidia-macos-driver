@@ -1,0 +1,103 @@
+/* Extracted NMXGPUFB::start body with an explicit IOFramebuffer prerequisite
+ * model. The model checks identity-before-base-start and failure ordering;
+ * it is not an implementation or runtime test of Apple's graphics framework. */
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+using IOReturn = int;
+using thread_call_t = void *;
+using thread_call_param_t = void *;
+constexpr int kIOReturnSuccess = 0, kSecondScale = 1000000000, kMicrosecondScale = 1000;
+constexpr const char *kIOFBDependentIDKey = "IOFBDependentID";
+constexpr const char *kIOFBDependentIndexKey = "IOFBDependentIndex";
+static const int kFbPowerStates[2] = {0, 1};
+struct State {
+    int fail_property = 0, fail_timer = 0;
+    bool fail_base = false, fail_power = false;
+    unsigned allocations = 0, arms = 0, super_starts = 0, super_stops = 0, power_calls = 0;
+} state;
+struct IOService {
+    uint64_t registry = 0;
+    uint64_t getRegistryEntryID() { return registry; }
+};
+struct IOFramebuffer : IOService {
+    bool have_id = false, have_index = false, controller_ready = false;
+    uint64_t dependent_id = 0, dependent_index = 99;
+    bool setProperty(const char *key, uint64_t value, unsigned bits) {
+        if (!std::strcmp(key, kIOFBDependentIDKey)) {
+            assert(bits == 64);
+            if (state.fail_property == 1) return false;
+            have_id = true; dependent_id = value;
+        } else {
+            assert(!std::strcmp(key, kIOFBDependentIndexKey) && bits == 32);
+            if (state.fail_property == 2) return false;
+            have_index = true; dependent_index = value;
+        }
+        return true;
+    }
+    bool start(IOService *provider) {
+        ++state.super_starts;
+        if (!(have_id && have_index && dependent_id == provider->registry && dependent_index == 0)) {
+            std::fputs("Missing framebuffer controller identity before base start\n", stderr);
+            std::exit(42);
+        }
+        controller_ready = !state.fail_base;
+        return controller_ready;
+    }
+    void stop(IOService *) { ++state.super_stops; controller_ready = false; }
+    IOReturn registerPowerDriver(IOService *, const int *, unsigned count) {
+        assert(controller_ready && count == 2);
+        ++state.power_calls;
+        return state.fail_power ? 1 : kIOReturnSuccess;
+    }
+};
+static thread_call_t thread_call_allocate(void (*)(void *, void *), void *) {
+    ++state.allocations;
+    return state.allocations == static_cast<unsigned>(state.fail_timer) ? nullptr :
+        reinterpret_cast<void *>(static_cast<uintptr_t>(state.allocations));
+}
+static void clock_interval_to_deadline(uint32_t value, uint32_t scale, uint64_t *out) {
+    *out = static_cast<uint64_t>(value) * scale;
+}
+#define FBLOG(...) ((void)0)
+class NMXGPUFB : public IOFramebuffer {
+public:
+    struct { unsigned width = 1920, height = 1080; } fInfo;
+    struct Interrupts { void arm(thread_call_t timer, uint64_t) { assert(timer); ++state.arms; } } fInterrupts;
+    thread_call_t fVblTimer = nullptr, fConnectTimer = nullptr;
+    uint64_t fFrameNs = 16666667, fVblNext = 0;
+    static void vblFire(void *, void *) {}
+    static void connectFire(void *, void *) {}
+    void stopTimer() { fVblTimer = nullptr; fConnectTimer = nullptr; }
+    /* NMX_FB_START_METHOD */
+};
+int main() {
+    IOService first; first.registry = UINT64_C(0x100000518);
+    IOService second; second.registry = UINT64_C(0x200000518);
+    {
+        NMXGPUFB a, b;
+        assert(a.start(&first) && b.start(&second));
+        assert(a.dependent_id == first.registry && b.dependent_id == second.registry);
+        assert(a.dependent_id != b.dependent_id && state.power_calls == 2);
+    }
+    for (int kind = 0; kind < 8; ++kind) {
+        state = {};
+        NMXGPUFB fb;
+        IOService empty;
+        IOService *provider = &first;
+        if (kind == 0) provider = nullptr;
+        if (kind == 1) provider = &empty;
+        if (kind == 2 || kind == 3) state.fail_property = kind - 1;
+        if (kind == 4) state.fail_base = true;
+        if (kind == 5 || kind == 6) state.fail_timer = kind - 4;
+        if (kind == 7) state.fail_power = true;
+        assert(!fb.start(provider));
+        if (kind < 4) assert(!state.super_starts && !state.allocations && !state.power_calls);
+        if (kind == 4) assert(state.super_starts == 1 && !state.allocations && !state.power_calls);
+        if (kind >= 5) assert(state.super_stops == 1 && !fb.fVblTimer && !fb.fConnectTimer);
+    }
+    puts("NMX framebuffer start identity/order/failure tests passed; no Apple framework or GPU executed.");
+}

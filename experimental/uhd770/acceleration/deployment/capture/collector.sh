@@ -16,7 +16,7 @@ capture_configure() {
     C_SYSCTL=/usr/sbin/sysctl
     C_SWVERS=/usr/bin/sw_vers
     C_SLEEP=/bin/sleep
-    C_SYNC=/bin/sync
+    C_SYNC=/usr/bin/perl
     C_LOG=/usr/bin/log
     C_DMESG=/sbin/dmesg
     C_IOREG=/usr/sbin/ioreg
@@ -68,11 +68,23 @@ capture_clock() {
     fi
 }
 
-# A marker is written before each possibly stalled read. sync itself is bounded;
-# a sync timeout stays visible and is not represented as guaranteed persistence.
+# A marker precedes each possibly stalled read. Flush only these log files:
+# global sync flushes unrelated volumes and exceeded the old one-second budget
+# during the r9 test boot, preventing even the first readiness heartbeat.
+# System Perl/IO::Handle is present on the supported macOS 15; failures/timeouts
+# remain visible and still fail readiness. This is no power-loss guarantee.
 capture_marker() {
-    printf 'utc_last=%s elapsed_s=%s %s\n' "$LAST_UTC" "$SECONDS" "$*" >> "$REPORT/stages.txt"
-    if ! capture_bounded 1 "$REPORT/sync-status.txt" "$C_SYNC"; then
+    local message=$1
+    shift
+    printf 'utc_last=%s elapsed_s=%s %s\n' "$LAST_UTC" "$SECONDS" "$message" >> "$REPORT/stages.txt"
+    if ! capture_bounded 3 "$REPORT/sync-status.txt" "$C_SYNC" \
+        -MFcntl=O_WRONLY,O_NOFOLLOW -MIO::Handle -e '
+            for my $path (@ARGV) {
+                sysopen(my $log, $path, O_WRONLY | O_NOFOLLOW) or die "open log: $!\n";
+                $log->sync or die "sync log: $!\n";
+                close($log) or die "close log: $!\n";
+            }
+        ' "$REPORT/stages.txt" "$@"; then
         printf 'utc_last=%s elapsed_s=%s sync_failed status=%s\n' "$LAST_UTC" "$SECONDS" "$LAST_STATUS" >> "$REPORT/stages.txt"
     fi
 }
@@ -84,7 +96,7 @@ capture_snapshot() {
     capture_bounded "$limit" "$REPORT/$name.txt" "$@"
     status=$?
     printf '\ncollector_command_exit=%s\n' "$status" >> "$REPORT/$name.txt"
-    capture_marker "stage=$name end status=$status"
+    capture_marker "stage=$name end status=$status" "$REPORT/$name.txt"
     return "$status"
 }
 
@@ -190,7 +202,7 @@ capture_run() {
             stream_reported=1
         fi
         if [ $((count % 5)) -eq 0 ]; then
-            capture_marker "heartbeat stream_alive=$stream_alive"
+            capture_marker "heartbeat stream_alive=$stream_alive" "$REPORT/kernel-stream.txt"
         fi
         if [ "$SECONDS" -ge "$next_snapshot" ]; then
             if [ "$dmesg_ok" -eq 1 ]; then

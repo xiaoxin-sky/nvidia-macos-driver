@@ -124,6 +124,11 @@ jobs:
             "$X" /tmp/nmx-drm-node-test.c
           cc -std=c11 -Wall -Wextra -Werror /tmp/nmx-drm-node-test.c -o /tmp/nmx-drm-node-test
           /tmp/nmx-drm-node-test | tee /tmp/nmx-drm-node-test.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_fb_start_fixture.py" \
+            "$X/xnu/nmx_fb.cpp" "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_start_fixture.cpp.in" \
+            /tmp/nmx-fb-start-test.cpp
+          c++ -std=c++17 -Wall -Wextra -Werror /tmp/nmx-fb-start-test.cpp -o /tmp/nmx-fb-start-test
+          /tmp/nmx-fb-start-test | tee /tmp/nmx-fb-start-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_pci_fixture.py" \
             "$X/xnu/nmx_pci.cpp" \
             "$GITHUB_WORKSPACE/experimental/uhd770/tests/pci_class_fixture.cpp.in" \
@@ -293,6 +298,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out/logs"
           cp /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log /tmp/genflags.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-drm-node-test.c /tmp/nmx-drm-node-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-fb-start-test.cpp /tmp/nmx-fb-start-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/amd.flags" "$GITHUB_WORKSPACE/out/logs/amd.flags" 2>/dev/null || true
           for d in logs logs-i915 lklogs; do
             [ -d "$X/$d" ] && cp -R "$X/$d" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true

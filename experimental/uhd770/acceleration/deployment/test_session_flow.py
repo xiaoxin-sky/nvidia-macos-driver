@@ -33,7 +33,10 @@ elif name == 'sysctl':
     if args == ['-n', 'kern.bootsessionuuid']: print(boot)
     elif args == ['-n', 'kern.bootargs']:
         print('-v -nvoff' if boot == 'BASE' else '-v nmxintel=1 nmxdiagdelay=180')
-    else: print('fixture boot identity')
+    else:
+        values = {'kern.bootsessionuuid': boot,
+                  'kern.bootargs': '-v -nvoff' if boot == 'BASE' else '-v nmxintel=1 nmxdiagdelay=180'}
+        print('\n'.join(key + ': ' + values[key] for key in args))
 elif name == 'stat':
     path = pathlib.Path(args[-1])
     if args[1] == '%u':
@@ -126,7 +129,8 @@ elif name == 'launchctl':
         report = root / 'mac/private/var/log/UHD770MVP/session-manual-test'
         report.mkdir(exist_ok=True)
         (report / 'boot-identity.txt').write_text('kern.bootsessionuuid: TEST\n')
-        (report / 'stages.txt').write_text('elapsed_s=1 heartbeat stream_alive=1\n')
+        (report / 'stages.txt').write_text('startup_failed\n' if failure == 'capture-startup' else
+                                          'elapsed_s=1 heartbeat stream_alive=1\n')
     if args == ['bootout', 'system/com.uhd770.mvp.capture']:
         with (root / 'flow-events').open('a') as stream: stream.write('capture-stop\n')
         if failure == 'capture-stop': sys.exit(26)
@@ -562,6 +566,19 @@ class SessionFlowTests(unittest.TestCase):
         terminal = self.mac / "Users/fixture/Library/Logs/UHD770MVP/manual-TEST/terminal.txt"
         self.assertIn("coordinator_exit=66\n", terminal.read_text())
         self.assertEqual(len(self.automatic_reports()), 1)
+
+    def test_manual_recorder_failure_exports_same_boot_context_without_compute(self):
+        """Keep failure evidence before the selected-user coordinator starts."""
+        self.prepare_test_boot()
+        result = self.run_session("test", SESSION_BOOT="TEST", SESSION_FAIL="capture-startup")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"The new recorder did not confirm startup", result.stderr)
+        self.assertFalse((self.root / "probe-calls").exists())
+        reports = self.automatic_reports()
+        self.assertEqual(len(reports), 1)
+        self.assertIn("mode=test", (reports[0] / "export-context.txt").read_text())
+        self.assertIn("kern.bootsessionuuid: TEST", (reports[0] / "boot-identity.txt").read_text())
+        self.assertIn("com.nullmoth.NMXGPU", (reports[0] / "loaded-kexts.txt").read_text())
 
     def test_boot_and_legacy_login_never_start_gpu_or_probe_deadline(self):
         self.prepare_test_boot()

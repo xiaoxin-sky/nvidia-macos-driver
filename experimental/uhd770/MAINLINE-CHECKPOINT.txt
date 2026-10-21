@@ -99,3 +99,36 @@ Targeted validation covers the actual kernel helper and compiled Darwin libdrm
 with an inert two-GPU devfs inventory, differing published/clone/logical IDs,
 multiple opens, inaccessible primary nodes and removed/replaced/unsupported
 nodes. These are interface tests; they do not execute a GPU or establish readback.
+
+4. October 21 r9 test: recorder refusal and a later graphics power panic
+---------------------------------------------------------------------
+The photo and preparation transcript confirm successful restoration, archival,
+PREPARED and a later explicit manual-test command. That command stopped with
+"The new recorder did not confirm startup; compute was not started". No Vulkan
+or Metal execution is established. The fresh recorder timed out on repeated
+global sync calls and ended before its first heartbeat; the boot recorder also
+logged sync timeouts. The rejected readiness check did not cancel the separately
+scheduled kernel attach. The user later observed an active-signal black screen
+and manually restarted; this is not an observed automatic reboot.
+
+NMXGPU is present in the new boot's IORegistry at delay.before ret=180. A saved
+panic lists NMXGPU and NMXAccel as loaded and reports a page fault at
+IOFramebuffer::powerStateWillChangeTo + 0x25, with a null-derived address 0x120.
+The available export lacks session/private records, loaded-module UUIDs and later
+attach stages. It does not directly prove GGTT mapping or identify the particular
+framebuffer object at the faulting callback.
+
+Source defect consistent with that fault: NMXGPUFB called IOFramebuffer::start
+and registered its power driver without IOFBDependentID. The inspected Apple
+start path uses copyController(kDepIDCreate), which returns null without an
+OSNumber dependent ID, before joining the power tree. Its inherited power-change
+callback uses controller->fWl without a null check. Set the parent's 64-bit
+registry ID and single-head dependent index before base start; abort if either
+property cannot be created. Do not bypass the inherited callbacks.
+
+The actual old start method fails the prerequisite fixture; the repaired method
+passes identity, ordering and failure-cleanup cases. Native framework behavior
+and visible output still require a later hardware test. Capture now fsyncs its
+own progress/snapshot files through macOS's system Perl rather than flushing all
+mounted filesystems; readiness still rejects flush/startup failures. Export adds
+same-boot context/module snapshots independently of session-directory copying.

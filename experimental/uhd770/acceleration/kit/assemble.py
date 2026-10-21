@@ -194,6 +194,8 @@ def check_component(archive, entries, name, spec):
         require("NMX DRM file identity: actual helper, ABI, shared opens and invalid minors passed" in
                 read("logs/nmx-drm-node-test.log"), "kernel: NMX node-identity interface evidence missing/failed")
         metadata["nmx_node_info_ioctl"] = "0x40084e44"
+        require("NMX framebuffer start identity/order/failure tests passed" in read("logs/nmx-fb-start-test.log"),
+                "kernel: framebuffer controller initialization regression check missing/failed")
         metadata["compiled_units"] = {path: digest(archive.read(entries[path])) for path in sorted(units)}
         payload, metadata["kext_members"] = kernel_tar(archive, entries)
     else:

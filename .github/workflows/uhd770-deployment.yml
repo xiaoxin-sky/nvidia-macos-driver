@@ -64,6 +64,7 @@ jobs:
                   'test_session_flow.SessionFlowTests.test_late_permission_failure_occurs_before_any_live_replacement',
                   'test_session_flow.SessionFlowTests.test_refused_existing_stage_cannot_roll_back_an_older_plan',
                   'test_session_flow.SessionFlowTests.test_prepare_and_next_boot_restore_use_actual_flow',
+                  'test_session_flow.SessionFlowTests.test_manual_recorder_failure_exports_same_boot_context_without_compute',
                   'test_session_flow.SessionFlowTests.test_failures_before_and_after_live_writes_restore_originals',
               ])
           else:
@@ -178,6 +179,8 @@ jobs:
           PY
           fi
           exit "$code"
+      - name: Native per-file capture flush without global filesystem sync
+        run: /bin/bash experimental/uhd770/acceleration/deployment/capture/test_log_sync_macos.sh
   windows-recovery:
     runs-on: windows-latest
     timeout-minutes: 5

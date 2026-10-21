@@ -2028,7 +2028,7 @@
  
  #define FBLOG(fmt, ...) IOLog("NullMoth display: " fmt "\n", ##__VA_ARGS__)
  
-@@ -24,64 +30,211 @@
+@@ -24,64 +30,219 @@
      OSDeclareDefaultStructors(NMXGPUFB)
      void *fDev = nullptr;
      nmx_fb_info fInfo = {};
@@ -2207,6 +2207,14 @@
      }
  
      bool start(IOService *provider) override {
++        /* IOFramebuffer::start creates its controller from this OSNumber
++         * before joining the power tree. Without it, inherited power-change
++         * callbacks can dereference a null controller before the first open.
++         * One parent GPU owns this single framebuffer (dependent index zero). */
++        if (provider == nullptr || provider->getRegistryEntryID() == 0 ||
++            !setProperty(kIOFBDependentIDKey, provider->getRegistryEntryID(), 64) ||
++            !setProperty(kIOFBDependentIndexKey, 0ULL, 32))
++            return false;
          if (!IOFramebuffer::start(provider)) return false;
          fVblTimer = thread_call_allocate(vblFire, this);
 +        fConnectTimer = thread_call_allocate(connectFire, this);
@@ -2266,7 +2274,7 @@
      }
  
      IOReturn enableController() override { return kIOReturnSuccess; }
-@@ -92,21 +245,36 @@
+@@ -92,21 +253,36 @@
      }
      IODeviceMemory *getVRAMRange() override { return IODeviceMemory::withRange(fInfo.phys, fInfo.size); }
      const char *getPixelFormats() override { return IO32BitDirectPixels "\0"; }
@@ -2312,7 +2320,7 @@
          bzero(pi, sizeof(*pi));
          pi->bytesPerRow = fInfo.pitch;
          pi->bitsPerPixel = 32;
-@@ -117,21 +285,25 @@
+@@ -117,21 +293,25 @@
          pi->componentMasks[1] = 0x0000FF00;
          pi->componentMasks[2] = 0x000000FF;
          strlcpy(pi->pixelFormat, IO32BitDirectPixels, sizeof(pi->pixelFormat));
@@ -2344,7 +2352,7 @@
          IODetailedTimingInformationV2 &d = info->detailedInfo.v2;
          d.pixelClock = d.minPixelClock = d.maxPixelClock = (uint64_t)t.pclk_khz * 1000;
          d.horizontalActive = t.width;
-@@ -142,26 +314,67 @@
+@@ -142,26 +322,67 @@
          d.verticalBlanking = t.vtotal - t.height;
          d.verticalSyncOffset = t.vsync_start > t.height ? t.vsync_start - t.height : 0;
          d.verticalSyncPulseWidth = t.vsync_end > t.vsync_start ? t.vsync_end - t.vsync_start : 0;
@@ -2424,7 +2432,7 @@
      /* power acknowledged at once; left to IOFramebuffer it waits on a shared thread (seen with NVRMFB) */
      IOReturn setPowerState(unsigned long ordinal, IOService *) override {
          handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
-@@ -171,7 +384,8 @@
+@@ -171,7 +392,8 @@
          if (attribute == kIOWindowServerActiveAttribute) return kIOReturnSuccess;
          if (attribute == kIOPowerAttribute) {
              /* display sleep turns the outputs off; wake lights them again with the same buffer */
@@ -2434,7 +2442,7 @@
              if (value) {
                  IOReturn r = IOFramebuffer::setAttribute(attribute, value);
                  handleEvent(kIOFBNotifyDidPowerOn);
-@@ -184,17 +398,34 @@
+@@ -184,17 +406,34 @@
          return IOFramebuffer::setAttribute(attribute, value);
      }
      IOReturn setAttributeForConnection(IOIndex idx, IOSelect attribute, uintptr_t value) override {
@@ -2474,7 +2482,7 @@
          return kIOReturnSuccess;
      }
      IOReturn getAttribute(IOSelect attribute, uintptr_t *value) override {
-@@ -204,7 +435,22 @@
+@@ -204,7 +443,22 @@
      IOReturn getAttributeForConnection(IOIndex idx, IOSelect attr, uintptr_t *value) override {
          if (idx != 0 || !value) return kIOReturnBadArgument;
          switch (attr) {
@@ -2498,7 +2506,7 @@
          case kConnectionColorModesSupported: case kConnectionColorMode: *value = 0x00000001; return kIOReturnSuccess;
          case kConnectionColorDepthsSupported: case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported:
              *value = 0x00000002; return kIOReturnSuccess;
-@@ -218,7 +464,9 @@
+@@ -218,7 +472,9 @@
  IOService *nmx_fb_publish(IOService *gpu, void *dev)
  {
      nmx_fb_info info;
