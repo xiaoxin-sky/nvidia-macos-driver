@@ -63,6 +63,7 @@ def fixtures(root, missing_clock=False):
         "logs/nmx-i915-mmap-test.log": "CPU scope, persistent pins, failure cleanup and fd-close PASS\n",
         "logs/nmx-taskqueue-test.log": "concurrency, requeue, cancel, drain and worker free passed\n",
         "logs/kernel-collection-preflight.txt": "Native KC symbol/dependency preflight passed\n",
+        "logs/nmx-drm-node-test.log": "NMX DRM file identity: actual helper, ABI, shared opens and invalid minors passed\n",
         "NMXGPU.kext/Contents/MacOS/NMXGPU": b"synthetic Mach-O placeholder" * 100,
         "NMXGPU.kext/Contents/Info.plist": plistlib.dumps({"CFBundleExecutable": "NMXGPU", "CFBundleIdentifier": "com.nullmoth.NMXGPU"}),
     }
@@ -74,6 +75,7 @@ def fixtures(root, missing_clock=False):
         "logs/native_clock_smoke.txt": "CLOCK_UPTIME_RAW matches mach_absolute_time; converted deadline=500000000\n",
         "logs/clock_fixture.txt": "actual NMX deadline epoch, poll/infinite and error conversion passed\n",
         "logs/nmx-mmap-test.txt": "NMX ANV mmap ABI, slice ownership and failure fixture passed\n",
+        "logs/nmx-node-test.txt": "NMX Darwin node identity: compiled libdrm enumeration, clone fds, PCI isolation and failures passed\n",
     }
     if missing_clock:
         del userland["logs/native_clock_smoke.txt"]
@@ -101,6 +103,23 @@ def fixtures(root, missing_clock=False):
 
 
 class AssemblerTests(unittest.TestCase):
+    def test_legacy_kernel_or_userland_cannot_be_mixed_with_node_identity_pair(self):
+        """Reject independently hashed older artifacts before making a kit."""
+        for component, missing in (("kernel", "logs/nmx-drm-node-test.log"),
+                                   ("userland", "logs/nmx-node-test.txt")):
+            with self.subTest(component=component), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                manifest_path = fixtures(root)
+                manifest = json.loads(manifest_path.read_text())
+                archive_path = root / f"{component}.zip"
+                with zipfile.ZipFile(archive_path) as archive:
+                    entries = {name: archive.read(name) for name in archive.namelist() if name != missing}
+                manifest["components"][component]["sha256"] = write_zip(archive_path, entries)
+                manifest_path.write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(assemble.InvalidCandidate, "nmx.*node"):
+                    assemble.assemble(manifest_path, root / "kit", pathlib.Path(__file__).resolve().parents[4])
+                self.assertFalse((root / "kit").exists())
+
     def test_success_preserves_tars_and_always_denies_hardware_readiness(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

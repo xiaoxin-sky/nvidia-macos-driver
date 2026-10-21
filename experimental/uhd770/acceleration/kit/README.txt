@@ -44,10 +44,13 @@ Required evidence
 
 - Kernel: 900 DRM/AMD + 274 i915 + 76 runtime compilation logs, no failed units,
   successful source summaries, mapping/workqueue lifecycle tests and native KC
-  linkage preflight.
+  linkage preflight, plus the NMX node-identity kernel helper/ABI check.
 - Userland: final real-ANV/probe build marker, ANV mapping fixture, clock boundary
   fixture and native CLOCK_UPTIME_RAW versus mach_absolute_time comparison.
   Earlier userland artifacts without native_clock_smoke.txt are rejected.
+  The compiled-libdrm node/clone identity test is also required. Earlier kernel
+  or libdrm artifacts without NMX_DRM_IOCTL_NODE_INFO evidence are rejected, so
+  the new userspace cannot silently be combined with the r8 kernel.
 - Metal: final build marker, native KC preflight and actual decoded Apple AIR
   translated to a checksummed SPIR-V result with gpu_executed=false.
 

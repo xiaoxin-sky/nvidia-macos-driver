@@ -1,5 +1,5 @@
 #!/bin/bash -p
-# Retire a failed preparation with an empty or fully restored journal.
+# Retire a failed preparation or an explicitly restored completed session.
 # This preserves the complete stage and all reports. It never restores/replaces
 # live drivers, edits EFI, starts preparation, or submits GPU work.
 set -euo pipefail
@@ -15,14 +15,20 @@ OWN_LOCK=0
 
 stop() { printf 'STOP: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: sudo /bin/bash -p Archive-UHD770-Failed.command' \
+    printf '%s\n' 'Usage: sudo /bin/bash -p Archive-UHD770-Failed.command [--restored-session]' \
       'Archive only a failed preparation with an empty or fully restored installation journal.' \
+      '--restored-session: require explicit session.sh restore and every installation receipt before archiving.' \
       'Export evidence, stop this kit recorder, and preserve the stage in a unique root-only sibling.' \
       'No deletion of reports, EFI change, driver installation, GPU test, or reboot.' \
       'After ARCHIVED, run the newer kit Start-UHD770.command yourself.'
 }
 [ "${1:-}" != --help ] || { usage; exit 0; }
-[ "$#" -eq 0 ] || { usage >&2; exit 64; }
+RETIRE_MODE=failed
+if [ "$#" -eq 1 ] && [ "$1" = --restored-session ]; then
+    RETIRE_MODE=restored
+elif [ "$#" -ne 0 ]; then
+    usage >&2; exit 64
+fi
 [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = x86_64 ] || stop 'Native x86_64 macOS required.'
 [ "$EUID" -eq 0 ] || stop 'Use sudo /bin/bash -p.'
 case $- in *p*) ;; *) stop 'Use /bin/bash -p.' ;; esac
@@ -139,20 +145,31 @@ trusted_path "$PARENT"
 mkdir -m 700 "$LOCK" || stop 'Another preparation or interrupted lock exists; preserved.'
 OWN_LOCK=1
 for path in "$ROOT" "$ROOT/incoming/tools/session.sh" "$ROOT/incoming/tools/manage.sh" \
-    "$ROOT/session-private/journal" "$ROOT/session-private/failure.txt" \
+    "$ROOT/session-private/journal" \
     "$ROOT/session-public/state.txt" "$ROOT/session-public/plan.plist" \
     "$ROOT/stage-state.txt" "$ROOT/kc-preflight/result.txt"; do trusted_path "$path"; done
 [ -d "$ROOT/session-private/journal" ] || stop 'Missing installation journal.'
 validate_journal
-[ "$(cat "$ROOT/session-public/state.txt")" = failed ] || stop 'Only failed preparations can be archived.'
+if [ "$RETIRE_MODE" = restored ]; then
+    [ "$(cat "$ROOT/session-public/state.txt")" = restored ] || stop 'Run session.sh restore successfully before retiring a completed session.'
+    [ "$JOURNAL_STATE" = fully-restored ] || stop 'A restored session requires a completed installation journal.'
+    # A successful r8 install replaced all ten current targets. Refuse an
+    # empty/partial journal or a forged state line as a completed restoration.
+    for key in nmxgpu nmxaccel cachegpu cacheaccel firmware license runtime frontend auxkc rootjob; do
+        journal_control "$ROOT/session-private/journal/$key.restored"
+    done
+else
+    [ "$(cat "$ROOT/session-public/state.txt")" = failed ] || stop 'Only failed preparations can be archived without --restored-session.'
+    trusted_path "$ROOT/session-private/failure.txt"
+    for field in optout_restore_exit file_restore_exit; do
+        grep -Fxq "$field=0" "$ROOT/session-private/failure.txt" || stop 'Earlier recovery did not report success.'
+    done
+fi
 grep -Fxq 'stage=offline-ready' "$ROOT/stage-state.txt" || stop 'Stage was not offline-ready.'
 grep -Fxq 'driver_installed=false' "$ROOT/stage-state.txt" || stop 'Driver installation status is not clean.'
 grep -Fxq 'gpu_executed=false' "$ROOT/stage-state.txt" || stop 'GPU execution status is not clean.'
 grep -Fxq 'temporary_KC_linkage=passed' "$ROOT/kc-preflight/result.txt" || stop 'Temporary KC check did not pass.'
 grep -Fxq 'installed=false' "$ROOT/kc-preflight/result.txt" || stop 'Temporary KC installation status is not clean.'
-for field in optout_restore_exit file_restore_exit; do
-    grep -Fxq "$field=0" "$ROOT/session-private/failure.txt" || stop 'Earlier recovery did not report success.'
-done
 args=$(sysctl -n kern.bootargs)
 case " $args " in *' -nvoff '*) ;; *) stop 'Current boot must contain -nvoff.' ;; esac
 case " $args " in *' nmxintel='*|*' nmxdiagdelay='*) stop 'Test boot arguments are still present.' ;; esac
@@ -195,7 +212,7 @@ done
 actual=$(shasum -a 256 "$mount/EFI/OC/config.plist" | awk '{print $1}')
 [ "$actual" = "$safe" ] || stop 'USB is not the exact safe opt-out configuration.'
 
-printf 'Verified failed preparation; journal=%s entries=%s. Exporting existing evidence...\n' "$JOURNAL_STATE" "$JOURNAL_ENTRIES"
+printf 'Verified %s session; journal=%s entries=%s. Exporting existing evidence...\n' "$RETIRE_MODE" "$JOURNAL_STATE" "$JOURNAL_ENTRIES"
 if [ "$JOURNAL_ENTRIES" -gt 0 ]; then
     printf 'Restoration receipts and current presence/types were checked. Original byte hashes were not recorded; byte equality cannot be verified.\n'
 fi

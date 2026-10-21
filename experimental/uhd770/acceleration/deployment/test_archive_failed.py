@@ -263,6 +263,35 @@ class ArchiveFailedTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("entries=11", result.stdout)
 
+    def test_completed_session_requires_explicit_restore_mode_and_all_receipts(self):
+        """A finished r8 is archived only after restore, without failure.txt."""
+        for key in self.TARGETS:
+            self.restored_entry(key, "absent" if key in ("rootjob", "userjob") else "present")
+        (self.private / "failure.txt").unlink()
+        state = self.stage / "session-public/state.txt"
+        for value in ("armed", "finished"):
+            state.write_text(value + "\n")
+            self.assert_refused_without_archiving(self.run_helper("--restored-session"))
+        state.write_text("restored\n")
+        self.assert_refused_without_archiving(self.run_helper())
+        originals = {path: path.read_bytes() for path in self.mac.rglob("original-bytes")}
+        result = self.run_helper("--restored-session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        archive = next(self.stage.parent.glob("UHD770MVP-retired.*"))
+        self.assertEqual((archive / "stage/session-public/state.txt").read_text(), "restored\n")
+        self.assertEqual({path: path.read_bytes() for path in originals}, originals)
+        self.assertEqual(self.log.read_text(), "partial original evidence\n")
+
+    def test_restored_state_cannot_hide_partial_or_unrestored_installation(self):
+        """A state line alone must not bypass missing target receipts/backups."""
+        (self.stage / "session-public/state.txt").write_text("restored\n")
+        (self.private / "failure.txt").unlink()
+        self.assert_refused_without_archiving(self.run_helper("--restored-session"))
+        self.restored_entry("nmxgpu")
+        self.assert_refused_without_archiving(self.run_helper("--restored-session"))
+        (self.journal / "nmxgpu.backup").write_bytes(b"unresolved original")
+        self.assert_refused_without_archiving(self.run_helper("--restored-session"))
+
     def test_unknown_keys_and_unresolved_backups_are_preserved(self):
         for name in ("foreign.target", "nmxgpu.backup", "runtime.backup-pending", "frontend.replaced-pending", ".hidden"):
             with self.subTest(name=name):

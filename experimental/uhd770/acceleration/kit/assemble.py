@@ -191,6 +191,9 @@ def check_component(archive, entries, name, spec):
                 "kernel: workqueue lifecycle fixture did not pass")
         require("Native KC symbol/dependency preflight passed" in read("logs/kernel-collection-preflight.txt"),
                 "kernel: KC preflight missing/failed")
+        require("NMX DRM file identity: actual helper, ABI, shared opens and invalid minors passed" in
+                read("logs/nmx-drm-node-test.log"), "kernel: NMX node-identity interface evidence missing/failed")
+        metadata["nmx_node_info_ioctl"] = "0x40084e44"
         metadata["compiled_units"] = {path: digest(archive.read(entries[path])) for path in sorted(units)}
         payload, metadata["kext_members"] = kernel_tar(archive, entries)
     else:
@@ -206,6 +209,9 @@ def check_component(archive, entries, name, spec):
                     "userland: deadline fixture missing/failed")
             require("NMX ANV mmap ABI, slice ownership and failure fixture passed" in read("logs/nmx-mmap-test.txt"),
                     "userland: ANV mapping fixture missing/failed")
+            require("NMX Darwin node identity: compiled libdrm enumeration, clone fds, PCI isolation and failures passed" in
+                    read("logs/nmx-node-test.txt"), "userland: compiled libdrm node-identity test missing/failed")
+            metadata["nmx_node_info_ioctl"] = "0x40084e44"
         else:
             require("Intel accelerator, translator and Metal frontend compiled; nothing installed or loaded." in build,
                     "metal: final success marker missing")
