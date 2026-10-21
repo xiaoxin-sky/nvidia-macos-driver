@@ -51,6 +51,8 @@ Required evidence
   The compiled-libdrm node/clone identity test is also required. Earlier kernel
   or libdrm artifacts without NMX_DRM_IOCTL_NODE_INFO evidence are rejected, so
   the new userspace cannot silently be combined with the r8 kernel.
+  The changing-lookup discovery marker is required too: earlier tests assumed
+  stable stat IDs and cannot validate XNU clone-node enumeration.
 - Metal: final build marker, native KC preflight and actual decoded Apple AIR
   translated to a checksummed SPIR-V result with gpu_executed=false.
 

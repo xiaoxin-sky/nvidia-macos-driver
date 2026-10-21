@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT
  * Exercise the compiled Darwin libdrm against an inert devfs inventory. The
  * interposer owns only /dev/dri and descriptors it opens on /dev/null; no GPU
- * node is opened. Published IDs, clone IDs and logical DRM suffixes deliberately
- * differ. Build once as a dylib with NMX_NODE_SHIM, once as the test executable.
+ * node is opened. Every path lookup has a fresh XNU-style clone ID, distinct
+ * from fstat's ID and logical DRM suffixes. Build as both dylib and executable.
  */
 #include <assert.h>
 #include <dirent.h>
@@ -19,6 +19,9 @@
 #include "xf86drm.h"
 #include "nmx_drm_node.h"
 
+struct fixture_audit { unsigned live, lookups; };
+#define FIXTURE_AUDIT_IOCTL DRM_IOR(0x7e, struct fixture_audit)
+
 #ifdef NMX_NODE_SHIM
 struct fixture_pci {
     uint16_t domain;
@@ -27,8 +30,10 @@ struct fixture_pci {
     uint8_t revision_id;
 };
 #define FIXTURE_PCI_IOCTL DRM_IOR(0x15, struct fixture_pci)
-static const char *const names[] = {"card0", "renderD128", "card1", "renderD129"};
-static int descriptors[4096], replaced[4096];
+static const char *const names[] = {"card0", "renderD128", "card1", "renderD129",
+    "card0bad", "renderD", "card00", "renderD0128", "card999999999999999999999999"};
+static int descriptors[4096], replaced[4096], wrong_node[4096];
+static unsigned lookups;
 struct fixture_dir { unsigned position; struct dirent entry; };
 static struct fixture_dir *directories[32];
 
@@ -67,7 +72,7 @@ static struct dirent *fake_readdir(DIR *dir)
     int slot = directory(dir);
     if (slot < 0) return readdir(dir);
     struct fixture_dir *d = directories[slot];
-    if (d->position == 4) return NULL;
+    if (d->position == sizeof(names) / sizeof(names[0])) return NULL;
     memset(&d->entry, 0, sizeof(d->entry));
     strcpy(d->entry.d_name, names[d->position++]);
     d->entry.d_namlen = (uint16_t)strlen(d->entry.d_name);
@@ -87,14 +92,14 @@ static int fake_stat(const char *path, struct stat *st)
         if (!strncmp(path, "/dev/dri", 8)) { errno = ENOENT; return -1; }
         return stat(path, st);
     }
-    if (n == 1 && mode("removed")) { errno = ENOENT; return -1; }
     memset(st, 0, sizeof(*st)); st->st_mode = S_IFCHR | 0666;
-    st->st_rdev = makedev(241, 51 + n); return 0;
+    st->st_rdev = makedev(241, 2000 + ++lookups); return 0;
 }
 static int fake_fstat(int fd, struct stat *st)
 {
     if (!tracked(fd)) return fstat(fd, st);
-    memset(st, 0, sizeof(*st)); st->st_mode = S_IFCHR | 0666;
+    memset(st, 0, sizeof(*st));
+    st->st_mode = (mode("non-character") ? S_IFREG : S_IFCHR) | 0666;
     st->st_rdev = makedev(241, 1000 + fd); return 0;
 }
 static int fake_access(const char *path, int flags)
@@ -112,15 +117,22 @@ static int fake_open(const char *path, int flags, ...)
         if (flags & O_CREAT) { va_list ap; va_start(ap, flags); permissions = va_arg(ap, int); va_end(ap); }
         return open(path, flags, permissions);
     }
-    if (!(n & 1) && mode("deny-primary")) { errno = EACCES; return -1; }
+    assert(flags & O_NOFOLLOW);
+    if (n == 1 && mode("removed")) { errno = ENOENT; return -1; }
+    if ((!(n & 1) && mode("deny-primary")) || ((n & 1) && mode("deny-render"))) {
+        errno = EACCES; return -1;
+    }
     int fd = open("/dev/null", O_RDWR | O_CLOEXEC);
     if (fd >= 4096) { close(fd); errno = EMFILE; return -1; }
-    if (fd >= 0) { descriptors[fd] = n + 1; replaced[fd] = mode("replaced"); }
+    if (fd >= 0) {
+        descriptors[fd] = n + 1; replaced[fd] = mode("replaced");
+        wrong_node[fd] = mode("wrong-node");
+    }
     return fd;
 }
 static int fake_close(int fd)
 {
-    if (tracked(fd)) { descriptors[fd] = 0; replaced[fd] = 0; }
+    if (tracked(fd)) { descriptors[fd] = 0; replaced[fd] = 0; wrong_node[fd] = 0; }
     return close(fd);
 }
 static int fake_ioctl(int fd, unsigned long command, ...)
@@ -128,14 +140,22 @@ static int fake_ioctl(int fd, unsigned long command, ...)
     va_list ap; va_start(ap, command); void *argument = va_arg(ap, void *); va_end(ap);
     int n = tracked(fd) - 1;
     if (n < 0) return ioctl(fd, command, argument);
+    if (command == FIXTURE_AUDIT_IOCTL) {
+        struct fixture_audit *audit = argument;
+        audit->live = 0; audit->lookups = lookups;
+        for (unsigned i = 0; i < 4096; ++i) audit->live += descriptors[i] != 0;
+        return 0;
+    }
     if (command == NMX_DRM_IOCTL_NODE_INFO) {
         if (mode("legacy")) { errno = ENOTTY; return -1; }
         struct nmx_drm_node_info *info = argument;
         info->type = mode("bad-kind") ? 99 : (n & 1 ? NMX_DRM_NODE_RENDER : NMX_DRM_NODE_PRIMARY);
-        info->index = n & 1 ? 128 + n / 2 : n / 2;
+        info->index = mode("bad-index") ? 1000 : (n & 1 ? 128 + n / 2 : n / 2);
+        info->index += wrong_node[fd];
         return 0;
     }
     if (command == FIXTURE_PCI_IOCTL) {
+        if (mode("pci-fail")) { errno = EIO; return -1; }
         struct fixture_pci *info = argument;
         memset(info, 0, sizeof(*info));
         info->dev = (uint8_t)(2 + n / 2 + replaced[fd]);
@@ -160,6 +180,18 @@ INTERPOSE(fake_open, open);
 INTERPOSE(fake_close, close);
 INTERPOSE(fake_ioctl, ioctl);
 #else
+static void audit(int fd, unsigned expected_live, unsigned expected_lookups)
+{
+    struct fixture_audit result;
+    assert(!ioctl(fd, FIXTURE_AUDIT_IOCTL, &result));
+    assert(result.live == expected_live && result.lookups == expected_lookups);
+}
+
+static int open_node(const char *path)
+{
+    return open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+}
+
 static void expect_name(char *actual, const char *expected)
 {
     assert(actual && !strcmp(actual, expected)); free(actual);
@@ -179,13 +211,18 @@ int main(void)
     assert(getenv("DYLD_INSERT_LIBRARIES"));
     assert(sizeof(struct nmx_drm_node_info) == 8 && NMX_DRM_IOCTL_NODE_INFO == 0x40084e44UL);
     assert(drmGetDevices2(0, NULL, 0) == 2);
-    int a = open("/dev/dri/renderD128", O_RDWR), b = open("/dev/dri/renderD128", O_RDWR);
-    int other = open("/dev/dri/renderD129", O_RDWR), primary = open("/dev/dri/card0", O_RDWR);
+    int a = open_node("/dev/dri/renderD128"), b = open_node("/dev/dri/renderD128");
+    int other = open_node("/dev/dri/renderD129"), primary = open_node("/dev/dri/card0");
     assert(a >= 0 && b >= 0 && other >= 0 && primary >= 0);
-    struct stat published, sa, sb;
-    assert(!stat("/dev/dri/renderD128", &published) && !fstat(a, &sa) && !fstat(b, &sb));
-    assert(published.st_rdev != sa.st_rdev && sa.st_rdev != sb.st_rdev);
-    assert(drmGetNodeTypeFromDevId(published.st_rdev) == DRM_NODE_RENDER);
+    audit(a, 4, 0);
+    struct stat first_lookup, second_lookup, sa, sb;
+    assert(!stat("/dev/dri/renderD128", &first_lookup));
+    assert(!stat("/dev/dri/renderD128", &second_lookup) && !fstat(a, &sa) && !fstat(b, &sb));
+    assert(first_lookup.st_rdev != second_lookup.st_rdev && first_lookup.st_rdev != sa.st_rdev &&
+           second_lookup.st_rdev != sa.st_rdev && sa.st_rdev != sb.st_rdev);
+    assert(drmGetNodeTypeFromDevId(first_lookup.st_rdev) == -ENOTSUP);
+    drmDevicePtr numeric = NULL;
+    assert(drmGetDeviceFromDevId(sa.st_rdev, 0, &numeric) == -ENOTSUP && numeric == NULL);
     assert(drmGetNodeTypeFromFd(a) == DRM_NODE_RENDER && drmGetNodeTypeFromFd(primary) == DRM_NODE_PRIMARY);
     expect_device(a, 0x8086, 0x4680); expect_device(b, 0x8086, 0x4680);
     expect_device(other, 0x1002, 0x73bf);
@@ -195,19 +232,33 @@ int main(void)
     expect_name(drmGetRenderDeviceNameFromFd(primary), "/dev/dri/renderD128");
     setenv("NMX_NODE_TEST_MODE", "deny-primary", 1);
     expect_device(a, 0x8086, 0x4680);
-    const char *failures[] = {"legacy", "bad-kind", "removed", "replaced"};
-    const int errors[] = {ENOTTY, ENODEV, ENOENT, ENODEV};
-    for (unsigned i = 0; i < 4; ++i) {
+    const char *failures[] = {"legacy", "bad-kind", "removed", "replaced", "wrong-node",
+                              "bad-index", "non-character", "pci-fail", "deny-render"};
+    const int errors[] = {ENOTTY, ENODEV, ENOENT, ENODEV, ENODEV, ENODEV, EINVAL, EIO, EACCES};
+    for (unsigned i = 0; i < sizeof(failures) / sizeof(failures[0]); ++i) {
         setenv("NMX_NODE_TEST_MODE", failures[i], 1);
         drmDevicePtr d = NULL;
         int result = drmGetDevice2(a, 0, &d);
         if (result != -errors[i]) fprintf(stderr, "%s: actual=%d expected=%d\n", failures[i], result, -errors[i]);
         assert(result == -errors[i] && d == NULL);
+        audit(a, 4, 2);
     }
     unsetenv("NMX_NODE_TEST_MODE");
+    for (unsigned i = 0; i < 24; ++i) {
+        drmDevicePtr devices[4] = {0};
+        int count = drmGetDevices2(DRM_DEVICE_GET_PCI_REVISION, devices, 4);
+        assert(count == 2);
+        for (int j = 0; j < count; ++j)
+            assert(devices[j]->available_nodes == ((1 << DRM_NODE_PRIMARY) | (1 << DRM_NODE_RENDER)));
+        drmFreeDevices(devices, count);
+        expect_device(a, 0x8086, 0x4680);
+        audit(a, 4, 2);
+    }
     close(a); expect_device(b, 0x8086, 0x4680);
+    audit(b, 3, 2);
     close(b); close(other); close(primary);
     puts("NMX Darwin node identity: compiled libdrm enumeration, clone fds, PCI isolation and failures passed; no GPU opened.");
+    puts("NMX Darwin changing-lookup discovery: fresh stat IDs, fd identity, canonical names and descriptor cleanup passed; no GPU opened.");
     return 0;
 }
 #endif

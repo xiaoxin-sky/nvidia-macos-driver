@@ -36,6 +36,14 @@ uses real node paths and NMX_DRM_IOCTL_NODE_INFO instead of treating those IDs a
 renderD suffixes. The native interposed-inventory test opens only /dev/null;
 it verifies the compiled library's discovery contract, not GPU execution.
 
+XNU creates a fresh clone vnode/minor on every lookup of these nodes, including
+stat (xnu-11417.140.69 bsd/miscfs/devfs/devfs_tree.c: devfs_dntovn). Discovery
+therefore opens canonical candidates and queries NODE_INFO/PCIINFO on each fd;
+it never compares dev_t values from separate lookups. Bare-dev_t lookup APIs
+return ENOTSUP on Darwin. The native test changes every stat ID and checks
+failure cleanup, permissions and replaced nodes against the compiled library.
+The manual Vulkan diagnostic enables NMX_DRM_DEBUG only in its own process.
+
 The ordinary Metal buffer/texture/compute path uses ANV allocations. NMXAccel's
 inherited family GPUVA/VRAM callbacks still depend on NVIDIA RM and are not an
 Intel allocation implementation. Hardware resource pools, cross-process shared

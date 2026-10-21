@@ -221,6 +221,8 @@ def check_component(archive, entries, name, spec):
                     "userland: ANV mapping fixture missing/failed")
             require("NMX Darwin node identity: compiled libdrm enumeration, clone fds, PCI isolation and failures passed" in
                     read("logs/nmx-node-test.txt"), "userland: compiled libdrm node-identity test missing/failed")
+            require("NMX Darwin changing-lookup discovery: fresh stat IDs, fd identity, canonical names and descriptor cleanup passed" in
+                    read("logs/nmx-node-test.txt"), "userland: XNU changing-lookup discovery regression missing/failed")
             metadata["nmx_node_info_ioctl"] = "0x40084e44"
         else:
             require("Intel accelerator, translator and Metal frontend compiled; nothing installed or loaded." in build,

@@ -21,71 +21,33 @@
 +#endif
 --- a/xf86drm.c
 +++ b/xf86drm.c
-@@ -107,28 +107,75 @@
+@@ -107,28 +107,28 @@
  
  static bool drmNodeIsDRM(int maj, int min);
  #ifdef __APPLE__
 -/* Darwin assigns character majors at run time and its devname_r searches only the top level of /dev, so a DRM
 - * node is recognised by finding its device number among the entries of /dev/dri. */
 -static bool drm_darwin_node_exists(int maj, int min)
-+#include "nmx_drm_node.h"
-+
-+/* Locate a published node by stat identity, retaining its actual basename.
-+ * The minor is assigned by XNU, independently of the DRM suffix. This helper
-+ * does not accept per-open clone IDs; those must use NODE_INFO on the fd. */
-+static int drm_darwin_node_path(int maj, int min, char *path, size_t capacity)
- {
-     DIR *dir = opendir(DRM_DIR_NAME);
-     struct dirent *ent;
+-{
+-    DIR *dir = opendir(DRM_DIR_NAME);
+-    struct dirent *ent;
 -    bool found = false;
-+    int type = -1;
- 
-     if (!dir)
+-
+-    if (!dir)
 -        return false;
 -    while (!found && (ent = readdir(dir)) != NULL) {
 -        char path[PATH_MAX];
-+        return -1;
-+    while ((ent = readdir(dir)) != NULL) {
-         struct stat sbuf;
+-        struct stat sbuf;
 -
 -        if (ent->d_name[0] == '.')
-+        const char *digits;
-+        int candidate;
-+
-+        if (!strncmp(ent->d_name, "renderD", 7)) {
-+            candidate = DRM_NODE_RENDER; digits = ent->d_name + 7;
-+        } else if (!strncmp(ent->d_name, "card", 4)) {
-+            candidate = DRM_NODE_PRIMARY; digits = ent->d_name + 4;
-+        } else
-             continue;
+-            continue;
 -        snprintf(path, sizeof(path), "%s/%s", DRM_DIR_NAME, ent->d_name);
 -        found = stat(path, &sbuf) == 0 && S_ISCHR(sbuf.st_mode) &&
 -                (int)major(sbuf.st_rdev) == maj && (int)minor(sbuf.st_rdev) == min;
-+        if (!*digits || strspn(digits, "0123456789") != strlen(digits))
-+            continue;
-+        int n = snprintf(path, capacity, "%s/%s", DRM_DIR_NAME, ent->d_name);
-+        if (n < 0 || (size_t)n >= capacity)
-+            continue;
-+        if (stat(path, &sbuf) == 0 && S_ISCHR(sbuf.st_mode) &&
-+            (int)major(sbuf.st_rdev) == maj && (int)minor(sbuf.st_rdev) == min) {
-+            type = candidate;
-+            break;
-+        }
-     }
-     closedir(dir);
+-    }
+-    closedir(dir);
 -    return found;
-+    if (type < 0)
-+        errno = ENODEV;
-+    return type;
-+}
-+
-+static int drm_darwin_open_node(int maj, int min)
-+{
-+    char path[PATH_MAX];
-+    if (drm_darwin_node_path(maj, min, path, sizeof(path)) < 0)
-+        return -1;
-+    return open(path, O_RDWR | O_CLOEXEC);
-+}
++#include "nmx_drm_node.h"
 +
 +/* Query the file's DRM identity rather than fstat's per-open XNU clone ID.
 + * Return libc-style -1/errno. Reject unknown node kinds without guessing. */
@@ -102,7 +64,7 @@
 +    if (drmIoctl(fd, NMX_DRM_IOCTL_NODE_INFO, info))
 +        return -1;
 +    if ((info->type != NMX_DRM_NODE_PRIMARY && info->type != NMX_DRM_NODE_RENDER) ||
-+        info->index > INT_MAX) {
++        info->index > 999) {
 +        errno = ENODEV;
 +        return -1;
 +    }
@@ -110,18 +72,19 @@
  }
  #endif
  static char *drmGetMinorNameForFD(int fd, int type);
-@@ -1037,6 +1084,10 @@
+@@ -1037,6 +1037,11 @@
  
  static int drmGetMinorType(int major, int minor)
  {
 +#ifdef __APPLE__
-+    char actual[PATH_MAX];
-+    return drm_darwin_node_path(major, minor, actual, sizeof(actual));
++    /* XNU clone dev_t values have no stable basename mapping. */
++    errno = ENOTSUP;
++    return -1;
 +#endif
  #ifdef __FreeBSD__
      char name[SPECNAMELEN];
      int id;
-@@ -3290,7 +3341,10 @@
+@@ -3290,7 +3295,10 @@
  
  drm_public char *drmGetDeviceNameFromFd(int fd)
  {
@@ -133,17 +96,18 @@
      struct stat sbuf;
      int maj, min;
      int nodetype;
-@@ -3338,7 +3392,8 @@
+@@ -3338,7 +3346,9 @@
               maj, min);
      return stat(path, &sbuf) == 0;
  #elif defined(__APPLE__)
 -    return drm_darwin_node_exists(maj, min);
-+    char path[PATH_MAX];
-+    return drm_darwin_node_path(maj, min, path, sizeof(path)) >= 0;
++    /* Only an opened fd plus NODE_INFO can identify an NMX clone node. */
++    (void)maj; (void)min;
++    return false;
  #elif defined(__FreeBSD__)
      char name[SPECNAMELEN];
  
-@@ -3356,6 +3411,10 @@
+@@ -3356,6 +3366,10 @@
  
  drm_public int drmGetNodeTypeFromFd(int fd)
  {
@@ -154,7 +118,7 @@
      struct stat sbuf;
      int maj, min, type;
  
-@@ -3374,6 +3433,7 @@
+@@ -3374,6 +3388,7 @@
      if (type == -1)
          errno = ENODEV;
      return type;
@@ -162,7 +126,7 @@
  }
  
  drm_public int drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags,
-@@ -3420,7 +3480,26 @@
+@@ -3420,7 +3435,26 @@
  
  static char *drmGetMinorNameForFD(int fd, int type)
  {
@@ -190,91 +154,263 @@
      DIR *sysdir;
      struct dirent *ent;
      struct stat sbuf;
-@@ -3758,13 +3837,16 @@
+@@ -3756,14 +3790,16 @@
+     info->func = func;
+ 
      return 0;
- #elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
+-#elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
++#elif defined(__APPLE__)
++    /* Darwin discovery queries PCIINFO on the opened fd, never a dev_t. */
++    return -ENOTSUP;
++#elif defined(__OpenBSD__) || defined(__DragonFly__)
      struct drm_pciinfo pinfo;
--    int fd, type;
--
--    type = drmGetMinorType(maj, min);
-+    int fd;
-+#ifdef __APPLE__
-+    /* XNU's published minor is not the DRM basename suffix. */
-+    fd = drm_darwin_open_node(maj, min);
-+#else
-+    int type = drmGetMinorType(maj, min);
+     int fd, type;
+ 
+     type = drmGetMinorType(maj, min);
      if (type == -1)
          return -ENODEV;
 -
      fd = drmOpenMinor(min, 0, type);
-+#endif
      if (fd < 0)
          return -errno;
+@@ -3927,14 +3963,16 @@
+         return parse_config_sysfs_file(maj, min, device);
  
-@@ -3929,13 +4011,16 @@
      return 0;
- #elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
+-#elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
++#elif defined(__APPLE__)
++    /* Darwin discovery queries PCIINFO on the opened fd, never a dev_t. */
++    return -ENOTSUP;
++#elif defined(__OpenBSD__) || defined(__DragonFly__)
      struct drm_pciinfo pinfo;
--    int fd, type;
--
--    type = drmGetMinorType(maj, min);
-+    int fd;
-+#ifdef __APPLE__
-+    /* XNU's published minor is not the DRM basename suffix. */
-+    fd = drm_darwin_open_node(maj, min);
-+#else
-+    int type = drmGetMinorType(maj, min);
+     int fd, type;
+ 
+     type = drmGetMinorType(maj, min);
      if (type == -1)
          return -ENODEV;
 -
      fd = drmOpenMinor(min, 0, type);
-+#endif
      if (fd < 0)
          return -errno;
+@@ -4530,11 +4568,126 @@
+     return ret;
+ }
  
-@@ -4805,6 +4890,41 @@
++#ifdef __APPLE__
++/* XNU xnu-11417.140.69 devfs_dntovn creates a fresh clone on every lookup,
++ * including stat. Node numbers must come from NODE_INFO on an opened fd.
++ * PCIINFO supplies both the bus location and hardware IDs; names only select
++ * a candidate and must agree exactly with that fd's logical node identity. */
++static int drm_darwin_fd_path(const struct nmx_drm_node_info *info,
++                              char *path, size_t capacity)
++{
++    int n = snprintf(path, capacity, "%s/%s%u", DRM_DIR_NAME,
++                     info->type == NMX_DRM_NODE_RENDER ? "renderD" : "card", info->index);
++    return n < 0 || (size_t)n >= capacity ? -ENAMETOOLONG : 0;
++}
++
++static bool drm_darwin_pci_equal(const struct drm_pciinfo *a, const struct drm_pciinfo *b)
++{
++    return a->domain == b->domain && a->bus == b->bus && a->dev == b->dev && a->func == b->func &&
++           a->vendor_id == b->vendor_id && a->device_id == b->device_id &&
++           a->subvendor_id == b->subvendor_id && a->subdevice_id == b->subdevice_id &&
++           a->revision_id == b->revision_id;
++}
++
++static int drm_darwin_query_node(const char *path, struct nmx_drm_node_info *info,
++                                  struct drm_pciinfo *pci)
++{
++    char actual[PATH_MAX];
++    const char *stage = "open";
++    int ret = 0;
++    int fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
++    memset(info, 0, sizeof(*info));
++    memset(pci, 0, sizeof(*pci));
++    if (fd < 0) {
++        ret = -errno;
++        goto out;
++    }
++    stage = "NODE_INFO";
++    if (drm_darwin_fd_node(fd, info)) {
++        ret = -errno;
++        goto close_fd;
++    }
++    stage = "logical-name";
++    ret = drm_darwin_fd_path(info, actual, sizeof(actual));
++    if (ret)
++        goto close_fd;
++    if (strcmp(path, actual)) {
++        ret = -ENODEV;
++        goto close_fd;
++    }
++    stage = "PCIINFO";
++    if (drmIoctl(fd, DRM_IOCTL_GET_PCIINFO, pci))
++        ret = -errno;
++close_fd:
++    close(fd);
++out:
++    if (getenv("NMX_DRM_DEBUG"))
++        fprintf(stderr, "NMX DRM discovery path=%s stage=%s result=%d type=%u index=%u "
++                "bdf=%04x:%02x:%02x.%u pci=%04x:%04x\n", path, stage, ret, info->type, info->index,
++                pci->domain, pci->bus, pci->dev, pci->func, pci->vendor_id, pci->device_id);
++    return ret;
++}
++
++/* Construct one node using a single open/query/close transaction. No access,
++ * stat, devname or sysfs lookup is used, and errors cannot leak a descriptor.
++ * The caller folds peers by PCI location after both were individually checked. */
++static int drm_darwin_process_device(drmDevicePtr *device, const char *name,
++                                      int requested_bus, bool fetch_info, uint32_t flags)
++{
++    struct nmx_drm_node_info info;
++    struct drm_pciinfo pci;
++    char node[PATH_MAX + 1] = "", *tail, *addr;
++    int type = drmGetNodeType(name);
++    unsigned long index;
++    int ret, written;
++    drmDevicePtr d;
++    if (type < 0 || (requested_bus != -1 && requested_bus != DRM_BUS_PCI))
++        return -ENODEV;
++    const char *digits = name + (type == DRM_NODE_RENDER ? strlen("renderD") : strlen("card"));
++    if (!*digits || strspn(digits, "0123456789") != strlen(digits) ||
++        (digits[0] == '0' && digits[1]))
++        return -ENODEV;
++    errno = 0;
++    index = strtoul(digits, &tail, 10);
++    if (errno || *tail || index > 999)
++        return -ENODEV;
++    written = snprintf(node, sizeof(node), "%s/%s", DRM_DIR_NAME, name);
++    if (written < 0 || (size_t)written >= sizeof(node) || written + 1 > drmGetMaxNodeName())
++        return -ENAMETOOLONG;
++    ret = drm_darwin_query_node(node, &info, &pci);
++    if (ret)
++        return ret;
++    d = drmDeviceAlloc(type, node, sizeof(drmPciBusInfo), sizeof(drmPciDeviceInfo), &addr);
++    if (!d)
++        return -ENOMEM;
++    d->bustype = DRM_BUS_PCI;
++    d->businfo.pci = (drmPciBusInfoPtr)addr;
++    d->businfo.pci->domain = pci.domain;
++    d->businfo.pci->bus = pci.bus;
++    d->businfo.pci->dev = pci.dev;
++    d->businfo.pci->func = pci.func;
++    if (fetch_info) {
++        d->deviceinfo.pci = (drmPciDeviceInfoPtr)(addr + sizeof(drmPciBusInfo));
++        d->deviceinfo.pci->vendor_id = pci.vendor_id;
++        d->deviceinfo.pci->device_id = pci.device_id;
++        d->deviceinfo.pci->subvendor_id = pci.subvendor_id;
++        d->deviceinfo.pci->subdevice_id = pci.subdevice_id;
++        d->deviceinfo.pci->revision_id = pci.revision_id;
++    }
++    (void)flags; /* PCIINFO returns revision even when it was not requested. */
++    *device = d;
++    return 0;
++}
++#endif
++
+ static int
+ process_device(drmDevicePtr *device, const char *d_name,
+                int req_subsystem_type,
+                bool fetch_deviceinfo, uint32_t flags)
+ {
++#ifdef __APPLE__
++    return drm_darwin_process_device(device, d_name, req_subsystem_type, fetch_deviceinfo, flags);
++#else
+     struct stat sbuf;
+     char node[PATH_MAX + 1];
+     int node_type, subsystem_type, written;
+@@ -4588,6 +4741,7 @@
+     default:
+         return -1;
+    }
++#endif
+ }
+ 
+ /* Consider devices located on the same bus as duplicate and fold the respective
+@@ -4653,7 +4807,13 @@
+  */
+ drm_public int drmGetDeviceFromDevId(dev_t find_rdev, uint32_t flags, drmDevicePtr *device)
+ {
+-#ifdef __OpenBSD__
++#ifdef __APPLE__
++    (void)find_rdev;
++    if (!device || drm_device_validate_flags(flags))
++        return -EINVAL;
++    *device = NULL;
++    return -ENOTSUP;
++#elif defined(__OpenBSD__)
+     /*
+      * DRI device nodes on OpenBSD are not in their own directory, they reside
+      * in /dev along with a large number of statically generated /dev nodes.
+@@ -4775,6 +4935,10 @@
+ 
+ drm_public int drmGetNodeTypeFromDevId(dev_t devid)
+ {
++#ifdef __APPLE__
++    (void)devid;
++    return -ENOTSUP;
++#else
+     int maj, min, node_type;
+ 
+     maj = major(devid);
+@@ -4788,6 +4952,7 @@
+         return -ENODEV;
+ 
+     return node_type;
++#endif
+ }
+ 
+ /**
+@@ -4805,6 +4970,48 @@
   */
  drm_public int drmGetDevice2(int fd, uint32_t flags, drmDevicePtr *device)
  {
 +#ifdef __APPLE__
-+    struct nmx_drm_node_info info;
-+    struct drm_pciinfo pci;
-+    struct stat st;
++    struct nmx_drm_node_info info, current;
++    struct drm_pciinfo pci, published;
++    drmDevicePtr candidates[MAX_DRM_NODES];
 +    char path[PATH_MAX];
-+    int ret, n;
++    int ret, count;
 +    if (!device || drm_device_validate_flags(flags))
 +        return -EINVAL;
 +    *device = NULL;
 +    if (drm_darwin_fd_node(fd, &info) || drmIoctl(fd, DRM_IOCTL_GET_PCIINFO, &pci))
 +        return -errno;
-+    n = snprintf(path, sizeof(path), "%s/%s%u", DRM_DIR_NAME,
-+                 info.type == NMX_DRM_NODE_RENDER ? "renderD" : "card", info.index);
-+    if (n < 0 || (size_t)n >= sizeof(path))
-+        return -ENAMETOOLONG;
-+    if (stat(path, &st))
-+        return -errno;
-+    if (!S_ISCHR(st.st_mode))
-+        return -ENODEV;
-+    ret = drmGetDeviceFromDevId(st.st_rdev, flags, device);
++    ret = drm_darwin_fd_path(&info, path, sizeof(path));
 +    if (ret)
 +        return ret;
-+    /* A removed/replaced published node must not redirect an existing fd to
-+     * another GPU. Compare both bus location and the opened file's PCI IDs. */
-+    drmDevicePtr d = *device;
-+    if (d->bustype != DRM_BUS_PCI ||
-+        d->businfo.pci->domain != pci.domain || d->businfo.pci->bus != pci.bus ||
-+        d->businfo.pci->dev != pci.dev || d->businfo.pci->func != pci.func ||
-+        d->deviceinfo.pci->vendor_id != pci.vendor_id ||
-+        d->deviceinfo.pci->device_id != pci.device_id) {
-+        drmFreeDevice(device);
++    ret = drm_darwin_query_node(path, &current, &published);
++    if (ret)
++        return ret;
++    if (!drm_darwin_pci_equal(&pci, &published))
 +        return -ENODEV;
++    count = drmGetDevices2(flags, candidates, MAX_DRM_NODES);
++    if (count < 0)
++        return count;
++    for (int i = 0; i < count; ++i) {
++        drmDevicePtr d = candidates[i];
++        /* Keep only the original file's canonical node and full PCI identity.
++         * A permission change, removed node or replacement cannot redirect it. */
++        if (d->bustype == DRM_BUS_PCI && (d->available_nodes & (1 << info.type)) &&
++            !strcmp(d->nodes[info.type], path) &&
++            d->businfo.pci->domain == pci.domain && d->businfo.pci->bus == pci.bus &&
++            d->businfo.pci->dev == pci.dev && d->businfo.pci->func == pci.func &&
++            d->deviceinfo.pci->vendor_id == pci.vendor_id &&
++            d->deviceinfo.pci->device_id == pci.device_id &&
++            d->deviceinfo.pci->subvendor_id == pci.subvendor_id &&
++            d->deviceinfo.pci->subdevice_id == pci.subdevice_id &&
++            d->deviceinfo.pci->revision_id == pci.revision_id && !*device) {
++            *device = d;
++        } else {
++            drmFreeDevice(&candidates[i]);
++        }
 +    }
-+    return 0;
++    return *device ? 0 : -ENODEV;
 +#else
      struct stat sbuf;
  
      if (fd == -1)
-@@ -4817,6 +4937,7 @@
+@@ -4817,6 +5024,7 @@
          return -EINVAL;
  
      return drmGetDeviceFromDevId(sbuf.st_rdev, flags, device);
@@ -282,7 +418,18 @@
  }
  
  /**
-@@ -4948,7 +5069,7 @@
+@@ -4898,6 +5106,10 @@
+     }
+ 
+     closedir(sysdir);
++#ifdef __APPLE__
++    if (getenv("NMX_DRM_DEBUG"))
++        fprintf(stderr, "NMX DRM discovery devices=%d nodes=%d\n", device_count, node_count);
++#endif
+ 
+     if (devices != NULL)
+         return MIN2(device_count, max_devices);
+@@ -4948,7 +5160,7 @@
      free(value);
  
      return strdup(path);

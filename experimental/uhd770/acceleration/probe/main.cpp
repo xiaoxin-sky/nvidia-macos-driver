@@ -584,6 +584,7 @@ int main(int argc, char **argv)
         environment("VK_INSTANCE_LAYERS", "");
         environment("VK_LOADER_LAYERS_DISABLE", "~all~");
         environment("VK_LOADER_DEBUG", "error,warn,driver");
+        environment("NMX_DRM_DEBUG", "1");
         std::printf("probe_version=1 loader=%s icd=%s shader=%s deadline_s=%u\n",
                     o.loader.c_str(), o.icd.c_str(), o.shader.c_str(), o.deadline);
 #ifndef _WIN32

@@ -54,7 +54,7 @@ def write_zip(path, entries):
     return assemble.digest(path.read_bytes())
 
 
-def fixtures(root, missing_clock=False):
+def fixtures(root, missing_clock=False, missing_changing_lookup=False):
     """Prepare all required offline evidence using clearly synthetic payloads."""
     kernel = {
         "logs/all.log": "sources: 900  compiled: 900  failed: 0\n",
@@ -80,10 +80,13 @@ def fixtures(root, missing_clock=False):
         "logs/native_clock_smoke.txt": "CLOCK_UPTIME_RAW matches mach_absolute_time; converted deadline=500000000\n",
         "logs/clock_fixture.txt": "actual NMX deadline epoch, poll/infinite and error conversion passed\n",
         "logs/nmx-mmap-test.txt": "NMX ANV mmap ABI, slice ownership and failure fixture passed\n",
-        "logs/nmx-node-test.txt": "NMX Darwin node identity: compiled libdrm enumeration, clone fds, PCI isolation and failures passed\n",
+        "logs/nmx-node-test.txt": "NMX Darwin node identity: compiled libdrm enumeration, clone fds, PCI isolation and failures passed\n"
+                                  "NMX Darwin changing-lookup discovery: fresh stat IDs, fd identity, canonical names and descriptor cleanup passed\n",
     }
     if missing_clock:
         del userland["logs/native_clock_smoke.txt"]
+    if missing_changing_lookup:
+        userland["logs/nmx-node-test.txt"] = userland["logs/nmx-node-test.txt"].splitlines()[0] + "\n"
     userland["uhd770-acceleration-userland.tar.gz"] = make_tar("userland", evidence=userland)
     air = b'; synthetic decoded Apple AIR\ntarget triple = "air64-apple-macosx15.0.0"\n'
     spirv = b"\x03\x02\x23\x07" + bytes(20)
@@ -150,6 +153,15 @@ class AssemblerTests(unittest.TestCase):
             root = pathlib.Path(temporary)
             manifest = fixtures(root, missing_clock=True)
             with self.assertRaisesRegex(assemble.InvalidCandidate, "native_clock_smoke"):
+                assemble.assemble(manifest, root / "kit", pathlib.Path(__file__).resolve().parents[4])
+            self.assertFalse((root / "kit").exists())
+
+    def test_stable_stat_fixture_cannot_validate_xnu_discovery(self):
+        """Older successful node tests omitted lookup-created clone IDs."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            manifest = fixtures(root, missing_changing_lookup=True)
+            with self.assertRaisesRegex(assemble.InvalidCandidate, "XNU changing-lookup"):
                 assemble.assemble(manifest, root / "kit", pathlib.Path(__file__).resolve().parents[4])
             self.assertFalse((root / "kit").exists())
 
