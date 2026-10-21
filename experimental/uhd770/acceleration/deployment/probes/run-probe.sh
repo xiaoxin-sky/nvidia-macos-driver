@@ -113,14 +113,12 @@ cp "$ROOT/evidence.json" "$session/candidate-evidence.json"
 shasum -a 256 "$ROOT/evidence.json" > "$session/candidate-evidence-SHA256SUMS"
 
 require_loaded() {
-    local bundle=$1 executable=$2 expected line actual
+    local bundle=$1 executable=$2 expected actual
     [ -f "$executable" ] && [ ! -L "$executable" ] || fail "Missing kext image: $executable"
     expected=$(uhd_macho_uuid "$executable") || fail "No x86_64 LC_UUID: $executable"
     [ "${#expected}" -eq 32 ] || fail 'Malformed staged Mach-O UUID.'
     kextstat -l -b "$bundle" > "$session/$bundle-loaded.txt" 2>&1 || fail "Cannot inspect loaded $bundle"
-    line=$(awk -v name="$bundle" '{for (i=1;i<=NF;i++) if ($i==name) print}' "$session/$bundle-loaded.txt")
-    [ "$(printf '%s\n' "$line" | grep -c .)" = 1 ] || fail "Expected exactly one loaded $bundle."
-    actual=$(printf '%s\n' "$line" | grep -Eo '[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}' | tr '[:upper:]' '[:lower:]' | tr -d '-')
+    actual=$(uhd_loaded_kext_uuid "$session/$bundle-loaded.txt" "$bundle") || fail "Cannot identify exactly one loaded $bundle table row with a valid UUID."
     [ "$actual" = "$expected" ] || fail "Loaded $bundle UUID differs from the candidate."
     printf '%s %s\n' "$bundle" "$expected" >> "$session/loaded-UUIDs.txt"
     shasum -a 256 "$executable" >> "$session/payload-SHA256SUMS"

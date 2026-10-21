@@ -275,6 +275,10 @@ class SessionFlowTests(unittest.TestCase):
             text = re.sub(r"\$EUID\b", "501" if name == "session-user.sh" else "0", text)
             text = text.replace("/usr/libexec/PlistBuddy", str(mock / "PlistBuddy"))
             text = text.replace("/usr/bin/sudo", str(mock / "sudo"))
+            # Delay semantics are exercised by the inert helper fixture. Only
+            # the observation duration is compressed in full-flow adapters.
+            text = text.replace('session_observe_capture "$MANUAL_CAPTURE" "$current" 180',
+                                'session_observe_capture "$MANUAL_CAPTURE" "$current" 2')
             self.assertIsNone(re.search(r"[\"'= ]/(Library|private|System|Volumes|Users)/",
                                        text.replace(str(self.root), "$FIXTURE")))
             path.write_text(text, encoding="utf-8")
@@ -540,6 +544,9 @@ class SessionFlowTests(unittest.TestCase):
         self.assertIn("collector_end", exported_stages.read_text())
         self.assertIn("capture_finalization=closed", (self.installed / "session-private/capture-finalization-TEST.txt").read_text())
         self.assertTrue((reports[0] / "preparation/final-dmesg-TEST.txt").is_file())
+        observation = (reports[0] / "preparation/post-test-observation-TEST.txt").read_text()
+        self.assertIn("compute=stopped", observation)
+        self.assertIn("observation_elapsed_s=2", observation)
         for when in ("before", "after"):
             loaded = reports[0] / f"preparation/manual-loaded-{when}-TEST.txt"
             self.assertIn("TEST-CANDIDATE com.nullmoth.NMXGPU", loaded.read_text())

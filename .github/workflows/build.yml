@@ -197,6 +197,16 @@ jobs:
           /tmp/nmx-fb-bridge-test | tee /tmp/nmx-fb-bridge-test.log
           touch /tmp/nmx-display-fixtures-ok
           python3 gen_flags.py "$S/kpi/drm-kmod" amd.flags | tee /tmp/genflags.log
+          if grep -Eq '^-DCONFIG_PM(_SLEEP|_RUNTIME)?(=|$)' amd.flags; then
+            echo "::error::Linux runtime PM is unsupported by the pinned KPI; use i915's always-active branch"
+            exit 1
+          fi
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_runtime_pm_fixture.py" \
+            "$S/kpi/drm-kmod/drivers/gpu/drm/i915/intel_runtime_pm.c" \
+            "$S/kpi/freebsd-src/sys/compat/linuxkpi/common/include/linux/pm_runtime.h" \
+            amd.flags /tmp/nmx-runtime-pm-test.c
+          cc -std=c11 -Wall -Wextra -Werror /tmp/nmx-runtime-pm-test.c -o /tmp/nmx-runtime-pm-test
+          /tmp/nmx-runtime-pm-test | tee /tmp/nmx-runtime-pm-test.log
           if grep -Eq '^-DCONFIG_DRM_(DISPLAY_DP_TUNNEL|I915_DP_TUNNEL)(=|$)' amd.flags; then
             echo "::error::DP tunnel frontend/core flags must both be disabled in this port"
             exit 1
@@ -299,6 +309,7 @@ jobs:
           cp /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log /tmp/genflags.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-drm-node-test.c /tmp/nmx-drm-node-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-fb-start-test.cpp /tmp/nmx-fb-start-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-runtime-pm-test.c /tmp/nmx-runtime-pm-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/amd.flags" "$GITHUB_WORKSPACE/out/logs/amd.flags" 2>/dev/null || true
           for d in logs logs-i915 lklogs; do
             [ -d "$X/$d" ] && cp -R "$X/$d" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true

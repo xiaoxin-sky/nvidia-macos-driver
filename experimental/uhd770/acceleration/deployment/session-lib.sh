@@ -329,6 +329,28 @@ session_bounded_group() {
     return "$code"
 }
 
+# Keep the existing, bounded recorder alive after compute has stopped. The r10
+# refusal closed capture immediately, leaving no evidence for a black screen two
+# minutes later. This only waits/records; authorization must already be closed.
+# An ended/missing recorder is reported explicitly, never treated as observed.
+session_observe_capture() {
+    local report=$1 boot=$2 limit=$3 evidence=$4 elapsed=0 reason=duration_complete
+    case "$limit" in ''|*[!0-9]*) return 64 ;; esac
+    printf 'observation_limit_s=%s\ncompute=stopped\n' "$limit" > "$evidence"
+    printf 'Compute has stopped. Keeping logs for up to %s more seconds to capture delayed display failures.\n' "$limit"
+    while [ "$elapsed" -lt "$limit" ]; do
+        if [ ! -d "$report" ] || session_recorder_ended "$report" "$boot"; then
+            reason=recorder_not_running; break
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+        if [ $((elapsed % 30)) -eq 0 ]; then
+            printf 'Logs only: %s/%s seconds; no new compute is started.\n' "$elapsed" "$limit"
+        fi
+    done
+    printf 'observation_elapsed_s=%s\nobservation_end=%s\n' "$elapsed" "$reason" >> "$evidence"
+}
+
 # Accept a completed normal-desktop recorder session, never an old boot or an
 # empty/timeout-only report. GPU success is deliberately outside this predicate.
 session_recorder_valid() {

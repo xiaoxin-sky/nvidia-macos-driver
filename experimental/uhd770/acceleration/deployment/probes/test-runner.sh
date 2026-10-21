@@ -84,6 +84,24 @@ printf '\317\372\355\376\007\000\000\001\003\000\000\000\013\000\000\000\001\000
 printf 'not a Mach-O\n' > "$fixture/bad-image"
 if uhd_macho_uuid "$fixture/bad-image" >/dev/null 2>&1; then exit 1; fi
 
+# r10 macOS 15 output contained both the kextstat command banner and one real
+# module. Only the structured module row identifies a loaded image. Do not
+# weaken the exact-one/valid-UUID rules while ignoring diagnostic banners.
+loaded_row='119 0 0xffffff7f00001000 0xac0ffc 0xac0ffc com.nullmoth.NMXGPU (1.0.0) 7301B411-E6EF-3D60-BD22-76F79D04DF2C <18 17 9>'
+printf '%s\n' \
+    'Executing: /usr/bin/kmutil showloaded --list-only --bundle-identifier com.nullmoth.NMXGPU' \
+    'No variant specified, falling back to release' "$loaded_row" > "$fixture/loaded.txt"
+[ "$(uhd_loaded_kext_uuid "$fixture/loaded.txt" com.nullmoth.NMXGPU)" = 7301b411e6ef3d60bd2276f79d04df2c ]
+printf '%s\n' "$loaded_row" > "$fixture/loaded-native.txt"
+[ "$(uhd_loaded_kext_uuid "$fixture/loaded-native.txt" com.nullmoth.NMXGPU)" = 7301b411e6ef3d60bd2276f79d04df2c ]
+printf '%s\n' "$loaded_row" "$loaded_row" > "$fixture/loaded-duplicate.txt"
+printf '%s\n' 'Executing: /usr/bin/kmutil showloaded --bundle-identifier com.nullmoth.NMXGPU' > "$fixture/loaded-missing.txt"
+printf '%s\n' "$loaded_row" | sed 's/7301B411-E6EF/7301B411-ZZZZ/' > "$fixture/loaded-bad-uuid.txt"
+for bad in loaded-duplicate loaded-missing loaded-bad-uuid; do
+    if uhd_loaded_kext_uuid "$fixture/$bad.txt" com.nullmoth.NMXGPU >/dev/null; then exit 1; fi
+done
+if uhd_loaded_kext_uuid "$fixture/loaded.txt" com.nullmoth.NMXAccel >/dev/null; then exit 1; fi
+
 # On Git Bash/Linux the real entry point refuses before reading candidate paths.
 # This is deliberately NOT a production mock/identity-check override.
 if [ "$(uname -s)" != Darwin ]; then

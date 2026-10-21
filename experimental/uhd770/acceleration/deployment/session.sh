@@ -718,8 +718,9 @@ run_manual_test() {
         printf 'boot=%s\ntrigger=manual-timeout\npartial=true\n' "$current" > "$PUBLIC/deadline-$current.txt"
         chmod 644 "$PUBLIC/deadline-$current.txt"
     fi
-    printf '\nManual coordinator exit=%s. Finishing logs and exporting reports...\n' "$code"
+    printf '\nManual coordinator exit=%s. Compute is stopped; observing the display before exporting...\n' "$code"
     printf 'manual_authorization=closed\nboot=%s\n' "$current" > "$PUBLIC/manual-authorization-$current.txt"
+    session_observe_capture "$MANUAL_CAPTURE" "$current" 180 "$PRIVATE/post-test-observation-$current.txt"
     finish_capture "$current" "$MANUAL_CAPTURE"
     printf 'finished\n' > "$PUBLIC/state.txt"
     printf 'boot=%s\nmanual_exit=%s\n' "$current" "$code" > "$PUBLIC/manual-result-$current.txt"

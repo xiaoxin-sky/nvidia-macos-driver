@@ -4,6 +4,25 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/session-lib.sh"
+# Exercise the production post-compute wait with a short budget. No collector
+# or GPU is launched by this helper, and an already-ended capture stays distinct
+# from a completed observation interval.
+(
+    tmp_observation=$(mktemp -d "${TMPDIR:-/tmp}/uhd770-observation.XXXXXX")
+    mkdir "$tmp_observation/capture"
+    printf 'kern.bootsessionuuid: fixture\n' > "$tmp_observation/capture/boot-identity.txt"
+    : > "$tmp_observation/capture/stages.txt"
+    session_observe_capture "$tmp_observation/capture" fixture 2 "$tmp_observation/active.txt"
+    grep -Fxq 'observation_elapsed_s=2' "$tmp_observation/active.txt"
+    grep -Fxq 'observation_end=duration_complete' "$tmp_observation/active.txt"
+    printf 'collector_end reason=duration_complete\n' > "$tmp_observation/capture/stages.txt"
+    session_observe_capture "$tmp_observation/capture" fixture 2 "$tmp_observation/ended.txt"
+    grep -Fxq 'observation_elapsed_s=0' "$tmp_observation/ended.txt"
+    grep -Fxq 'observation_end=recorder_not_running' "$tmp_observation/ended.txt"
+    # These five fixture files are the only cleanup targets; no recursive delete.
+    rm "$tmp_observation/capture/boot-identity.txt" "$tmp_observation/capture/stages.txt" "$tmp_observation/active.txt" "$tmp_observation/ended.txt"
+    rmdir "$tmp_observation/capture" "$tmp_observation"
+)
 TASK_PARENT=$(cd "${TMPDIR:-/tmp}" && pwd)
 TASK_TMP=$(mktemp -d "$TASK_PARENT/uhd770-session-fixture.XXXXXX")
 case "$TASK_TMP" in "$TASK_PARENT"/uhd770-session-fixture.*) ;; *) exit 1 ;; esac

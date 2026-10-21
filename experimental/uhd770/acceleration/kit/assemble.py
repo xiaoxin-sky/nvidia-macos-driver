@@ -196,6 +196,10 @@ def check_component(archive, entries, name, spec):
         metadata["nmx_node_info_ioctl"] = "0x40084e44"
         require("NMX framebuffer start identity/order/failure tests passed" in read("logs/nmx-fb-start-test.log"),
                 "kernel: framebuffer controller initialization regression check missing/failed")
+        require("NMX runtime-PM policy: actual i915 conditional wakerefs retained" in read("logs/nmx-runtime-pm-test.log"),
+                "kernel: runtime-PM configuration regression check missing/failed")
+        require(not re.search(r"(?m)^-DCONFIG_PM(?:_SLEEP|_RUNTIME)?(?:=|$)", read("logs/amd.flags")),
+                "kernel: unsupported Linux runtime PM was compiled in")
         metadata["compiled_units"] = {path: digest(archive.read(entries[path])) for path in sorted(units)}
         payload, metadata["kext_members"] = kernel_tar(archive, entries)
     else:

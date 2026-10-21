@@ -339,3 +339,30 @@
  	if (ret < 0) {
  		dev_priv->irqs_enabled = false;
  		return ret;
+--- a/drivers/gpu/drm/drm_print.c
++++ b/drivers/gpu/drm/drm_print.c
+@@ -247,11 +247,23 @@
+ void __drm_printfn_err(struct drm_printer *p, struct va_format *vaf)
+ {
+ 	struct drm_device *drm = p->arg;
+-
++#ifdef __FreeBSD__
++	/* The Darwin vprintf bridge does not implement Linux %pV. Format the
++	 * nested arguments first so i915 state mismatches remain readable.
++	 * Keep the caller-owned va_list intact; each diagnostic is bounded. */
++	char message[512];
++	va_list args;
++	va_copy(args, *vaf->va);
++	vsnprintf(message, sizeof(message), vaf->fmt, args);
++	va_end(args);
++	drm_err(drm, "%s%s%s", p->prefix ? p->prefix : "",
++		p->prefix ? " " : "", message);
++#else
+ 	if (p->prefix)
+ 		drm_err(drm, "%s %pV", p->prefix, vaf);
+ 	else
+ 		drm_err(drm, "%pV", vaf);
++#endif
+ }
+ EXPORT_SYMBOL(__drm_printfn_err);
+ 

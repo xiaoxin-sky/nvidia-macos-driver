@@ -65,6 +65,8 @@ def fixtures(root, missing_clock=False):
         "logs/kernel-collection-preflight.txt": "Native KC symbol/dependency preflight passed\n",
         "logs/nmx-drm-node-test.log": "NMX DRM file identity: actual helper, ABI, shared opens and invalid minors passed\n",
         "logs/nmx-fb-start-test.log": "NMX framebuffer start identity/order/failure tests passed\n",
+        "logs/nmx-runtime-pm-test.log": "NMX runtime-PM policy: actual i915 conditional wakerefs retained; no GPU power test\n",
+        "logs/amd.flags": "-DCONFIG_DRM_I915\n",
         "NMXGPU.kext/Contents/MacOS/NMXGPU": b"synthetic Mach-O placeholder" * 100,
         "NMXGPU.kext/Contents/Info.plist": plistlib.dumps({"CFBundleExecutable": "NMXGPU", "CFBundleIdentifier": "com.nullmoth.NMXGPU"}),
     }
@@ -107,6 +109,7 @@ class AssemblerTests(unittest.TestCase):
     def test_legacy_kernel_or_userland_cannot_be_mixed_with_node_identity_pair(self):
         """Reject independently hashed older artifacts before making a kit."""
         for component, missing in (("kernel", "logs/nmx-drm-node-test.log"),
+                                   ("kernel", "logs/nmx-runtime-pm-test.log"),
                                    ("userland", "logs/nmx-node-test.txt")):
             with self.subTest(component=component), tempfile.TemporaryDirectory() as temporary:
                 root = pathlib.Path(temporary)
@@ -117,8 +120,9 @@ class AssemblerTests(unittest.TestCase):
                     entries = {name: archive.read(name) for name in archive.namelist() if name != missing}
                 manifest["components"][component]["sha256"] = write_zip(archive_path, entries)
                 manifest_path.write_text(json.dumps(manifest))
-                with self.assertRaisesRegex(assemble.InvalidCandidate, "nmx.*node"):
+                with self.assertRaises(assemble.InvalidCandidate) as refused:
                     assemble.assemble(manifest_path, root / "kit", pathlib.Path(__file__).resolve().parents[4])
+                self.assertIn(missing, str(refused.exception))
                 self.assertFalse((root / "kit").exists())
 
     def test_success_preserves_tars_and_always_denies_hardware_readiness(self):

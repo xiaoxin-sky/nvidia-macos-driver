@@ -84,6 +84,33 @@ uhd_run_bounded() (
     exit "$code"
 )
 
+# Read one actual kextstat/kmutil table row, not a diagnostic mentioning the
+# bundle. macOS 15 kextstat echoes an "Executing: ... --bundle-identifier NAME"
+# line on stderr; counting that as a second module refused the real r10 image.
+# The caller has checked the command exit status and still compares this UUID
+# with the candidate LC_UUID. Missing, duplicate or malformed rows stay errors.
+uhd_loaded_kext_uuid() {
+    local report=$1 bundle=$2
+    awk -v name="$bundle" '
+        $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ &&
+        $3 ~ /^0x[0-9A-Fa-f]+$/ && $4 ~ /^0x[0-9A-Fa-f]+$/ &&
+        $5 ~ /^0x[0-9A-Fa-f]+$/ && $6 == name {
+            count++
+            identity = tolower($8)
+            n = split(identity, parts, "-")
+            if (n != 5 || length(parts[1]) != 8 || length(parts[2]) != 4 ||
+                length(parts[3]) != 4 || length(parts[4]) != 4 || length(parts[5]) != 12)
+                invalid = 1
+            gsub(/-/, "", identity)
+            if (length(identity) != 32 || identity ~ /[^0-9a-f]/) invalid = 1
+        }
+        END {
+            if (count != 1 || invalid) exit 1
+            print identity
+        }
+    ' "$report"
+}
+
 # Extract the native little-endian x86_64 Mach-O LC_UUID without Xcode tools.
 # Input is an already ownership-checked regular file. The returned lowercase
 # UUID has no punctuation, matching the normalized kextstat identity.
