@@ -14,6 +14,7 @@ def prepare(source_path, template_path, output_path):
     source = source_path.read_text(encoding="utf-8")
     names = [
         "static void connectFire(", "void acceptState(", "bool copyMode(",
+        "IOReturn enableController(",
         "static uint32_t refresh16(", "IOReturn refreshDisplayState(",
         "IOItemCount getDisplayModeCount(", "IOReturn getDisplayModes(",
         "IOReturn getInformationForDisplayMode(", "IOReturn getPixelInformation(",

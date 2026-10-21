@@ -105,6 +105,10 @@ printf 'class NMXGPUFB\n"nmxdiag-stage" = "attach.complete ret=0"\n' > "$TASK_TM
 session_registry_ready "$TASK_TMP/registry"
 printf 'class NMXGPUFB\n"nmxdiag-stage" = "pm.callback.after ret=0"\n' > "$TASK_TMP/registry"
 session_registry_ready "$TASK_TMP/registry"
+printf 'class NMXGPUFB\n"nmxdiag-attach-complete" = Yes\n"nmxdiag-stage" = "fb.commit.after ret=0"\n' > "$TASK_TMP/registry"
+session_registry_ready "$TASK_TMP/registry"
+printf 'class NMXGPUFB\n"nmxdiag-attach-complete" = No\n"nmxdiag-stage" = "pm.callback.after ret=0"\n' > "$TASK_TMP/registry"
+if session_registry_ready "$TASK_TMP/registry"; then exit 1; fi
 printf '"nullmoth-gpu-state" = "failed: port attach; guard retained"\n' >> "$TASK_TMP/registry"
 if session_registry_ready "$TASK_TMP/registry"; then exit 1; fi
 printf '"nmxdiag-stage" = "attach.complete ret=0"\n' > "$TASK_TMP/registry"

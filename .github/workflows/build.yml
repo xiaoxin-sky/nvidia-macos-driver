@@ -292,6 +292,11 @@ jobs:
           test -f /tmp/nmx-pci-class-test-ok || { echo "::error::PCI class iterator fixture did not pass"; exit 1; }
           test -f /tmp/nmx-display-fixtures-ok || { echo "::error::display lifecycle/fault fixtures did not pass"; exit 1; }
           echo "NMXGPU diagnostic symbols and stage markers verified"
+          grep -Eq '[[:space:]][Tt][[:space:]]_nmx_fb_activate$' /tmp/nmxgpu-symbols.txt \
+            || { echo "::error::native display handoff entry missing"; exit 1; }
+          for marker in 'fb.commit.deferred' 'native enableController' 'nmxdiag-attach-complete'; do
+            grep -Fq "$marker" /tmp/nmxgpu-strings.txt || { echo "::error::native handoff marker missing: $marker"; exit 1; }
+          done
 
       - name: Preflight native kernel collection without loading the driver
         if: success()

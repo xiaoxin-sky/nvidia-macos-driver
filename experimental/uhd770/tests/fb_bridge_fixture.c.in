@@ -122,7 +122,7 @@ static int map_error, map_failures, noncontiguous, probe_error_call, check_error
 static int commit_error_call, no_output, probe_calls, check_calls, commit_calls;
 static unsigned register_width, register_height, mode_cap;
 static struct drm_crtc mock_crtc = {NMX_GAMMA_ENTRIES};
-static unsigned gamma_calls;
+static unsigned gamma_calls, dpms_calls;
 static int gamma_error;
 static uint16_t gamma_store[3][NMX_GAMMA_ENTRIES];
 static struct drm_client_dev *registered[8];
@@ -205,7 +205,7 @@ static int drm_client_modeset_commit(struct drm_client_dev *c) {
     return commit_error_call == commit_calls || rollback_error_call == commit_calls ? -EINVAL : 0;
 }
 static int drm_client_modeset_dpms(struct drm_client_dev *c, int mode) {
-    (void)c; (void)mode; return 0;
+    (void)c; (void)mode; ++dpms_calls; return 0;
 }
 static void drm_client_register(struct drm_client_dev *c) {
     assert(registered_count < 8);
@@ -295,7 +295,7 @@ static void reset(void) {
     commit_error_call = no_output = probe_calls = check_calls = commit_calls = 0;
     register_width = register_height = mode_cap = 0;
     mock_crtc.gamma_size = NMX_GAMMA_ENTRIES;
-    gamma_calls = 0; gamma_error = 0;
+    gamma_calls = 0; dpms_calls = 0; gamma_error = 0;
     driver.name = "i915";
     duplicate_error = rollback_error_call = 0;
     mock_connector.status = connector_status_connected;
@@ -333,6 +333,17 @@ int main(void) {
     assert(nmx_fb_open(&device, &info) == ENXIO && !info.ok);
     reset();
     assert(!nmx_fb_open(&device, &info) && info.ok);
+    assert(commit_calls == 0 && !fbs[0].fb->activated);
+    assert(!registered[0]->funcs->restore(registered[0]) && commit_calls == 0);
+    assert(!nmx_fb_power(&device, 1) && dpms_calls == 0);
+    assert(!nmx_fb_power(&device, 0) && dpms_calls == 0);
+    {
+        struct nmx_display_state pending;
+        assert(!nmx_fb_display_state(&device, &pending));
+        assert(nmx_fb_set_mode(&device, pending.current_mode, &pending) == EAGAIN);
+    }
+    assert(!nmx_fb_activate(&device) && commit_calls == 1 && fbs[0].fb->activated);
+    assert(!nmx_fb_activate(&device) && commit_calls == 1);
     assert(register_width == 3840 && register_height == 2160);
     assert(nmx_fb_open(&device, &info) == EBUSY);
     assert(!nmx_fb_power(&device, 1));
@@ -365,12 +376,16 @@ int main(void) {
     reset(); check_error_call = 1;
     assert(!nmx_fb_open(&device, &info) && info.width == 1920);
     reset(); commit_error_call = 1;
-    assert(!nmx_fb_open(&device, &info) && info.width == 1920);
+    assert(!nmx_fb_open(&device, &info) && commit_calls == 0);
+    assert(nmx_fb_activate(&device) == EINVAL && !fbs[0].fb->activated);
+    assert(!nmx_fb_power(&device, 1) && dpms_calls == 0);
+    nmx_fb_close(&device);
+    assert(dpms_calls == 0 && nmx_fb_activate(&device) == ENODEV);
     reset(); probe_error_call = 2;
     assert(nmx_fb_open(&device, &info) == EIO && !info.ok);
     assert(registered_count == 1 && initialized == 1 && buffers == 1 && maps == 1);
     assert(nmx_fb_power(&device, 1) == ENODEV);
-    reset(); commit_error_call = 2;
+    reset(); check_error_call = 2;
     assert(nmx_fb_open(&device, &info) == EINVAL && !info.ok);
     assert(registered_count == 1 && buffers == 1 && maps == 1);
     reset(); map_failures = 1; map_error = EFAULT;
@@ -388,6 +403,7 @@ int main(void) {
         struct nmx_display_state state, after;
         uint8_t block[128];
         assert(!nmx_fb_open(&device, &info));
+        assert(!nmx_fb_activate(&device));
         assert(!nmx_fb_display_state(&device, &state));
         assert(state.connected && !state.error && state.mode_count == 4 && state.edid_size == 256);
         probe_error_call = probe_calls + 1;
@@ -441,6 +457,6 @@ int main(void) {
         assert(nmx_fb_display_state(&device, &after) == ENODEV);
     }
     reset();
-    puts("Framebuffer bridge fixture passed: ownership faults, gamma, EDID, mode IDs, mode rollback and reconnect");
+    puts("Framebuffer bridge fixture passed: native activation, ownership faults, gamma, EDID, mode IDs, mode rollback and reconnect");
     return 0;
 }

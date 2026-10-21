@@ -196,6 +196,8 @@ def check_component(archive, entries, name, spec):
         metadata["nmx_node_info_ioctl"] = "0x40084e44"
         require("NMX framebuffer start identity/order/failure tests passed" in read("logs/nmx-fb-start-test.log"),
                 "kernel: framebuffer controller initialization regression check missing/failed")
+        require("Framebuffer bridge fixture passed: native activation" in read("logs/nmx-fb-bridge-test.log"),
+                "kernel: native display handoff regression check missing/failed")
         require("NMX runtime-PM policy: actual i915 conditional wakerefs retained" in read("logs/nmx-runtime-pm-test.log"),
                 "kernel: runtime-PM configuration regression check missing/failed")
         require(not re.search(r"(?m)^-DCONFIG_PM(?:_SLEEP|_RUNTIME)?(?:=|$)", read("logs/amd.flags")),
@@ -207,6 +209,8 @@ def check_component(archive, entries, name, spec):
         metadata["commit_evidence"] = "artifact-source-commit-log"
         build = read("logs/build.txt")
         if name == "userland":
+            require("Vulkan diagnostic callback/optional extension/lifetime checks passed" in
+                    read("logs/probe-diagnostics-test.txt"), "userland: enumeration diagnostics regression missing/failed")
             require("Real Intel ICD and compute diagnostic compiled; no GPU executed." in build,
                     "userland: final success marker missing")
             require(re.fullmatch(r"CLOCK_UPTIME_RAW matches mach_absolute_time; converted deadline=\d+\s*",

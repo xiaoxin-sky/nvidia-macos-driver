@@ -178,6 +178,8 @@ struct Context {
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT diagnostic = VK_NULL_HANDLE;
+    PFN_vkDestroyDebugUtilsMessengerEXT destroyDiagnostic = nullptr;
     uint32_t family = 0;
     VkPhysicalDeviceProperties properties{};
     VkPhysicalDeviceMemoryProperties memory{};
@@ -188,9 +190,40 @@ struct Context {
     ~Context()
     {
         if (device && DestroyDevice) DestroyDevice(device, nullptr);
+        if (diagnostic && destroyDiagnostic) destroyDiagnostic(instance, diagnostic, nullptr);
         if (instance && DestroyInstance) DestroyInstance(instance, nullptr);
     }
 };
+
+// Capture the driver's explanation of initialization failures, including errors
+// before device enumeration succeeds. This callback observes only and must never
+// abort an API call. No validation layer or global driver configuration is used.
+VKAPI_ATTR VkBool32 VKAPI_CALL diagnosticMessage(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT,
+    const VkDebugUtilsMessengerCallbackDataEXT *data, void *)
+{
+    std::fprintf(stderr, "VULKAN_DIAGNOSTIC severity=0x%x id=%.256s message=%.4096s\n",
+                 static_cast<unsigned>(severity),
+                 data && data->pMessageIdName ? data->pMessageIdName : "unknown",
+                 data && data->pMessage ? data->pMessage : "no message");
+    return VK_FALSE;
+}
+
+// Optional instance diagnostics must not become another prerequisite for GPU
+// discovery. The caller still checks every Vulkan result and candidate identity.
+bool supportsDiagnostics(PFN_vkGetInstanceProcAddr get)
+{
+    const auto enumerate = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
+        get(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties"));
+    uint32_t count = 0;
+    if (!enumerate || enumerate(nullptr, &count, nullptr) != VK_SUCCESS || count > 512)
+        return false;
+    std::vector<VkExtensionProperties> extensions(count);
+    if (enumerate(nullptr, &count, extensions.data()) != VK_SUCCESS) return false;
+    for (const auto &item : extensions)
+        if (std::strcmp(item.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0) return true;
+    return false;
+}
 
 void createInstance(Context &c, PFN_vkGetInstanceProcAddr get)
 {
@@ -208,11 +241,38 @@ void createInstance(Context &c, PFN_vkGetInstanceProcAddr get)
     VkInstanceCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     info.pApplicationInfo = &app;
+    const bool diagnostics = supportsDiagnostics(get);
+    const char *diagnosticExtension = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    VkDebugUtilsMessengerCreateInfoEXT diagnostic{};
+    diagnostic.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    diagnostic.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                 VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    diagnostic.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                             VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                             VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    diagnostic.pfnUserCallback = diagnosticMessage;
+    if (diagnostics) {
+        info.enabledExtensionCount = 1;
+        info.ppEnabledExtensionNames = &diagnosticExtension;
+        info.pNext = &diagnostic;
+    }
     check(create(&info, nullptr, &c.instance), "vkCreateInstance");
 #define LOAD(name) c.name = reinterpret_cast<PFN_vk##name>(get(c.instance, "vk" #name)); \
     if (!c.name) fail("Missing instance function vk" #name);
     INSTANCE_FUNCTIONS(LOAD)
 #undef LOAD
+    if (diagnostics) {
+        const auto attach = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+            get(c.instance, "vkCreateDebugUtilsMessengerEXT"));
+        c.destroyDiagnostic = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+            get(c.instance, "vkDestroyDebugUtilsMessengerEXT"));
+        if (attach && c.destroyDiagnostic) {
+            const VkResult result = attach(c.instance, &diagnostic, nullptr, &c.diagnostic);
+            if (result != VK_SUCCESS) c.diagnostic = VK_NULL_HANDLE;
+            std::printf("debug_utils_attach=%d\n", result);
+        }
+    }
+    std::printf("debug_utils=%s\n", c.diagnostic ? "active" : "unavailable");
 }
 
 bool extension(const std::vector<VkExtensionProperties> &items, const char *name)
@@ -523,6 +583,7 @@ int main(int argc, char **argv)
         environment("VK_ICD_FILENAMES", o.icd.c_str());
         environment("VK_INSTANCE_LAYERS", "");
         environment("VK_LOADER_LAYERS_DISABLE", "~all~");
+        environment("VK_LOADER_DEBUG", "error,warn,driver");
         std::printf("probe_version=1 loader=%s icd=%s shader=%s deadline_s=%u\n",
                     o.loader.c_str(), o.icd.c_str(), o.shader.c_str(), o.deadline);
 #ifndef _WIN32

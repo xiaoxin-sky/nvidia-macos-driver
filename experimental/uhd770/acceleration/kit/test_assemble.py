@@ -65,6 +65,7 @@ def fixtures(root, missing_clock=False):
         "logs/kernel-collection-preflight.txt": "Native KC symbol/dependency preflight passed\n",
         "logs/nmx-drm-node-test.log": "NMX DRM file identity: actual helper, ABI, shared opens and invalid minors passed\n",
         "logs/nmx-fb-start-test.log": "NMX framebuffer start identity/order/failure tests passed\n",
+        "logs/nmx-fb-bridge-test.log": "Framebuffer bridge fixture passed: native activation\n",
         "logs/nmx-runtime-pm-test.log": "NMX runtime-PM policy: actual i915 conditional wakerefs retained; no GPU power test\n",
         "logs/amd.flags": "-DCONFIG_DRM_I915\n",
         "NMXGPU.kext/Contents/MacOS/NMXGPU": b"synthetic Mach-O placeholder" * 100,
@@ -73,6 +74,7 @@ def fixtures(root, missing_clock=False):
     for prefix, count in [("logs/logs/", 900), ("logs/logs-i915/", 274), ("logs/lklogs/", 76)]:
         kernel.update({f"{prefix}unit-{index}.log": "synthetic compile log\n" for index in range(count)})
     userland = {
+        "logs/probe-diagnostics-test.txt": "Vulkan diagnostic callback/optional extension/lifetime checks passed; no GPU executed.\n",
         "logs/build.txt": "Real Intel ICD and compute diagnostic compiled; no GPU executed.\n",
         "logs/source-commit.txt": "a" * 40 + "\n", "logs/acceleration-sources.json": "{}\n",
         "logs/native_clock_smoke.txt": "CLOCK_UPTIME_RAW matches mach_absolute_time; converted deadline=500000000\n",

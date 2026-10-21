@@ -47,6 +47,8 @@ struct OSObject {
 };
 using IOFBInterruptProc = void (*)(OSObject *, void *);
 struct IOFramebuffer : OSObject {
+    const char *display_state = nullptr;
+    bool setProperty(const char *, const char *value) { display_state = value; return true; }
     IOReturn getAttributeForConnection(IOIndex, IOSelect, uintptr_t *) { return kIOReturnUnsupported; }
 };
 struct IOLock { std::mutex mutex; std::condition_variable condition; };
@@ -89,6 +91,9 @@ struct IOTimingInformation {
 };
 static nmx_display_state remote_state{};
 static int query_error = 0, switch_error = 0;
+static int activation_error = 0, activation_calls = 0;
+int nmx_fb_activate(void *) { ++activation_calls; return activation_error; }
+#define FBLOG(...) ((void)0)
 int nmx_fb_display_state(void *, nmx_display_state *out) {
     *out = remote_state; return query_error;
 }
@@ -115,6 +120,12 @@ public:
 static void connected(OSObject *, void *ref) { ++*static_cast<unsigned *>(ref); }
 int main() {
     NMXGPUFB fb;
+    assert(fb.enableController() == kIOReturnSuccess && activation_calls == 1);
+    assert(!std::strcmp(fb.display_state, "active"));
+    activation_error = EIO;
+    assert(fb.enableController() == kIOReturnError && activation_calls == 2);
+    assert(!std::strcmp(fb.display_state, "activation-failed"));
+    activation_error = 0;
     fb.fInfo.width = 3840; fb.fInfo.height = 2160; fb.fInfo.pitch = 15360;
     remote_state.generation = 1; remote_state.connected = 1; remote_state.current_mode = 7;
     remote_state.mode_count = 2;

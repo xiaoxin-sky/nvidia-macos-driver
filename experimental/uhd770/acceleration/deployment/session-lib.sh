@@ -372,13 +372,17 @@ session_recorder_valid() {
     grep -q 'collector_command_exit=0' "$report/ioreg-NMXAccel-0.txt" || return 1
 }
 
-# PM callbacks can overwrite the last attach checkpoint after successful
-# lifecycle completion. In that case require the published framebuffer plus a
-# successful completed PM callback; a claim or framebuffer alone is insufficient.
+# Display activation and PM callbacks can replace the last trace checkpoint.
+# New kernels keep attach completion separately; older reviewed kernels retain
+# the completion/PM trace fallback. Neither property establishes GPU readback.
 session_registry_ready() {
     local report=$1
     grep -Eq 'failed:|parked:|cancelled:|attach.no_framebuffer' "$report" && return 1
     grep -q 'class NMXGPUFB' "$report" || return 1
+    if grep -q '"nmxdiag-attach-complete"' "$report"; then
+        grep -Eq '"nmxdiag-attach-complete"[[:space:]]*=[[:space:]]*Yes' "$report"
+        return
+    fi
     grep -Eq '(attach.complete|pm.callback.after) ret=0(["[:space:]]|$)' "$report"
 }
 

@@ -85,6 +85,10 @@ cmake --install "$B/loader"
 cmake -S "$REPO/experimental/uhd770/acceleration/probe" -B "$B/probe" \
   "${COMMON[@]}" -DVULKAN_INCLUDE_DIR="$P/include"
 cmake --build "$B/probe" -j 3
+c++ -std=c++17 -Wall -Wextra -Werror -I"$P/include" \
+  "$REPO/experimental/uhd770/acceleration/tests/probe_diagnostics_fixture.cpp" \
+  -o "$B/probe-diagnostics-test"
+"$B/probe-diagnostics-test" 2>&1 | tee "$OUT/logs/probe-diagnostics-test.txt"
 cp "$B/mesa/src/intel/vulkan/libvulkan_intel.dylib" "$OUT/Library/GPUBundles/nvmtl/"
 cp "$B/probe/uhd770-compute-probe" "$B/probe/verify.comp.spv" "$OUT/probe/"
 python3 "$REPO/experimental/uhd770/acceleration/relocate.py" \
