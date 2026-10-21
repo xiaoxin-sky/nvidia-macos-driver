@@ -1,7 +1,9 @@
 #!/bin/bash -p
 # Retire a failed preparation or an explicitly restored completed session.
 # This preserves the complete stage and all reports. It never restores/replaces
-# live drivers, edits EFI, starts preparation, or submits GPU work.
+# live drivers, edits EFI, starts preparation, or submits GPU work. The explicit
+# reviewed-fbfix mode can retire only the known r9 attach marker for the pinned
+# replacement kernel, after restoration, evidence export and recorder shutdown.
 set -euo pipefail
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
@@ -15,16 +17,21 @@ OWN_LOCK=0
 
 stop() { printf 'STOP: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: sudo /bin/bash -p Archive-UHD770-Failed.command [--restored-session]' \
+    printf '%s\n' 'Usage: sudo /bin/bash -p Archive-UHD770-Failed.command [--restored-session [--reviewed-fbfix]]' \
       'Archive only a failed preparation with an empty or fully restored installation journal.' \
       '--restored-session: require explicit session.sh restore and every installation receipt before archiving.' \
+      '--reviewed-fbfix: permit the reviewed r9 -> framebuffer-fix kernel transition only; save and clear its attach marker if present.' \
       'Export evidence, stop this kit recorder, and preserve the stage in a unique root-only sibling.' \
       'No deletion of reports, EFI change, driver installation, GPU test, or reboot.' \
       'After ARCHIVED, run the newer kit Start-UHD770.command yourself.'
 }
 [ "${1:-}" != --help ] || { usage; exit 0; }
 RETIRE_MODE=failed
-if [ "$#" -eq 1 ] && [ "$1" = --restored-session ]; then
+REVIEWED_FBFIX=0
+if [ "$#" -eq 2 ] && [ "$1" = --restored-session ] && [ "$2" = --reviewed-fbfix ]; then
+    RETIRE_MODE=restored
+    REVIEWED_FBFIX=1
+elif [ "$#" -eq 1 ] && [ "$1" = --restored-session ]; then
     RETIRE_MODE=restored
 elif [ "$#" -ne 0 ]; then
     usage >&2; exit 64
@@ -178,8 +185,31 @@ case "$owner" in *'class NMXGPU'*) stop 'A GPU service is attached; stage preser
 gpu=$(ioreg -r -n IGPU -l -w0) || stop 'Cannot inspect Intel hardware.'
 printf '%s\n' "$gpu" | grep -Eq '"device-id"[[:space:]]*=[[:space:]]*<80460000>' || stop 'UHD 770 4680 required.'
 printf '%s\n' "$gpu" | grep -Eq '"vendor-id"[[:space:]]*=[[:space:]]*<86800000>' || stop 'Intel 8086 required.'
-if guard=$(nvram nullmoth-gpu-attaching 2>&1); then stop 'Attach guard is present; preserved.'; fi
-case "$guard" in *'data was not found'*) ;; *) stop 'Attach guard query failed unexpectedly.' ;; esac
+GUARD_PRESENT=0
+if guard=$(nvram nullmoth-gpu-attaching 2>&1); then
+    GUARD_PRESENT=1
+    [ "$REVIEWED_FBFIX" -eq 1 ] || stop 'Attach guard is present; preserved.'
+    [ "$guard" = "$(printf 'nullmoth-gpu-attaching\t1')" ] || stop 'Unknown attach marker value; preserved.'
+else
+    case "$guard" in *'data was not found'*) ;; *) stop 'Attach guard query failed unexpectedly.' ;; esac
+fi
+
+# This is one reviewed transition, not a force/retry switch. The immutable
+# original tar is still available after restore; ad-hoc signed live kexts cannot
+# identify the original bytes. Pin both actual tar digests independently of any
+# editable manifest, and do not accept a same-kernel retry or another old kit.
+current_kit=$(cd "$(dirname "$0")" && pwd -P)
+if [ "$REVIEWED_FBFIX" -eq 1 ]; then
+    old_kernel="$ROOT/incoming/candidate/uhd770-acceleration-kernel.tar.gz"
+    new_kernel="$current_kit/candidate/uhd770-acceleration-kernel.tar.gz"
+    trusted_path "$old_kernel"
+    [ -f "$old_kernel" ] && [ -f "$new_kernel" ] && [ ! -L "$new_kernel" ] || stop 'Pinned kernel archives are missing/linked.'
+    old_hash=$(shasum -a 256 "$old_kernel" | awk '{print $1}')
+    new_hash=$(shasum -a 256 "$new_kernel" | awk '{print $1}')
+    [ "$old_hash" = 252cd1c4fc9be71416af8a1e452c587cd1af587b33f832ef3ea770b5b5124a67 ] || stop 'This reviewed transition requires the original r9 kernel; guard preserved.'
+    [ "$new_hash" = 245f7aed51a89a8ea71bb3df706dc9ddaed40107277a0cbd8e32a80ef079d06a ] || stop 'Framebuffer-fix kernel identity mismatch; guard preserved.'
+    [ -f "$current_kit/tools/session.sh" ] && [ ! -L "$current_kit/tools/session.sh" ] || stop 'Current exporter is missing/linked.'
+fi
 
 # No recovery/session jobs may still depend on the stage being moved.
 for path in /Library/LaunchDaemons/com.uhd770.mvp.session.plist \
@@ -212,6 +242,13 @@ done
 actual=$(shasum -a 256 "$mount/EFI/OC/config.plist" | awk '{print $1}')
 [ "$actual" = "$safe" ] || stop 'USB is not the exact safe opt-out configuration.'
 
+if [ "$REVIEWED_FBFIX" -eq 1 ]; then
+    review_report=$(mktemp -d "$ROOT/session-private/reviewed-fbfix.XXXXXX")
+    printf '%s\n' "$guard" > "$review_report/guard-before.txt"
+    printf 'old_kernel_sha256=%s\nnew_kernel_sha256=%s\nguard_present=%s\n' \
+        "$old_hash" "$new_hash" "$GUARD_PRESENT" > "$review_report/identity.txt"
+fi
+
 printf 'Verified %s session; journal=%s entries=%s. Exporting existing evidence...\n' "$RETIRE_MODE" "$JOURNAL_STATE" "$JOURNAL_ENTRIES"
 if [ "$JOURNAL_ENTRIES" -gt 0 ]; then
     printf 'Restoration receipts and current presence/types were checked. Original byte hashes were not recorded; byte equality cannot be verified.\n'
@@ -219,7 +256,6 @@ fi
 /bin/bash -p "$ROOT/incoming/tools/session.sh" export
 # Use the current kit's corrected stop contract, never the old staged manager
 # that could swallow bootout errors and remove the still-registered job's plist.
-current_kit=$(cd "$(dirname "$0")" && pwd -P)
 library="$current_kit/tools/session-lib.sh"
 [ -f "$library" ] && [ ! -L "$library" ] || stop 'Current kit session helper is missing/linked.'
 . "$library"
@@ -234,10 +270,30 @@ printf 'helper_exit=%s\n' "$stop_code" > "$stop_report/helper-exit.txt"
 # The current exporter includes these new stop diagnostics; the old stage's
 # exporter predates them. Export before reporting failure or moving the stage.
 if [ -f "$current_kit/tools/session.sh" ] && [ ! -L "$current_kit/tools/session.sh" ]; then
-    /bin/bash -p "$current_kit/tools/session.sh" export || printf 'Stop diagnostic export failed; original: %s\n' "$stop_report" >&2
+    if [ "$REVIEWED_FBFIX" -eq 1 ]; then
+        /bin/bash -p "$current_kit/tools/session.sh" export || stop 'Reviewed transition evidence export failed; guard preserved.'
+    else
+        /bin/bash -p "$current_kit/tools/session.sh" export || printf 'Stop diagnostic export failed; original: %s\n' "$stop_report" >&2
+    fi
 fi
 [ "$stop_code" -eq 0 ] || stop "Recorder stop was not verified. Stage and diagnostics preserved: $stop_report"
 printf 'Recorder stop verified; no driver, firmware, KC or EFI was changed.\n'
+# Leave every other NVRAM variable and the next-boot -nvoff config alone. The
+# default path still refuses any marker. Deletion is never attempted until the
+# reviewed pair, ten restore receipts, safe USB and independent export passed.
+if [ "$REVIEWED_FBFIX" -eq 1 ] && [ "$GUARD_PRESENT" -eq 1 ]; then
+    current_guard=$(nvram nullmoth-gpu-attaching 2>&1) || stop 'Attach marker changed before retirement; preserved.'
+    [ "$current_guard" = "$guard" ] || stop 'Attach marker changed before retirement; preserved.'
+    nvram -d nullmoth-gpu-attaching > "$review_report/delete.txt" 2>&1 || stop 'Attach marker could not be retired; no new test was prepared.'
+    if nvram nullmoth-gpu-attaching > "$review_report/guard-after.txt" 2>&1; then
+        stop 'Attach marker is still present; no new test was prepared.'
+    fi
+    grep -Fq 'data was not found' "$review_report/guard-after.txt" || stop 'Cannot confirm attach marker retirement; no new test was prepared.'
+    printf 'guard_retired=verified\nnext_boot=-nvoff\n' > "$review_report/result.txt"
+    cp "$review_report/result.txt" "$stop_report/reviewed-guard-result.txt"
+    cp "$review_report/guard-after.txt" "$stop_report/reviewed-guard-after.txt"
+    printf 'Reviewed r9 attach marker saved and retired for the fixed kernel. No test was enabled.\n'
+fi
 # Same-filesystem rename into a newly created root-only parent never overwrites
 # another archive and keeps the old journal, scripts and signatures together.
 archive=$(mktemp -d "$PARENT/UHD770MVP-retired.XXXXXX")

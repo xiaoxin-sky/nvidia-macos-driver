@@ -466,6 +466,10 @@ class SessionFlowTests(unittest.TestCase):
         transcript = (b"STOP: Unsafe owner/mode: /private/var/run\n" +
                       b"early ancestor diagnostic\n" * 400 + b"final child_exit=23\n")
         (bootstrap / "prepare.txt").write_bytes(transcript)
+        reviewed = self.installed / "session-private/reviewed-fbfix.example"
+        reviewed.mkdir(parents=True, mode=0o700)
+        guard_snapshot = b"nullmoth-gpu-attaching\t1\n"
+        (reviewed / "guard-before.txt").write_bytes(guard_snapshot)
         self.assertFalse((self.installed / "session-public/plan.plist").exists())
         exported = self.run_session("export")
         self.assertEqual(exported.returncode, 0, exported.stderr.decode())
@@ -474,6 +478,8 @@ class SessionFlowTests(unittest.TestCase):
         saved = reports[0] / "bootstrap/UHD770MVP-bootstrap.sample/prepare.txt"
         self.assertEqual(saved.read_bytes(), transcript)
         self.assertEqual((bootstrap / "prepare.txt").read_bytes(), transcript)
+        self.assertEqual((reports[0] / "recorder-stop/reviewed-fbfix.example/guard-before.txt").read_bytes(),
+                         guard_snapshot)
         self.assertFalse((self.installed / "session-public/plan.plist").exists())
         self.assertEqual(self.usb.read_bytes(), self.safe)
         self.assertFalse((self.root / "probe-calls").exists())

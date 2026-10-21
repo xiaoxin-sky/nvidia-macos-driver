@@ -32,7 +32,20 @@ case "$name" in
  ioreg)
    if [ "$3" = IGPU ]; then printf '"device-id" = <80460000>\n"vendor-id" = <86800000>\n';
    elif [ "${ARCHIVE_ATTACHED:-0}" = 1 ]; then printf 'class NMXGPU\n'; fi ;;
- nvram) printf 'data was not found\n' >&2; exit 1 ;;
+ nvram)
+   printf '%s\n' "$*" >> "$base/nvram-calls"
+   if [ "$*" = '-d nullmoth-gpu-attaching' ]; then
+     printf 'delete-guard\n' >> "$base/events"
+     [ "${ARCHIVE_DELETE_FAIL:-0}" != 1 ] || exit 5
+     [ "${ARCHIVE_DELETE_STUCK:-0}" = 1 ] || rm -f "$base/attach-guard"
+     exit 0
+   fi
+   [ "$*" = nullmoth-gpu-attaching ] || exit 93
+   [ "${ARCHIVE_GUARD_QUERY_ERROR:-0}" != 1 ] || { printf 'permission denied\n' >&2; exit 5; }
+   if [ -f "$base/attach-guard" ]; then
+     printf 'nullmoth-gpu-attaching\t%s\n' "$(cat "$base/attach-guard")"; exit 0
+   fi
+   printf 'data was not found\n' >&2; exit 1 ;;
  plutil)
    case "$2" in
      Label) printf 'com.uhd770.mvp.capture\n' ;;
@@ -48,6 +61,12 @@ case "$name" in
    esac ;;
  diskutil) printf 'fixture disk information\n' ;;
  shasum)
+   case "${3:-}" in
+     */incoming/candidate/uhd770-acceleration-kernel.tar.gz)
+       printf '%s  old-kernel\n' "${ARCHIVE_OLD_KERNEL_HASH:-252cd1c4fc9be71416af8a1e452c587cd1af587b33f832ef3ea770b5b5124a67}"; exit 0 ;;
+     */candidate/uhd770-acceleration-kernel.tar.gz)
+       printf '%s  new-kernel\n' "${ARCHIVE_NEW_KERNEL_HASH:-245f7aed51a89a8ea71bb3df706dc9ddaed40107277a0cbd8e32a80ef079d06a}"; exit 0 ;;
+   esac
    [ "${ARCHIVE_BAD_HASH:-0}" != 1 ] && printf '%s  fixture\n' "$ARCHIVE_SAFE" || printf '%064d  fixture\n' 0 ;;
  launchctl)
    printf '%s\n' "$*" >> "$base/launchctl-calls"
@@ -291,6 +310,104 @@ class ArchiveFailedTests(unittest.TestCase):
         self.assert_refused_without_archiving(self.run_helper("--restored-session"))
         (self.journal / "nmxgpu.backup").write_bytes(b"unresolved original")
         self.assert_refused_without_archiving(self.run_helper("--restored-session"))
+
+    def reviewed_transition(self, marker="1"):
+        """Model a restored r9 and exact replacement without touching real NVRAM.
+
+        The command adapter supplies independently pinned digest results; the
+        production comparisons and every mutation ordering check remain active.
+        Only the completed journal permits reaching the reviewed transition.
+        """
+        for key in self.TARGETS:
+            self.restored_entry(key, "absent" if key in ("rootjob", "userjob") else "present")
+        (self.stage / "session-public/state.txt").write_text("restored\n")
+        (self.private / "failure.txt").unlink()
+        for parent in (self.stage / "incoming/candidate", self.root / "candidate"):
+            parent.mkdir(parents=True)
+            (parent / "uhd770-acceleration-kernel.tar.gz").write_bytes(b"inert pinned archive")
+        (self.root / "tools/session.sh").write_text(
+            '#!/bin/bash\nset -eu\n[ "$1" = export ] || exit 91\n'
+            'printf "current-export\\n" >> "$ARCHIVE_FIXTURE/events"\n'
+            '[ "${ARCHIVE_EXPORT_FAIL:-0}" != 1 ] || exit 5\n', encoding="utf-8")
+        if marker is not None:
+            (self.root / "attach-guard").write_text(marker)
+
+    def test_reviewed_transition_saves_marker_and_retires_only_after_export_and_stop(self):
+        self.reviewed_transition()
+        args = ("--restored-session", "--reviewed-fbfix")
+        result = self.run_helper(*args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ARCHIVED", result.stdout)
+        self.assertFalse((self.root / "attach-guard").exists())
+        self.assertEqual((self.root / "events").read_text(),
+                         "export\nremove-recorder\ncurrent-export\ndelete-guard\n")
+        self.assertEqual((self.root / "nvram-calls").read_text(),
+                         "nullmoth-gpu-attaching\nnullmoth-gpu-attaching\n-d nullmoth-gpu-attaching\nnullmoth-gpu-attaching\n")
+        archive = next(self.stage.parent.glob("UHD770MVP-retired.*"))
+        receipt = next((archive / "stage/session-private").glob("reviewed-fbfix.*"))
+        self.assertEqual((receipt / "guard-before.txt").read_text(), "nullmoth-gpu-attaching\t1\n")
+        self.assertIn("guard_retired=verified", (receipt / "result.txt").read_text())
+        self.assertEqual(hashlib.sha256(self.efi.read_bytes()).hexdigest(), self.safe)
+
+    def test_reviewed_absent_marker_never_issues_a_delete(self):
+        self.reviewed_transition(marker=None)
+        result = self.run_helper("--restored-session", "--reviewed-fbfix")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("delete-guard", (self.root / "events").read_text())
+        self.assertEqual((self.root / "nvram-calls").read_text(), "nullmoth-gpu-attaching\n")
+
+    def test_marker_is_preserved_without_explicit_reviewed_transition(self):
+        self.reviewed_transition()
+        result = self.run_helper("--restored-session")
+        self.assert_refused_without_archiving(result)
+        self.assertEqual((self.root / "attach-guard").read_text(), "1")
+
+    def test_reviewed_transition_refuses_unknown_kernels_hardware_and_guard_queries(self):
+        self.reviewed_transition()
+        for changes in ({"ARCHIVE_OLD_KERNEL_HASH": "0" * 64},
+                        {"ARCHIVE_NEW_KERNEL_HASH": "252cd1c4fc9be71416af8a1e452c587cd1af587b33f832ef3ea770b5b5124a67"},
+                        {"ARCHIVE_ATTACHED": "1"}, {"ARCHIVE_BOOTARGS": "-v nmxintel=1"},
+                        {"ARCHIVE_BAD_HASH": "1"}, {"ARCHIVE_GUARD_QUERY_ERROR": "1"}):
+            with self.subTest(changes=changes):
+                result = self.run_helper("--restored-session", "--reviewed-fbfix", **changes)
+                self.assert_refused_without_archiving(result)
+                self.assertEqual((self.root / "attach-guard").read_text(), "1")
+        (self.root / "attach-guard").write_text("unexpected")
+        self.assert_refused_without_archiving(self.run_helper("--restored-session", "--reviewed-fbfix"))
+
+    def test_reviewed_transition_needs_all_receipts_before_mutation(self):
+        self.reviewed_transition()
+        (self.journal / "auxkc.restored").unlink()
+        self.assert_refused_without_archiving(self.run_helper("--restored-session", "--reviewed-fbfix"))
+        self.assertEqual((self.root / "attach-guard").read_text(), "1")
+
+    def test_reviewed_export_failure_preserves_guard_and_stage(self):
+        self.reviewed_transition()
+        result = self.run_helper("--restored-session", "--reviewed-fbfix", ARCHIVE_EXPORT_FAIL="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("export failed", result.stderr)
+        self.assertTrue(self.stage.exists())
+        self.assertEqual((self.root / "attach-guard").read_text(), "1")
+        self.assertNotIn("delete-guard", (self.root / "events").read_text())
+
+    def test_reviewed_recorder_failure_preserves_guard_and_stage(self):
+        self.reviewed_transition()
+        result = self.run_helper("--restored-session", "--reviewed-fbfix", ARCHIVE_RECORDER_STUCK="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Recorder stop was not verified", result.stderr)
+        self.assertTrue(self.stage.exists())
+        self.assertEqual((self.root / "attach-guard").read_text(), "1")
+        self.assertNotIn("delete-guard", (self.root / "events").read_text())
+
+    def test_reviewed_failed_deletion_or_remaining_marker_never_archives(self):
+        self.reviewed_transition()
+        for changes in ({"ARCHIVE_DELETE_FAIL": "1"}, {"ARCHIVE_DELETE_STUCK": "1"}):
+            with self.subTest(changes=changes):
+                result = self.run_helper("--restored-session", "--reviewed-fbfix", **changes)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(self.stage.exists())
+                self.assertFalse(list(self.stage.parent.glob("UHD770MVP-retired.*")))
+                self.assertEqual((self.root / "attach-guard").read_text(), "1")
 
     def test_unknown_keys_and_unresolved_backups_are_preserved(self):
         for name in ("foreign.target", "nmxgpu.backup", "runtime.backup-pending", "frontend.replaced-pending", ".hidden"):

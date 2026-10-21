@@ -195,13 +195,13 @@ prepare_parent() {
     done
 }
 
-# Include only protected stop reports created by this tool, with a finite copy
+# Include only protected stop/upgrade reports created by this tool, with a finite copy
 # budget. Originals remain root-only; export_all later gives the aggregate copy
 # to the selected user so Finder can retrieve failures without changing modes.
 export_stop_reports() {
     local output=$1 source owner mode invalid count blocks
     for source in /Users/Shared/UHD770MVP-recorder-stop.* "$ROOT"/recorder-stop.* \
-        "$PRIVATE"/root-job-stop.* "$PRIVATE"/restore-job-stop.*; do
+        "$PRIVATE"/root-job-stop.* "$PRIVATE"/restore-job-stop.* "$PRIVATE"/reviewed-fbfix.*; do
         [ -d "$source" ] && [ ! -L "$source" ] || continue
         owner=$(stat -f '%u' "$source") || continue
         mode=$(stat -f '%Lp' "$source") || continue
