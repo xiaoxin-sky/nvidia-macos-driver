@@ -45,6 +45,8 @@ Required evidence
 - Kernel: 900 DRM/AMD + 274 i915 + 76 runtime compilation logs, no failed units,
   successful source summaries, mapping/workqueue lifecycle tests and native KC
   linkage preflight, plus the NMX node-identity kernel helper/ABI check.
+  The native node open/identity/close fixture is also required, including a
+  retained Linux file finalized by fput after its native descriptor was closed.
 - Userland: final real-ANV/probe build marker, ANV mapping fixture, clock boundary
   fixture and native CLOCK_UPTIME_RAW versus mach_absolute_time comparison.
   Earlier userland artifacts without native_clock_smoke.txt are rejected.

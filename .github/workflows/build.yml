@@ -124,6 +124,12 @@ jobs:
             "$X" /tmp/nmx-drm-node-test.c
           cc -std=c11 -Wall -Wextra -Werror /tmp/nmx-drm-node-test.c -o /tmp/nmx-drm-node-test
           /tmp/nmx-drm-node-test | tee /tmp/nmx-drm-node-test.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_node_open_fixture.py" \
+            --port "$X" --freebsd "$S/kpi/freebsd-src" \
+            --template "$GITHUB_WORKSPACE/experimental/uhd770/tests/node_open_fixture.c.in" \
+            --output /tmp/nmx-node-open-test.c
+          cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter /tmp/nmx-node-open-test.c -o /tmp/nmx-node-open-test
+          /tmp/nmx-node-open-test | tee /tmp/nmx-node-open-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_fb_start_fixture.py" \
             "$X/xnu/nmx_fb.cpp" "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_start_fixture.cpp.in" \
             /tmp/nmx-fb-start-test.cpp
@@ -313,6 +319,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out/logs"
           cp /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log /tmp/genflags.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-drm-node-test.c /tmp/nmx-drm-node-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-node-open-test.c /tmp/nmx-node-open-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-fb-start-test.cpp /tmp/nmx-fb-start-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-runtime-pm-test.c /tmp/nmx-runtime-pm-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/amd.flags" "$GITHUB_WORKSPACE/out/logs/amd.flags" 2>/dev/null || true

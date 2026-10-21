@@ -64,6 +64,7 @@ def fixtures(root, missing_clock=False, missing_changing_lookup=False):
         "logs/nmx-taskqueue-test.log": "concurrency, requeue, cancel, drain and worker free passed\n",
         "logs/kernel-collection-preflight.txt": "Native KC symbol/dependency preflight passed\n",
         "logs/nmx-drm-node-test.log": "NMX DRM file identity: actual helper, ABI, shared opens and invalid minors passed\n",
+        "logs/nmx-node-open-test.log": "NMX native node lifecycle: actual open, logical inode, identity ioctl, deferred fput and failure cleanup passed\n",
         "logs/nmx-fb-start-test.log": "NMX framebuffer start identity/order/failure tests passed\n",
         "logs/nmx-fb-bridge-test.log": "Framebuffer bridge fixture passed: native activation\n",
         "logs/nmx-runtime-pm-test.log": "NMX runtime-PM policy: actual i915 conditional wakerefs retained; no GPU power test\n",
@@ -114,6 +115,7 @@ class AssemblerTests(unittest.TestCase):
     def test_legacy_kernel_or_userland_cannot_be_mixed_with_node_identity_pair(self):
         """Reject independently hashed older artifacts before making a kit."""
         for component, missing in (("kernel", "logs/nmx-drm-node-test.log"),
+                                   ("kernel", "logs/nmx-node-open-test.log"),
                                    ("kernel", "logs/nmx-runtime-pm-test.log"),
                                    ("userland", "logs/nmx-node-test.txt")):
             with self.subTest(component=component), tempfile.TemporaryDirectory() as temporary:

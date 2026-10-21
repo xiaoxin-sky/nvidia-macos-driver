@@ -1,0 +1,288 @@
+/* Execute extracted native node-open/DRM-identity/file-drop functions with
+ * inert allocation and device services. A successful open must preserve its
+ * logical minor, and Linux fput must finalize exactly once after devfs close.
+ * This checks the adapter contract, not GPU execution or concurrent teardown.
+ */
+#include <assert.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef unsigned int u_int;
+#define M_NMXCDEV 0
+#define M_WAITOK 1
+#define M_ZERO 2
+#define MTX_DEF 0
+#define VCHR 4
+#define FREAD 1
+#define FWRITE 2
+#define O_NONBLOCK 4
+#define O_APPEND 8
+#define DTYPE_DEV 3
+#define RCU_TYPE_REGULAR 0
+/* FreeBSD LinuxKPI's inode type is its compatibility vnode. */
+#define inode vnode
+#define DRM_MINOR_PRIMARY 0
+#define DRM_MINOR_RENDER 2
+#define NMX_DRM_NODE_PRIMARY 0
+#define NMX_DRM_NODE_RENDER 2
+#define NMX_DRM_IOCTL_NODE_INFO 0x40084e44UL
+#define NMX_DRM_IOCTL_MMAP 0x40084e40UL
+#define NMX_DRM_IOCTL_MUNMAP 0x40084e41UL
+#define KASSERT(condition, message) assert(condition)
+#define MTX_SYSINIT(...)
+#define minor(dev) ((unsigned)((dev) & 0xff))
+#define TAILQ_ENTRY(type) struct { struct type *tqe_next; struct type **tqe_prev; }
+#define TAILQ_HEAD(name, type) struct name { struct type *tqh_first; struct type **tqh_last; }
+#define TAILQ_INIT(head) do { (head)->tqh_first = NULL; (head)->tqh_last = &(head)->tqh_first; } while (0)
+#define TAILQ_FOREACH(entry, head, field) for ((entry) = (head)->tqh_first; (entry); (entry) = (entry)->field.tqe_next)
+#define TAILQ_INSERT_HEAD(head, entry, field) do { \
+    if (((entry)->field.tqe_next = (head)->tqh_first) != NULL) \
+        (head)->tqh_first->field.tqe_prev = &(entry)->field.tqe_next; \
+    else (head)->tqh_last = &(entry)->field.tqe_next; \
+    (head)->tqh_first = (entry); (entry)->field.tqe_prev = &(head)->tqh_first; \
+} while (0)
+#define TAILQ_REMOVE(head, entry, field) do { \
+    if ((entry)->field.tqe_next != NULL) \
+        (entry)->field.tqe_next->field.tqe_prev = (entry)->field.tqe_prev; \
+    else (head)->tqh_last = (entry)->field.tqe_prev; \
+    *(entry)->field.tqe_prev = (entry)->field.tqe_next; \
+} while (0)
+
+#ifdef _WIN32
+#pragma warning(disable: 4100 4146) /* pinned API has unused args and intentional -1U */
+/* This fixture is single-threaded; native CI compiles real compiler atomics. */
+#define __ATOMIC_ACQUIRE 0
+#define __ATOMIC_ACQ_REL 0
+#define __atomic_load_n(p, order) (*(p))
+#define __atomic_sub_fetch(p, value, order) (*(p) -= (value))
+#endif
+
+struct nmx_open;
+struct linux_file;
+struct file;
+struct vnode;
+struct cdev;
+typedef void d_priv_dtor_t(void *);
+struct thread { struct nmx_open *td_nmx_open; struct file *td_fpop; };
+static struct thread fixture_thread;
+#define curthread (&fixture_thread)
+struct mtx { unsigned initialized; };
+static unsigned locks, live_allocations, allocation_calls, fail_allocation;
+static unsigned last_minor, release_calls, legacy_close_calls, private_drops, active_fops;
+static int driver_error, legacy_error;
+
+static void *fixture_malloc(size_t size)
+{
+    ++allocation_calls;
+    if (fail_allocation == allocation_calls) return NULL;
+    void *p = calloc(1, size);
+    assert(p); ++live_allocations; return p;
+}
+static void fixture_free(void *p)
+{
+    if (p) { assert(live_allocations); --live_allocations; free(p); }
+}
+#define malloc(size, type, flags) fixture_malloc(size)
+#define free(p, type) fixture_free(p)
+#define kfree(p) fixture_free(p)
+#define kfree_rcu(p, field) fixture_free(p)
+static void mtx_init(struct mtx *m, const char *name, void *unused, int flags)
+{ (void)name; (void)unused; (void)flags; assert(!m->initialized); m->initialized = 1; ++locks; }
+static void mtx_destroy(struct mtx *m)
+{ assert(m->initialized && locks); m->initialized = 0; --locks; }
+static void mtx_lock(struct mtx *m) { assert(m); }
+static void mtx_unlock(struct mtx *m) { assert(m); }
+struct vnode { unsigned v_usecount; struct mtx v_interlock; struct cdev *v_rdev; unsigned v_type; };
+struct drm_minor { int type, index; };
+struct drm_file { struct drm_minor *minor; };
+struct nmx_drm_node_info { uint32_t type, index; };
+struct file_operations {
+    int (*open)(struct vnode *, struct linux_file *);
+    int (*release)(struct vnode *, struct linux_file *);
+};
+struct linux_cdev { unsigned refs, dev; const struct file_operations *ops; struct drm_minor logical; };
+struct fileops {
+    int (*fo_close)(struct file *, struct thread *);
+    int (*fo_ioctl)(struct file *, unsigned long, void *, void *, struct thread *);
+};
+struct file {
+    unsigned f_count, f_flag;
+    short f_type;
+    struct vnode *f_vnode;
+    void *f_data, *nmx_xnu;
+    const struct fileops *f_ops;
+};
+struct linux_file {
+    void *f_dentry;
+    int f_dentry_store;
+    unsigned f_mode, f_flags, f_count;
+    struct vnode *f_vnode;
+    struct file *_file;
+    struct linux_cdev *f_cdev;
+    const struct file_operations *f_op;
+    void *private_data, *f_shmem, *f_sigio;
+    struct drm_file drm;
+};
+struct nmx_bsd_cdevsw {
+    int (*d_fdopen)(struct cdev *, int, struct thread *, struct file *);
+    int (*d_open)(struct cdev *, int, int, struct thread *);
+    int (*d_close)(struct cdev *, int, int, struct thread *);
+    int (*d_ioctl)(struct cdev *, unsigned long, void *, int, struct thread *);
+};
+struct cdev {
+    unsigned nmx_gone, nmx_refs;
+    struct nmx_bsd_cdevsw *si_devsw;
+    struct linux_cdev *si_drv1;
+    const char *si_name;
+};
+static struct nmx_bsd_cdevsw linuxcdevsw;
+static void dev_ref(struct cdev *c) { ++c->nmx_refs; }
+static void dev_rel(struct cdev *c) { assert(c->nmx_refs > 1); --c->nmx_refs; }
+static void refcount_acquire(unsigned *r) { assert(*r); ++*r; }
+static bool refcount_release(unsigned *r) { assert(*r); return --*r == 0; }
+static void vref(struct vnode *v) { assert(v && v->v_usecount); ++v->v_usecount; }
+static void vrele(struct vnode *v) { assert(v && v->v_usecount); --v->v_usecount; }
+static void linux_set_current(struct thread *td) { assert(td == curthread); }
+static void linux_cdev_deref(struct linux_cdev *c) { assert(c->refs > 1); --c->refs; }
+static void linux_get_fop(struct linux_file *f, const struct file_operations **ops, struct linux_cdev **c)
+{ *ops = f->f_op; *c = f->f_cdev; ++active_fops; }
+static void linux_drop_fop(struct linux_cdev *c) { assert(c && active_fops); --active_fops; }
+static struct linux_file *linux_file_alloc(void)
+{
+    struct linux_file *f = fixture_malloc(sizeof(struct linux_file));
+    if (f) f->f_count = 1;
+    return f;
+}
+static void linux_poll_wait_dequeue(struct linux_file *f) { assert(f); }
+static void linux_synchronize_rcu(int kind) { (void)kind; }
+static void funsetown(void *p) { (void)p; }
+static void vm_object_deallocate(void *p) { assert(p == NULL); }
+static void finit(struct file *f, unsigned mode, short type, void *data, const struct fileops *ops)
+{ f->f_flag = mode; f->f_type = type; f->f_data = data; f->f_ops = ops; }
+void fdrop(struct file *, struct thread *);
+int nmx_file_final_drop(struct file *, struct thread *);
+static int linux_file_close(struct file *, struct thread *);
+unsigned int linux_iminor(struct vnode *);
+static const struct fileops linuxfileops = {linux_file_close, NULL};
+#define OPW(fp, td, code) (code)
+static void umap_release_all(struct nmx_open *);
+static int nmx_mmap(struct nmx_open *o, void *p) { (void)o; (void)p; return EINVAL; }
+static int nmx_munmap(struct nmx_open *o, void *p) { (void)o; (void)p; return EINVAL; }
+static int nmx_drm_node_ioctl(struct linux_file *, unsigned long, void *);
+
+/* NMX_ACTUAL_NODE_OPEN_IMPLEMENTATION */
+
+#ifndef NMX_HAVE_FINAL_DROP
+/* Link-only shim for the old-source negative control; its first open fails. */
+int nmx_file_final_drop(struct file *f, struct thread *td) { (void)f; (void)td; return EINVAL; }
+#endif
+
+static struct linux_file *mapping_reference;
+static void umap_release_all(struct nmx_open *o)
+{
+    assert(o);
+    if (mapping_reference) { struct linux_file *f = mapping_reference; mapping_reference = NULL; fput(f); }
+}
+static int nmx_drm_node_ioctl(struct linux_file *f, unsigned long cmd, void *data)
+{ return cmd == NMX_DRM_IOCTL_NODE_INFO ? nmx_drm_node_identity(f, data) : -1; }
+
+static int device_open(struct vnode *v, struct linux_file *f)
+{
+    last_minor = linux_iminor(v);
+    if (last_minor == UINT_MAX) return -ENODEV;
+    if (driver_error) return -driver_error;
+    assert(v->v_type == VCHR && curthread->td_nmx_open);
+    f->drm.minor = &f->f_cdev->logical;
+    f->private_data = &f->drm;
+    return 0;
+}
+static int device_release(struct vnode *v, struct linux_file *f)
+{
+    assert(v && f && !file_count(f));
+    assert(linux_iminor(v) == (unsigned)f->drm.minor->index);
+    ++release_calls;
+    return 0;
+}
+static const struct file_operations device_ops = {device_open, device_release};
+static void private_drop(void *value) { assert(value == &private_drops); ++private_drops; }
+static int legacy_open(struct cdev *c, int flags, int kind, struct thread *td)
+{
+    (void)c; (void)flags; (void)kind; assert(td == curthread);
+    assert(!devfs_set_cdevpriv(&private_drops, private_drop));
+    return legacy_error;
+}
+static int legacy_close(struct cdev *c, int flags, int kind, struct thread *td)
+{ (void)c; (void)flags; (void)kind; assert(td == curthread); ++legacy_close_calls; return 0; }
+static void clean(struct cdev *a, struct cdev *b)
+{
+    assert(!live_allocations && !locks && !active_fops && !curthread->td_nmx_open);
+    assert(a->nmx_refs == 1 && b->nmx_refs == 1 && a->si_drv1->refs == 1 && b->si_drv1->refs == 1);
+    for (unsigned i = 0; i < OPEN_BUCKETS; ++i) assert(!opens[i].tqh_first);
+}
+int main(void)
+{
+    linuxcdevsw.d_fdopen = linux_dev_fdopen;
+    struct linux_cdev ga = {1, (226U << 8) | 128, &device_ops, {DRM_MINOR_RENDER, 128}};
+    struct linux_cdev gb = {1, (226U << 8) | 129, &device_ops, {DRM_MINOR_RENDER, 129}};
+    struct cdev a = {0, 1, &linuxcdevsw, &ga, "dri/renderD128"};
+    struct cdev b = {0, 1, &linuxcdevsw, &gb, "dri/renderD129"};
+    int result = nmx_cdev_open(&a, 1001, FREAD | FWRITE);
+    if (result) {
+        fprintf(stderr, "Native node open failed: error=%d logical_minor=%u; no GPU opened.\n", result, last_minor);
+        return 2;
+    }
+    assert(last_minor == 128);
+    assert(!nmx_cdev_open(&a, 1002, FREAD | FWRITE));
+    assert(!nmx_cdev_open(&b, 2359, FREAD | FWRITE) && last_minor == 129);
+    assert(open_find(1001)->fp->f_vnode != open_find(1002)->fp->f_vnode);
+    struct nmx_drm_node_info info;
+    assert(!nmx_cdev_ioctl(1001, NMX_DRM_IOCTL_NODE_INFO, &info, 0) && info.type == 2 && info.index == 128);
+    assert(!nmx_cdev_ioctl(2359, NMX_DRM_IOCTL_NODE_INFO, &info, 0) && info.index == 129);
+    assert(!nmx_cdev_close(1001, 0));
+    assert(!nmx_cdev_ioctl(1002, NMX_DRM_IOCTL_NODE_INFO, &info, 0) && info.index == 128);
+    assert(!nmx_cdev_close(1002, 0) && !nmx_cdev_close(2359, 0) && release_calls == 3);
+    clean(&a, &b);
+    assert(nmx_cdev_ioctl(1001, NMX_DRM_IOCTL_NODE_INFO, &info, 0) == EBADF);
+    for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+        allocation_calls = 0; fail_allocation = attempt;
+        assert(nmx_cdev_open(&a, 1001, FREAD) == ENOMEM);
+        fail_allocation = 0; clean(&a, &b);
+    }
+    driver_error = EIO;
+    assert(nmx_cdev_open(&a, 1001, FREAD) == EIO);
+    driver_error = 0; clean(&a, &b);
+    a.nmx_gone = 1;
+    assert(nmx_cdev_open(&a, 1001, FREAD) == ENXIO);
+    a.nmx_gone = 0; clean(&a, &b);
+    unsigned before = release_calls;
+    assert(!nmx_cdev_open(&a, 1001, FREAD));
+    struct linux_file *held = get_file(open_find(1001)->fp->f_data);
+    assert(nmx_file_final_drop(held->_file, curthread) == EINVAL);
+    assert(!nmx_cdev_close(1001, 0) && release_calls == before);
+    assert(held->f_vnode->v_rdev == &a && linux_iminor(held->f_vnode) == 128 && a.nmx_refs == 2);
+    fput(held);
+    assert(release_calls == before + 1); clean(&a, &b);
+    assert(!nmx_cdev_open(&a, 1001, FREAD));
+    mapping_reference = get_file(open_find(1001)->fp->f_data);
+    assert(!nmx_cdev_close(1001, 0) && !mapping_reference && release_calls == before + 2);
+    clean(&a, &b);
+    for (unsigned i = 0; i < 100; ++i) {
+        assert(!nmx_cdev_open(&a, 1001, FREAD));
+        assert(!nmx_cdev_close(1001, 0)); clean(&a, &b);
+    }
+    struct nmx_bsd_cdevsw legacy = {NULL, legacy_open, legacy_close, NULL};
+    a.si_devsw = &legacy;
+    legacy_error = ENXIO;
+    assert(nmx_cdev_open(&a, 1001, FREAD) == ENXIO && private_drops == 1);
+    legacy_error = 0; clean(&a, &b);
+    assert(!nmx_cdev_open(&a, 1001, FREAD));
+    assert(!nmx_cdev_close(1001, 0) && legacy_close_calls == 1 && private_drops == 2);
+    a.si_devsw = &linuxcdevsw; clean(&a, &b);
+    puts("NMX native node lifecycle: actual open, logical inode, identity ioctl, deferred fput and failure cleanup passed; no GPU opened.");
+    return 0;
+}

@@ -44,6 +44,14 @@ return ENOTSUP on Darwin. The native test changes every stat ID and checks
 failure cleanup, permissions and replaced nodes against the compiled library.
 The manual Vulkan diagnostic enables NMX_DRM_DEBUG only in its own process.
 
+The native node adapter owns a compatibility inode with each file, so
+linux_iminor can resolve the logical DRM minor at the first open. XNU open
+receives zero on a successful LinuxKPI file-operations handoff. The file and
+inode retain a separate cdev reference when Linux keeps the file after devfs
+close. Native fdrop decrements; Linux fput already decremented before _fdrop,
+which must perform final cleanup without subtracting a second time. The kernel
+job executes these actual functions with inert services before building a kext.
+
 The ordinary Metal buffer/texture/compute path uses ANV allocations. NMXAccel's
 inherited family GPUVA/VRAM callbacks still depend on NVIDIA RM and are not an
 Intel allocation implementation. Hardware resource pools, cross-process shared

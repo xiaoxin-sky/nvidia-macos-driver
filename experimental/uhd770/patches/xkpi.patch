@@ -3317,3 +3317,189 @@
  	if (cmd == NMX_DRM_IOCTL_SYSFS_GET || cmd == NMX_DRM_IOCTL_SYSFS_PUT) {
  		/* an attribute of the node's device (the PCI function), through its show/store handler */
  		struct nmx_drm_sysfs_get *sg = data;
+--- a/override/src/nmx_linux_cdev.c
++++ b/override/src/nmx_linux_cdev.c
+@@ -20,6 +20,7 @@
+ #include <sys/mutex.h>
+ #include <sys/conf.h>
+ #include <sys/file.h>
++#include <sys/vnode.h>
+ #include <sys/uio.h>
+ #include <sys/proc.h>
+ #include <sys/stdarg.h>
+@@ -179,6 +180,16 @@
+ 
+ struct nmx_umap;
+ 
++/* Own the compatibility inode with the file, not the native open record.
++ * A Linux get_file() may retain this file beyond devfs close. The inode and
++ * its cdev reference remain valid until the last file reference is dropped.
++ * This is not an XNU vnode; it must never be passed to native vnode KPIs. */
++struct nmx_node_file {
++    struct file file;                 /* first member: fdrop frees this allocation */
++    struct vnode vnode;
++    struct cdev *cdev;
++};
++
+ struct nmx_open {
+     TAILQ_ENTRY(nmx_open) link;
+     int id;
+@@ -258,13 +269,21 @@
+     if (__atomic_load_n(&c->nmx_gone, __ATOMIC_ACQUIRE))
+         return ENXIO;
+     struct nmx_open *o = malloc(sizeof(*o), M_NMXCDEV, M_WAITOK | M_ZERO);
+-    struct file *fp = malloc(sizeof(*fp), M_NMXCDEV, M_WAITOK | M_ZERO);
+-    if (o == NULL || fp == NULL) {
++    struct nmx_node_file *node_file = malloc(sizeof(*node_file), M_NMXCDEV, M_WAITOK | M_ZERO);
++    if (o == NULL || node_file == NULL) {
+         free(o, M_NMXCDEV);
+-        free(fp, M_NMXCDEV);
++        free(node_file, M_NMXCDEV);
+         return ENOMEM;
+     }
+-    dev_ref(c);
++    struct file *fp = &node_file->file;
++    dev_ref(c);                     /* file/inode ownership, including deferred close */
++    node_file->cdev = c;
++    node_file->vnode.v_usecount = 1; /* file's own reference; fdopen adds the Linux reference */
++    node_file->vnode.v_type = VCHR;
++    node_file->vnode.v_rdev = c;
++    mtx_init(&node_file->vnode.v_interlock, "nmx node inode", NULL, MTX_DEF);
++    fp->f_vnode = &node_file->vnode;
++    fp->nmx_xnu = node_file;
+     fp->f_count = 1;
+     fp->f_flag = (u_int)fflags & (FREAD | FWRITE | O_NONBLOCK | O_APPEND);
+     fp->f_type = DTYPE_DEV;
+@@ -282,15 +301,17 @@
+     else if (sw->d_open != NULL)
+         err = sw->d_open(c, fflags, 0x2000 /* S_IFCHR */, curthread);
+     if (err) {
++        printf("NullMoth devfs: open id=%d path=%s callback=%s error=%d\n",
++               open_id, c->si_name, sw->d_fdopen ? "fdopen" : "open", err);
+         devfs_clear_cdevpriv();
+         leave(prev);
+         mtx_destroy(&o->maps_mtx);
+-        free(fp, M_NMXCDEV);
++        fdrop(fp, curthread);
+         free(o, M_NMXCDEV);
+-        dev_rel(c);
+         return err;
+     }
+     leave(prev);
++    dev_ref(c);                     /* native open record, separate from retained file */
+ 
+     mtx_lock(&opens_mtx);
+     if (opens[(unsigned)open_id % OPEN_BUCKETS].tqh_last == NULL)
+@@ -300,16 +321,37 @@
+     return 0;
+ }
+ 
+-/* FreeBSD fdrop: the last reference closes the file through its operations */
++/* _fdrop receives a file whose count was already reduced to zero by Linux
++ * fput. It must not decrement again. The node inode belongs to the file until
++ * fo_close has released the Linux vnode reference and all driver resources. */
++int nmx_file_final_drop(struct file *fp, struct thread *td)
++{
++    if (fp == NULL)
++        return 0;
++    if (__atomic_load_n(&fp->f_count, __ATOMIC_ACQUIRE) != 0)
++        return EINVAL;
++    int err = 0;
++    if (fp->f_ops != NULL && fp->f_ops->fo_close != NULL)
++        err = fp->f_ops->fo_close(fp, td);
++    struct nmx_node_file *node_file = fp->nmx_xnu;
++    if (node_file != NULL) {
++        KASSERT(&node_file->file == fp && node_file->vnode.v_usecount == 1,
++                ("unbalanced native node inode ownership"));
++        vrele(&node_file->vnode);
++        mtx_destroy(&node_file->vnode.v_interlock);
++        dev_rel(node_file->cdev);
++    }
++    free(fp, M_NMXCDEV);
++    return err;
++}
++
++/* Native/BSD fdrop owns the decrement; Linux's already-final _fdrop does not. */
+ void fdrop(struct file *fp, struct thread *td)
+ {
+     if (fp == NULL)
+         return;
+-    if (__atomic_sub_fetch(&fp->f_count, 1, __ATOMIC_ACQ_REL) != 0)
+-        return;
+-    if (fp->f_ops != NULL && fp->f_ops->fo_close != NULL)
+-        fp->f_ops->fo_close(fp, td);
+-    free(fp, M_NMXCDEV);
++    if (__atomic_sub_fetch(&fp->f_count, 1, __ATOMIC_ACQ_REL) == 0)
++        (void)nmx_file_final_drop(fp, td);
+ }
+ 
+ int nmx_cdev_close(int open_id, int fflags)
+--- a/override/src/linux_compat.c
++++ b/override/src/linux_compat.c
+@@ -424,6 +424,8 @@
+ 	struct linux_file *filp;
+ 
+ 	filp = kzalloc(sizeof(*filp), GFP_KERNEL);
++	if (filp == NULL)
++		return (NULL);
+ 
+ 	/* set initial refcount */
+ 	filp->f_count = 1;
+@@ -567,8 +569,12 @@
+ 	int error;
+ 
+ 	ldev = dev->si_drv1;
++	if (ldev == NULL || file->f_vnode == NULL)
++		return (ENODEV);
+ 
+ 	filp = linux_file_alloc();
++	if (filp == NULL)
++		return (ENOMEM);
+ 	filp->f_dentry = &filp->f_dentry_store;
+ 	filp->f_op = ldev->ops;
+ 	filp->f_mode = file->f_flag;
+@@ -584,6 +590,8 @@
+ 	if (fop->open != NULL) {
+ 		error = -fop->open(file->f_vnode, filp);
+ 		if (error != 0) {
++			printf("NullMoth devfs: linux open minor=%u error=%d\n",
++			    linux_iminor(file->f_vnode), error);
+ 			linux_drop_fop(ldev);
+ 			linux_cdev_deref(filp->f_cdev);
+ 			kfree(filp);
+@@ -597,7 +605,13 @@
+ 	/* release the file from devfs */
+ 	finit(file, filp->f_mode, DTYPE_DEV, filp, &linuxfileops);
+ 	linux_drop_fop(ldev);
++#ifdef __APPLE__
++	/* nmx_cdev_open calls us directly. FreeBSD devfs consumes ENXIO as a
++	 * file-operations handoff sentinel; native XNU open needs ordinary success. */
++	return (0);
++#else
+ 	return (ENXIO);
++#endif
+ }
+ 
+ #define	LINUX_IOCTL_MIN_PTR 0x10000UL
+--- a/bsdcompat/include/sys/file.h
++++ b/bsdcompat/include/sys/file.h
+@@ -19,7 +19,7 @@
+     struct vnode *f_vnode;
+     struct fileops *f_ops;
+     short f_type;
+-    void *nmx_xnu;                  /* the xnu side of this open (dev_t + per-open state), owned by the cdev glue */
++    void *nmx_xnu;                  /* private node-file owner; inode/cdev survive until final file drop */
+ };
+ #define DTYPE_DEV 3
+ #define DTYPE_VNODE 1
+@@ -94,7 +94,9 @@
+ int fget(struct thread *td, int fd, cap_rights_t *rightsp, struct file **fpp);
+ int fget_unlocked(struct thread *td, int fd, cap_rights_t *needrightsp, struct file **fpp);
+ void fdrop(struct file *fp, struct thread *td);
+-#define _fdrop(fp, td) (fdrop((fp), (td)), 0)
++/* Linux fput already decremented to zero before calling _fdrop. */
++int nmx_file_final_drop(struct file *fp, struct thread *td);
++#define _fdrop(fp, td) nmx_file_final_drop((fp), (td))
+ int falloc(struct thread *td, struct file **resultfp, int *resultfd, int flags);
+ void finit(struct file *fp, u_int flag, short type, void *data, struct fileops *ops);
+ void fdclose(struct thread *td, struct file *fp, int idx);
