@@ -124,5 +124,13 @@
       "this is a reading of the scripts, not a run; only the target boot shows which configuration OpenCore applied",
       "if the machine panicked before the boot-time restore, the USB could still hold the test config; reference-efi/config.optout-reference.plist and Restore-UHD770.ps1 are the Windows-side recovery"
     ]
+  },
+  "probe_math_check": {
+    "method": "compared the compute shader in the packaged probe with the CPU expectation in the same probe source",
+    "shader": "value = input[i] ^ seed; shift = (i % 31) + 1; rotated = (value << shift) | (value >> (32 - shift)); out[i] = (rotated + i * 0x9e3779b9) ^ (input[i] >> 7)",
+    "cpu": "same expression, with input[i] produced by seed ^ (i * 747796405 + 2891336453)",
+    "finding": "the GPU and CPU formulas are identical term by term, including that the final xor uses the unrotated input, and the shift stays in 1..31 so no undefined shift can occur; the dispatch covers ceil(count/64) groups of 64 invocations and the probe bounds-checks i against count",
+    "synchronization": "host->compute and compute->host pipeline barriers bracket the dispatch, and the readback invalidates non-coherent memory before comparing",
+    "limits": "this shows the probe would detect a wrong result rather than agreeing with itself; it does not show the GPU ran"
   }
 }
