@@ -2,7 +2,7 @@
   "date": "2026-10-22",
   "scope": "Joined GPU completion software contracts before requesting another hardware test",
   "verification": {
-    "status": "11 joined host groups passed; native macOS/TSan/ASan/UBSan pending",
+    "status": "11 joined host groups passed; latest native fixture compilation failed before execution, unused-state annotation fixed and host-rechecked; native retry pending",
     "route": "Injected GT interrupt identity -> actual GT engine selection/execlists IRQ -> actual irq_work and NMX taskqueue worker -> actual i915 HWSP completion predicate/breadcrumbs -> actual dma_fence callback -> actual DRM ordinary syncobj wait -> actual Linux schedule/wake -> actual native sleepqueue/Mach adapter",
     "actual_code": [
       "GT identity macros/pick_gt/gen11_gt_identity_handler/intel_engine_cs_irq/execlists_irq_handler",
@@ -39,6 +39,15 @@
     ],
     "result_limit": "This is software completion-interface evidence. It does not prove that the UHD770 executes a batch, writes the HWSP/output, delivers a physical IRQ or exits cleanly on the target macOS.",
     "hardware_executed": false,
-    "new_user_reboot_requested": false
+    "new_user_reboot_requested": false,
+    "latest_native_attempt": {
+      "source": "82f3c38fcfffdef322a1f6eaad01c971c1da36cc",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39738541155",
+      "artifact_id": 12408491286,
+      "sha256": "07a2b76f1b84f465e2f5c6e8bd8e24987da557dd8e0f330ee1bf59204e81790b",
+      "result": "FAILED BEFORE EXECUTION: native Clang -Werror,-Wunused-const-variable rejected TASK_UNINTERRUPTIBLE in the shared fixture declaration",
+      "repair": "Annotate the fixture-only shared state declaration with [[maybe_unused]], preserving its values and all production code; regenerated 11 host cases and targeted clang check passed. Native retry pending",
+      "hardware_executed": false
+    }
   }
 }

@@ -37,6 +37,13 @@ def prepare(port, freebsd, drm, templates, output):
     temporary = output.with_suffix('.sleep.cpp')
     prepare_sleep(port, schedule, templates / 'sleep_fixture.cpp.in', temporary)
     sleep = temporary.read_text(encoding='utf-8').split('static void check_clean()')[0]
+    # The shared sleep model declares states used by its other fixtures. Keep
+    # those values unchanged without requiring this joined fixture to use all
+    # of them; native Clang diagnoses an unused member of the declaration.
+    state_declaration = 'constexpr int TASK_RUNNING='
+    if sleep.count(state_declaration) != 1:
+        raise ValueError('completion sleep state declaration drift')
+    sleep = sleep.replace(state_declaration, '[[maybe_unused]] ' + state_declaration)
     sleep = sleep.replace('#include <vector>', '#include <vector>\n#include <deque>\n#include <shared_mutex>\n#include <type_traits>')
     sleep = sleep.replace('struct lock_object { bool held=true;', 'struct lock_object { std::mutex *native=nullptr; bool held=true;')
     sleep = sleep.replace('l->held=false; ++l->released; return 17;',

@@ -31,10 +31,10 @@
       "id": "identity_context",
       "route": "ANV Intel QUERY/GETPARAM -> i915 capabilities, VM/context and engine setup",
       "status": "MANDATORY ANV UAPI CALLS MAPPED TO REAL KERNEL HANDLERS; transitive and target validation incomplete",
-      "remaining": "Current WW/CV progress extension needs native verification; actual target VM/context/queue creation and execution evidence still absent",
+      "remaining": "WW/CV and shared-lock/IDR native checks passed; actual target VM/context/queue creation and execution evidence still absent",
       "source_review": "experimental/uhd770/acceleration/compute-interface-review.json",
       "IDR_handle_initialization": {
-        "status": "native macOS/TSan/ASan/kernel/KC passed on 8fcf6fa",
+        "status": "native macOS/TSan/ASan/kernel/KC passed on 8fcf6fa; WW progress separately native-passed on 6cdabda",
         "change": "Atomic SX/RW owner helpers and publication; Linux mutex and WW-mutex owner accessors/readers use the same helper. Actual Linux mutex/rwsem, native SX/RW methods and generic release/reacquire are joined in the fixture.",
         "IDR": "GEM and syncobj handle creation reach idr_preload. The original sched_pin masked interrupts over mutex waits/malloc. Override retains a private current-native-thread cache across migration; balances unused-node/cache release at preload_end and preserves the actual IDR radix-tree algorithm.",
         "IDR_callers": [
@@ -44,9 +44,7 @@
         "host_log": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nActual Linux/native locking, IDR/BH/critical/CSB contracts passed; native primitives/allocator/MMIO modeled; no GPU executed.\n",
         "limits": "Native lock primitives, registry, allocator/timer/MMIO are host models. IDR preload/get/free are actual source; full radix tree compilation is separate. WW owner reads were made consistent; the complete WW wait-graph algorithm is not covered by this fixture.",
         "remaining": [
-          "Native compiler/concurrency/memory checks and kernel linkage",
-          "Review WW contention/progress semantics separately from atomic owner access",
-          "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
+          "Actual GPU VA/root/PDE/TLB and cache visibility, physical completion IRQ and target execution/cleanup remain unverified; native shared-lock/IDR and WW fixtures have passed"
         ],
         "hardware_executed": false,
         "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39730672410",
@@ -63,7 +61,7 @@
     {
       "id": "memory",
       "route": "GEM create -> backing pages -> DMA/IOMMU -> PPGTT/GGTT -> NMX mmap -> IOKit user map",
-      "status": "SHARED MM AND JOINED S/G-DMA CHECKS PASSED NATIVE; shared-lock/IDR repair host-passed, native pending",
+      "status": "SHARED MM, S/G-DMA, IDR/WW AND DMA-TO-PTE CONSUMER CHECKS PASSED NATIVE; full GPU memory path still incomplete",
       "remaining": "Review actual GEM internal backing/map_pt_dma, parent PDE/root and TLB interfaces plus native cache aliases; target DMA/coherency still unverified",
       "source_findings": [
         "PROC_LOCK only refreshes signals, so process p_lkpi_mm publication/acquisition lacks its expected lock",
@@ -106,7 +104,7 @@
       },
       "native_shared_lock_review": "experimental/uhd770/acceleration/native-rw-owner-review.json",
       "shared_lock_and_IDR": {
-        "status": "native macOS/TSan/ASan/kernel/KC passed on 8fcf6fa; WW extension is separately pending",
+        "status": "native macOS/TSan/ASan/kernel/KC passed on 8fcf6fa; WW progress separately native-passed on 6cdabda",
         "change": "Atomic SX/RW owner helpers and publication; Linux mutex and WW-mutex owner accessors/readers use the same helper. Actual Linux mutex/rwsem, native SX/RW methods and generic release/reacquire are joined in the fixture.",
         "IDR": "GEM and syncobj handle creation reach idr_preload. The original sched_pin masked interrupts over mutex waits/malloc. Override retains a private current-native-thread cache across migration; balances unused-node/cache release at preload_end and preserves the actual IDR radix-tree algorithm.",
         "IDR_callers": [
@@ -116,9 +114,7 @@
         "host_log": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nActual Linux/native locking, IDR/BH/critical/CSB contracts passed; native primitives/allocator/MMIO modeled; no GPU executed.\n",
         "limits": "Native lock primitives, registry, allocator/timer/MMIO are host models. IDR preload/get/free are actual source; full radix tree compilation is separate. WW owner reads were made consistent; the complete WW wait-graph algorithm is not covered by this fixture.",
         "remaining": [
-          "Native compiler/concurrency/memory checks and kernel linkage",
-          "Review WW contention/progress semantics separately from atomic owner access",
-          "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
+          "Actual GPU VA/root/PDE/TLB and cache visibility, physical completion IRQ and target execution/cleanup remain unverified; native shared-lock/IDR and WW fixtures have passed"
         ],
         "hardware_executed": false,
         "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39730672410",
@@ -175,7 +171,7 @@
       "remaining": "nested ioctl data, object address/length/pinning and fence lifetime; actual execution requires UHD770",
       "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json",
       "WW_reservation_progress": {
-        "status": "native 25-case TSan/ASan/UBSan/kernel/KC passed",
+        "status": "25 joined host cases and native macOS/TSan/ASan/kernel/KC passed; actual GPU execution not proved",
         "baseline": "Actual legacy pairwise WW core with otherwise-current owner/context helpers fails the three-thread cycle and needs test-only interruption to terminate. This is a software regression, not a reproduction of the target GPU panic.",
         "baseline_log": "ww-pairwise-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nPASS WW-context-lifetime\nPASS WW-native-CV-handoff\nPASS WW-native-CV-early-wake\nPASS WW-interrupted-wait\nPASS WW-cycle-two\nFAIL WW-cycle-three: WW cycle required forced cancellation instead of returning EDEADLK\n",
         "baseline_core_sha256": "5c056ccfe78747ec37f5392e10485f814ea29d768f94de4477385b77cc062133",
@@ -207,8 +203,8 @@
     {
       "id": "completion",
       "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
-      "status": "LOWER LOCK/WAIT AND WW CONTRACTS NATIVE-PASSED; joined GT/breadcrumb/fence/syncobj/software-wait chain host-passed, native pending",
-      "remaining": "Validate current joined completion fixture natively; inspect PCI/MMIO delivery and timeline/command/HWSP generation boundaries; actual GPU IRQ/output/clean exit remains unverified",
+      "status": "LOWER LOCK/WAIT AND WW CONTRACTS NATIVE-PASSED; joined completion host-passed, latest native fixture compilation failed before execution",
+      "remaining": "Native fixture unused-state declaration fixed and host-rechecked; native rerun still needed. PCI/MMIO delivery, command/HWSP generation and actual GPU completion/exit remain unverified",
       "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
       "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018",
       "next_review": "Complete remaining critical-scope transitive audit and actual GPU context/memory/submission/visibility/cleanup contracts; no hardware request merely for a passing build",
@@ -281,7 +277,7 @@
         }
       },
       "WW_native_CV_extension": {
-        "status": "native 25-case TSan/ASan/UBSan/kernel/KC passed",
+        "status": "25 joined host cases and native macOS/TSan/ASan/kernel/KC passed; actual GPU execution not proved",
         "baseline": "Actual legacy pairwise WW core with otherwise-current owner/context helpers fails the three-thread cycle and needs test-only interruption to terminate. This is a software regression, not a reproduction of the target GPU panic.",
         "baseline_log": "ww-pairwise-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nPASS WW-context-lifetime\nPASS WW-native-CV-handoff\nPASS WW-native-CV-early-wake\nPASS WW-interrupted-wait\nPASS WW-cycle-two\nFAIL WW-cycle-three: WW cycle required forced cancellation instead of returning EDEADLK\n",
         "baseline_core_sha256": "5c056ccfe78747ec37f5392e10485f814ea29d768f94de4477385b77cc062133",
@@ -310,7 +306,7 @@
       },
       "next_transitive_route": "Native PCI IOInterruptEventSource -> nmx_bus intr_trampoline -> Linux irq handler -> gen11 GT identity decode -> execlists tasklet/breadcrumb irq_work -> dma_fence callback -> real syncobj wait/sleepqueue. Worker queues and lower waits have separate fixtures, but this joined GPU completion path is not yet verified.",
       "joined_completion": {
-        "status": "11 joined host groups passed; native macOS/TSan/ASan/UBSan pending",
+        "status": "11 joined host groups passed; latest native fixture compilation failed before execution, unused-state annotation fixed and host-rechecked; native retry pending",
         "route": "Injected GT interrupt identity -> actual GT engine selection/execlists IRQ -> actual irq_work and NMX taskqueue worker -> actual i915 HWSP completion predicate/breadcrumbs -> actual dma_fence callback -> actual DRM ordinary syncobj wait -> actual Linux schedule/wake -> actual native sleepqueue/Mach adapter",
         "actual_code": [
           "GT identity macros/pick_gt/gen11_gt_identity_handler/intel_engine_cs_irq/execlists_irq_handler",
@@ -347,7 +343,25 @@
         ],
         "result_limit": "This is software completion-interface evidence. It does not prove that the UHD770 executes a batch, writes the HWSP/output, delivers a physical IRQ or exits cleanly on the target macOS.",
         "hardware_executed": false,
-        "new_user_reboot_requested": false
+        "new_user_reboot_requested": false,
+        "latest_native_attempt": {
+          "source": "82f3c38fcfffdef322a1f6eaad01c971c1da36cc",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39738541155",
+          "artifact_id": 12408491286,
+          "sha256": "07a2b76f1b84f465e2f5c6e8bd8e24987da557dd8e0f330ee1bf59204e81790b",
+          "result": "FAILED BEFORE EXECUTION: native Clang -Werror,-Wunused-const-variable rejected TASK_UNINTERRUPTIBLE in the shared fixture declaration",
+          "repair": "Annotate the fixture-only shared state declaration with [[maybe_unused]], preserving its values and all production code; regenerated 11 host cases and targeted clang check passed. Native retry pending",
+          "hardware_executed": false
+        }
+      },
+      "latest_native_attempt": {
+        "source": "82f3c38fcfffdef322a1f6eaad01c971c1da36cc",
+        "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39738541155",
+        "artifact_id": 12408491286,
+        "sha256": "07a2b76f1b84f465e2f5c6e8bd8e24987da557dd8e0f330ee1bf59204e81790b",
+        "result": "FAILED BEFORE EXECUTION: native Clang -Werror,-Wunused-const-variable rejected TASK_UNINTERRUPTIBLE in the shared fixture declaration",
+        "repair": "Annotate the fixture-only shared state declaration with [[maybe_unused]], preserving its values and all production code; regenerated 11 host cases and targeted clang check passed. Native retry pending",
+        "hardware_executed": false
       }
     },
     {
@@ -429,7 +443,7 @@
         "staged_match": "all patched source text identical after CRLF/LF normalization"
       }
     },
-    "current_native_ci_status": "Joined completion fixture is host-passed and awaiting native dispatch; both prior WW and PTE runs have verified successful artifact evidence",
+    "current_native_ci_status": "Latest completion native run failed during fixture compilation; fixture-only correction host-rechecked, native retry pending; no new hardware test requested",
     "new_user_test_requested": false,
     "usb_package_changed": false,
     "kernel_clock": {
@@ -492,7 +506,7 @@
       "hardware_executed": false
     },
     "shared_lock_and_IDR": {
-      "status": "implemented and 16 joined host cases passed; native macOS/TSan/ASan pending",
+      "status": "native macOS/TSan/ASan/kernel/KC passed on 8fcf6fa; WW progress separately native-passed on 6cdabda",
       "change": "Atomic SX/RW owner helpers and publication; Linux mutex and WW-mutex owner accessors/readers use the same helper. Actual Linux mutex/rwsem, native SX/RW methods and generic release/reacquire are joined in the fixture.",
       "IDR": "GEM and syncobj handle creation reach idr_preload. The original sched_pin masked interrupts over mutex waits/malloc. Override retains a private current-native-thread cache across migration; balances unused-node/cache release at preload_end and preserves the actual IDR radix-tree algorithm.",
       "IDR_callers": [
@@ -502,9 +516,7 @@
       "host_log": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nActual Linux/native locking, IDR/BH/critical/CSB contracts passed; native primitives/allocator/MMIO modeled; no GPU executed.\n",
       "limits": "Native lock primitives, registry, allocator/timer/MMIO are host models. IDR preload/get/free are actual source; full radix tree compilation is separate. WW owner reads were made consistent; the complete WW wait-graph algorithm is not covered by this fixture.",
       "remaining": [
-        "Native compiler/concurrency/memory checks and kernel linkage",
-        "Review WW contention/progress semantics separately from atomic owner access",
-        "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
+        "Actual GPU VA/root/PDE/TLB and cache visibility, physical completion IRQ and target execution/cleanup remain unverified; native shared-lock/IDR and WW fixtures have passed"
       ],
       "hardware_executed": false,
       "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39730672410"
@@ -518,7 +530,7 @@
       "hardware_executed": false
     },
     "WW_progress": {
-      "status": "implemented and 25 joined host cases passed; native macOS pending",
+      "status": "25 joined host cases and native macOS/TSan/ASan/kernel/KC passed; actual GPU execution not proved",
       "baseline": "Actual legacy pairwise WW core with otherwise-current owner/context helpers fails the three-thread cycle and needs test-only interruption to terminate. This is a software regression, not a reproduction of the target GPU panic.",
       "baseline_log": "ww-pairwise-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nPASS WW-context-lifetime\nPASS WW-native-CV-handoff\nPASS WW-native-CV-early-wake\nPASS WW-interrupted-wait\nPASS WW-cycle-two\nFAIL WW-cycle-three: WW cycle required forced cancellation instead of returning EDEADLK\n",
       "baseline_core_sha256": "5c056ccfe78747ec37f5392e10485f814ea29d768f94de4477385b77cc062133",
@@ -538,7 +550,7 @@
       "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928"
     },
     "PTE_consumer": {
-      "status": "joined DMA-to-PTE source fixture host-passed; native macOS/ASan/UBSan pending",
+      "status": "native macOS/ASan/UBSan/kernel/KC passed; actual GPU visibility not proved",
       "actual_source": "gen12_pte_encode, gen8_ppgtt_insert_pte and gen8_ppgtt_insert_huge, with pinned masks/index macros; fed by actual Linux/BSD/native DMA mapping output",
       "cases": "2 mapping modes x 4 ADL PAT indexes x 8 placement/page-size cases, plus 3 encoder-flag cases; all previously verified DMA failure/rollback groups retained",
       "covered": [
@@ -582,7 +594,7 @@
       "hardware_executed": false
     },
     "joined_completion": {
-      "status": "11 joined host groups passed; native macOS/TSan/ASan/UBSan pending",
+      "status": "11 joined host groups passed; latest native fixture compilation failed before execution, unused-state annotation fixed and host-rechecked; native retry pending",
       "route": "Injected GT interrupt identity -> actual GT engine selection/execlists IRQ -> actual irq_work and NMX taskqueue worker -> actual i915 HWSP completion predicate/breadcrumbs -> actual dma_fence callback -> actual DRM ordinary syncobj wait -> actual Linux schedule/wake -> actual native sleepqueue/Mach adapter",
       "actual_code": [
         "GT identity macros/pick_gt/gen11_gt_identity_handler/intel_engine_cs_irq/execlists_irq_handler",
@@ -619,7 +631,16 @@
       ],
       "result_limit": "This is software completion-interface evidence. It does not prove that the UHD770 executes a batch, writes the HWSP/output, delivers a physical IRQ or exits cleanly on the target macOS.",
       "hardware_executed": false,
-      "new_user_reboot_requested": false
+      "new_user_reboot_requested": false,
+      "latest_native_attempt": {
+        "source": "82f3c38fcfffdef322a1f6eaad01c971c1da36cc",
+        "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39738541155",
+        "artifact_id": 12408491286,
+        "sha256": "07a2b76f1b84f465e2f5c6e8bd8e24987da557dd8e0f330ee1bf59204e81790b",
+        "result": "FAILED BEFORE EXECUTION: native Clang -Werror,-Wunused-const-variable rejected TASK_UNINTERRUPTIBLE in the shared fixture declaration",
+        "repair": "Annotate the fixture-only shared state declaration with [[maybe_unused]], preserving its values and all production code; regenerated 11 host cases and targeted clang check passed. Native retry pending",
+        "hardware_executed": false
+      }
     }
   }
 }
