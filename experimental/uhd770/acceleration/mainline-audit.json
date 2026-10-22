@@ -22,7 +22,7 @@
     {
       "id": "ioctl",
       "route": "Darwin cdev ioctl -> linux_file_ioctl_sub -> synthetic top-level user pointer -> DRM dispatch -> nested user pointers",
-      "status": "REVIEW IN PROGRESS",
+      "status": "JOINT TRANSPORT/DISPATCH FIXTURE ADDED; native execution pending",
       "remaining": "actual dispatcher tests for direction/size/nested-pointer copy, context restoration and errno transport"
     },
     {
@@ -35,7 +35,12 @@
       "id": "memory",
       "route": "GEM create -> backing pages -> DMA/IOMMU -> PPGTT/GGTT -> NMX mmap -> IOKit user map",
       "status": "REVIEW IN PROGRESS",
-      "remaining": "page pinning and mapping fixtures exist; task/process lifetime, multi-thread mm ownership and native mapping boundaries need deeper review"
+      "remaining": "page pinning and mapping fixtures exist; task/process lifetime, multi-thread mm ownership and native mapping boundaries need deeper review",
+      "source_findings": [
+        "PROC_LOCK only refreshes signals, so process p_lkpi_mm publication/acquisition lacks its expected lock",
+        "linux_mm_dtor clears current process mm rather than locating the original mm owner",
+        "Native MmTask stores task_t without an explicit retained reference; lifecycle and reachability need verification before a repair"
+      ]
     },
     {
       "id": "submission",
@@ -46,9 +51,10 @@
     {
       "id": "completion",
       "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
-      "status": "SLEEP/WAKE SOURCE DEFECTS REPAIRED; native CI pending",
+      "status": "SLEEP/WAKE REPAIR COMPILED AND TESTED ON NATIVE MACOS; hardware pending",
       "remaining": "GPU IRQ/breadcrumb/fence delivery and other transitive dependencies still need review/target evidence",
-      "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified"
+      "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
+      "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018"
     },
     {
       "id": "visibility",

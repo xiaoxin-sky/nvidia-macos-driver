@@ -52,6 +52,10 @@ Required evidence
   The transitive fence-wait fixture now includes the actual Linux schedule/wake
   functions and actual native sleepqueue/condition adapter, with Mach primitives
   supplied by a host event model. Hardware IRQ delivery remains unverified.
+  The ioctl fixture joins LinuxKPI's real buffer-remapping/copy helpers and DRM's
+  real dispatch/permission logic around an inert query-layout handler. It checks
+  native ABI sizes, nested user pointers, output direction and error propagation;
+  it does not execute a real i915 command or validate GPU submission.
 - Userland: final real-ANV/probe build marker, ANV mapping fixture, clock boundary
   fixture and native CLOCK_UPTIME_RAW versus mach_absolute_time comparison.
   Earlier userland artifacts without native_clock_smoke.txt are rejected.

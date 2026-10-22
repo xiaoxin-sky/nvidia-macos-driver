@@ -1,0 +1,188 @@
+/* Native macOS ABI test: actual LinuxKPI ioctl transport -> actual DRM
+ * dispatcher/permission checks -> inert handler -> actual copy helpers.
+ * The handler uses a pinned i915 query layout; it never executes i915 or a GPU.
+ */
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/ioccom.h>
+#define __FreeBSD__ 15 /* select the same DRM dispatch branch after host headers */
+
+typedef uint32_t __u32;
+typedef uint64_t __u64;
+typedef uint32_t u32;
+/* NMX_ACTUAL_QUERY_LAYOUT */
+#define __user
+#define unlikely(v) (v)
+#define EXPORT_SYMBOL(v)
+#define DRM_DEBUG(...)
+#define drm_dbg_core(...)
+#define max(a,b) ((a)>(b)?(a):(b))
+#define array_index_nospec(i,n) (i)
+#define DRM_IOCTL_BASE 'd'
+#define DRM_IOCTL_NR(cmd) ((cmd)&0xff)
+#define DRM_IOCTL_TYPE(cmd) IOCGROUP(cmd)
+#define _IOC_SIZE(cmd) IOCPARM_LEN(cmd)
+#define DRM_COMMAND_BASE 0x40
+#define DRM_COMMAND_END 0xa0
+#define DRM_ROOT_ONLY 1u
+#define DRM_AUTH 2u
+#define DRM_MASTER 4u
+#define DRM_RENDER_ALLOW 8u
+#define CAP_SYS_ADMIN 1
+#define TDP_KTHREAD 1
+#define SV_ABI_FREEBSD 0
+#define SV_PROC_ABI(p) (-1)
+#define SYS_ioctl 54
+#define LINUX_IOCTL_MIN_PTR 0x10000UL
+#define LINUX_IOCTL_MAX_PTR (LINUX_IOCTL_MIN_PTR+IOCPARM_MAX)
+#define LINUX_KQ_FLAG_HAS_READ 1
+#define LINUX_KQ_FLAG_HAS_WRITE 2
+#define ERESTARTSYS 512
+#ifndef ERESTART
+#define ERESTART 85
+#endif
+#ifndef __DECONST
+#define __DECONST(type,v) ((type)(uintptr_t)(const void *)(v))
+#endif
+
+struct file { int tag; };
+struct thread { struct file *td_fpop; int td_pflags; void *td_proc; struct { int code; uintptr_t args[8]; } td_sa; };
+struct task_struct { void *bsd_ioctl_data; size_t bsd_ioctl_len; int interrupt; };
+static struct task_struct fixture_task;
+static struct thread td;
+#define current (&fixture_task)
+struct linux_file { void *private_data; };
+struct file_operations { long (*unlocked_ioctl)(struct linux_file *, unsigned int, unsigned long); };
+struct drm_device;
+struct drm_file;
+typedef int drm_ioctl_t(struct drm_device *, void *, struct drm_file *);
+struct drm_ioctl_desc { unsigned int cmd; drm_ioctl_t *func; unsigned flags; const char *name; };
+struct driver { unsigned num_ioctls; struct drm_ioctl_desc *ioctls; };
+struct drm_device { struct driver *driver; bool unplugged; };
+struct drm_minor { struct drm_device *dev; };
+struct drm_file { struct drm_minor *minor; bool authenticated, render, master; };
+static bool privileged;
+static bool capable(int c) { (void)c; return privileged; }
+static bool drm_is_render_client(struct drm_file *f) { return f->render; }
+static bool drm_is_current_master(struct drm_file *f) { return f->master; }
+static void drm_file_update_pid(struct drm_file *f) { assert(f); }
+static bool drm_dev_is_unplugged(struct drm_device *d) { return d->unplugged; }
+static struct drm_ioctl_desc drm_ioctls[1];
+#define DRM_CORE_IOCTL_COUNT 1u
+static int linux_schedule_get_interrupt_value(struct task_struct *t) { return t->interrupt; }
+static void linux_file_kqfilter_poll(struct linux_file *f,int flags) { (void)f; (void)flags; }
+
+static struct { uintptr_t address; size_t size; bool writable; } regions[8];
+static unsigned region_count, copyins, copyouts, allocations, handler_calls;
+static bool allocation_fails;
+static void add_region(void *p,size_t n,bool write)
+{ assert(region_count<8); regions[region_count].address=(uintptr_t)p; regions[region_count].size=n; regions[region_count++].writable=write; }
+static bool allowed(const void *p,size_t n,bool write)
+{
+    if (!n) return true;
+    uintptr_t a=(uintptr_t)p;
+    for (unsigned i=0;i<region_count;++i) if (a>=regions[i].address &&
+        a-regions[i].address<=regions[i].size && n<=regions[i].size-(a-regions[i].address) &&
+        (!write || regions[i].writable)) return true;
+    return false;
+}
+static int copyin(const void *u,void *k,size_t n)
+{ ++copyins; if (!allowed(u,n,false)) return EFAULT; if(n)memcpy(k,u,n); return 0; }
+static int copyout(const void *k,void *u,size_t n)
+{ ++copyouts; if (!allowed(u,n,true)) return EFAULT; if(n)memcpy(u,k,n); return 0; }
+static void *fixture_alloc(size_t n)
+{ if(allocation_fails)return NULL; void *p=calloc(1,n); assert(p); ++allocations; return p; }
+static void fixture_free(void *p) { if(p){assert(allocations);--allocations;free(p);} }
+#define M_TEMP 0
+#define M_WAITOK 0
+#define GFP_KERNEL 0
+#define malloc(n,t,f) fixture_alloc(n)
+#define free(p,t) fixture_free(p)
+#define kmalloc(n,f) fixture_alloc(n)
+#define kfree(p) fixture_free(p)
+int linux_copyin(const void *,void *,size_t);
+int linux_copyout(const void *,void *,size_t);
+#define copy_from_user(k,u,n) (linux_copyin((u),(k),(n)) ? (n) : 0)
+#define copy_to_user(u,k,n) (linux_copyout((k),(u),(n)) ? (n) : 0)
+/* The production DRM function spells struct linux_file as struct file after
+ * LinuxKPI's header alias. Keep BSD struct file in the transport implementation. */
+/* NMX_ACTUAL_IOCTL_IMPLEMENTATION */
+
+static int handler(struct drm_device *d,void *data,struct drm_file *f)
+{
+    (void)d; (void)f;
+    assert(td.td_fpop && td.td_fpop->tag==7);
+    struct drm_i915_query *q=data;
+    ++handler_calls;
+    if (q->num_items) {
+        uint32_t values[4];
+        if (q->num_items!=4) return -EINVAL;
+        if (linux_copyin((void *)(uintptr_t)q->items_ptr,values,sizeof(values))) return -EFAULT;
+        for(unsigned i=0;i<4;++i) values[i]^=0x12345678;
+        if (linux_copyout(values,(void *)(uintptr_t)q->items_ptr,sizeof(values))) return -EFAULT;
+    }
+    q->flags=0x11223344;
+    return 0;
+}
+static struct file active={7}, previous={99};
+static int invoke(struct linux_file *f,unsigned cmd,void *data)
+{
+    const struct file_operations ops={drm_ioctl};
+    td.td_fpop=&previous;
+    int result=linux_file_ioctl_sub(&active,f,&ops,cmd,data,&td);
+    assert(td.td_fpop==&previous && !fixture_task.bsd_ioctl_data && !fixture_task.bsd_ioctl_len && !allocations);
+    return result;
+}
+int main(void)
+{
+    _Static_assert(sizeof(struct drm_i915_query)==16,"pinned i915 query ABI");
+    struct drm_ioctl_desc desc={_IOWR('d',DRM_COMMAND_BASE,struct drm_i915_query),handler,DRM_RENDER_ALLOW,"fixture query"};
+    struct driver drv={1,&desc}; struct drm_device device={&drv,false};
+    struct drm_minor minor={&device}; struct drm_file client={&minor,false,true,false};
+    struct linux_file file={&client};
+    uint32_t words[4]={1,2,3,4}; add_region(words,sizeof(words),true);
+    struct drm_i915_query q={4,0,(uintptr_t)words};
+    assert(!invoke(&file,desc.cmd,&q) && q.flags==0x11223344);
+    for(unsigned i=0;i<4;++i) assert(words[i]==((i+1)^0x12345678));
+    assert(copyins==1 && copyouts==1); /* top-level uses kernel-buffer remap */
+    q.items_ptr=UINT64_MAX;
+    assert(invoke(&file,desc.cmd,&q)==EFAULT);
+    q.items_ptr=(uintptr_t)words;
+    regions[0].writable=false;
+    assert(invoke(&file,desc.cmd,&q)==EFAULT);
+    regions[0].writable=true;
+    unsigned called=handler_calls;
+    desc.flags=0;
+    assert(invoke(&file,desc.cmd,&q)==EACCES && handler_calls==called);
+    desc.flags=DRM_RENDER_ALLOW|DRM_ROOT_ONLY;
+    assert(invoke(&file,desc.cmd,&q)==EACCES);
+    desc.flags=DRM_RENDER_ALLOW;
+    device.unplugged=true; assert(invoke(&file,desc.cmd,&q)==ENODEV); device.unplugged=false;
+    q=(struct drm_i915_query){0,0,0};
+    assert(!invoke(&file,_IOC(IOC_INOUT,'d',DRM_COMMAND_BASE,8),&q) && q.flags==0x11223344);
+    unsigned char large[256]; memset(large,0,sizeof(large));
+    assert(!invoke(&file,_IOC(IOC_INOUT,'d',DRM_COMMAND_BASE,sizeof(large)),large));
+    for(unsigned i=16;i<sizeof(large);++i) assert(!large[i]);
+    allocation_fails=true;
+    assert(invoke(&file,_IOC(IOC_INOUT,'d',DRM_COMMAND_BASE,sizeof(large)),large)==ENOMEM);
+    allocation_fails=false;
+    q=(struct drm_i915_query){0,0x55,0};
+    assert(!invoke(&file,_IOW('d',DRM_COMMAND_BASE,struct drm_i915_query),&q) && q.flags==0x55);
+    q=(struct drm_i915_query){4,0,UINT64_MAX};
+    assert(!invoke(&file,_IOR('d',DRM_COMMAND_BASE,struct drm_i915_query),&q) && q.num_items==0 && q.flags==0x11223344);
+    desc.func=NULL; assert(invoke(&file,desc.cmd,&q)==EINVAL); desc.func=handler;
+    assert(invoke(&file,_IOWR('x',DRM_COMMAND_BASE,struct drm_i915_query),&q)==EINVAL);
+    assert(invoke(&file,_IOWR('d',DRM_COMMAND_BASE+1,struct drm_i915_query),&q)==EINVAL);
+    fixture_task.bsd_ioctl_data=&q; fixture_task.bsd_ioctl_len=sizeof(q);
+    uint32_t value=0;
+    assert(linux_copyin((void *)(LINUX_IOCTL_MIN_PTR+15),&value,4)==-EFAULT);
+    fixture_task.bsd_ioctl_data=NULL;fixture_task.bsd_ioctl_len=0;
+    puts("NMX ioctl chain: actual LinuxKPI transport and DRM dispatch, native ABI, nested copies, sizes, permissions and errors passed; no GPU executed.");
+    return 0;
+}
