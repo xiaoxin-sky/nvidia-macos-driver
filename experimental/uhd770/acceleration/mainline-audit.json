@@ -561,8 +561,8 @@
     {
       "id": "cleanup",
       "route": "fence/context/BO destruction -> user unmap -> final file/MM/task release -> RCU callbacks",
-      "status": "SCOPED DEVICE/RETAINED THREAD RECORD FIXTURES AND KERNEL BUILD PASSED ON MACOS; target pending",
-      "remaining": "Review non-referenced lookups, other native entry contexts, GPU teardown, tasklet/BH and module-unload ordering; target cleanup still unverified",
+      "status": "PROBE AND KERNEL CLOSE ORDERING ARE SOURCE-VERIFIED, AND THE r14 CLOSE-PATH PANIC MECHANISM IS GONE; no target evidence that close completes without panic, timeout or leaked references",
+      "remaining": "Still open: driver-internal release ordering below drm_release (upstream i915 teardown not traced here), whether a long-lived REGULAR reader can block the close grace period, VFS's last-reference assumption, and the whole target run. The r14 panic no longer reproduces from source: the grace-period callback no longer takes the thread registry lock.",
       "source_findings": [
         "Device cdev callbacks never invoke the documented nmx_thread_enter/nmx_thread_leave path",
         "Wiring that path blindly can free struct thread while a retained task_struct still points to task_thread",
@@ -579,7 +579,75 @@
         "result": "actual device scopes/thread registry + joined mm fixtures passed; 900 DRM, 274 i915 and 76 runtime units compiled; native KC preflight passed",
         "hardware_executed": false
       },
-      "shared_lock_and_IDR": "Native generic shared/exclusive sleep release/reacquire and balanced IDR scope destruction passed on 8fcf6fa; WW wait-list/context cleanup extension host-passed, native pending"
+      "shared_lock_and_IDR": "Native generic shared/exclusive sleep release/reacquire and balanced IDR scope destruction passed on 8fcf6fa; WW wait-list/context cleanup extension host-passed, native pending",
+      "close_path": {
+        "status": "source-verified probe teardown, cdev close ordering, per-mapping release order and the RCU callback; no target evidence",
+        "route": "probe scope exit -> Buffer/Program/Context destructors -> process exit -> nmx_close -> nmx_cdev_close -> umap_release_all -> fdrop -> linux_file_close -> drm_release -> linux_synchronize_rcu",
+        "verified": [
+          {
+            "edge": "the probe destroys in dependency order, enforced by scope rather than by hand",
+            "anchors": [
+              "probe: main.cpp:459-461 run() declares the two buffers first and Program after them, so Program is destroyed first",
+              "probe: main.cpp:437-446 ~Program destroys fence, command pool, descriptor pool, pipeline, shader module, pipeline layout, descriptor set layout in that order",
+              "probe: main.cpp:371-376 ~Buffer unmaps, destroys the buffer, then frees the memory",
+              "probe: main.cpp:190-195 ~Context destroys the device, then the debug messenger, then the instance",
+              "probe: main.cpp:601-607 main() declares Deadline, then Library, then Context, so Context dies before dlclose and the deadline stays armed through teardown"
+            ],
+            "finding": "Descriptors are gone before the buffers they name, the device is gone before the loader handle, and the deadline covers teardown so a hang is reported rather than hanging the machine silently."
+          },
+          {
+            "edge": "every iteration completes before anything is destroyed",
+            "anchors": [
+              "probe: main.cpp:552-556 a fence result other than VK_SUCCESS abandons teardown with _Exit(124 on timeout, 2 otherwise) instead of destroying possibly in-flight resources",
+              "probe: main.cpp:557-563 the readback is compared only after that wait, and a mismatch throws, which unwinds through the ordered destructors"
+            ],
+            "finding": "Normal teardown only ever runs after the GPU work completed and was read back. The _Exit paths are failure policy, not cleanup, so a failure run does not double as evidence of clean teardown."
+          },
+          {
+            "edge": "user mappings are released before the file release",
+            "anchors": [
+              "port: override/src/nmx_linux_cdev.c:357-384 nmx_cdev_close unlinks the open under opens_mtx, then calls umap_release_all(o), then runs the driver close and fdrop, then devfs_clear_cdevpriv, dev_rel, destroy and free"
+            ],
+            "finding": "The native user mapping teardown happens strictly before the file's release path can drop the last GEM/VM references."
+          },
+          {
+            "edge": "each mapping is unwound unmap -> unpin -> vma close -> file/mm put",
+            "anchors": [
+              "port: override/src/nmx_linux_cdev.c:531-547 umap_free calls nmx_xnu_unmap_user, then the pin callback with false, then vma->vm_ops->close, then fput(vma->vm_file), then mmput(vma->vm_mm), then frees",
+              "port: override/src/nmx_linux_cdev.c:646-660 umap_release_all pops each record under maps_mtx and frees it outside the lock, so no sleeping free happens under the mutex"
+            ],
+            "finding": "This is the order T7 asks for: native unmap first, unpin second, and only then the vma close that releases the GEM object and the file/mm references."
+          },
+          {
+            "edge": "the close-path RCU wait no longer takes the thread registry lock",
+            "anchors": [
+              "port: override/src/linux_compat.c:1146-1185 linux_file_close runs the driver release, drops the fops/cdev references, then calls linux_synchronize_rcu(RCU_TYPE_REGULAR) and only then frees the file",
+              "port: override/src/linux_rcu.c:213-221 the grace-period callback is now just pause(\"nmxrcu\", 1); it does not call nmx_curthread or take any registry lock",
+              "port: override/src/linux_rcu.c:72 RCU_SKIP() compiles to 0 in this build, so the wait is not skipped",
+              "ck: ck_epoch_synchronize_wait invokes the callback through epoch_block (freebsd ck_epoch.c:411-419), which holds no ck lock while calling it",
+              "r14: panic-2026-10-21-183746.txt shows the old stack linux_synchronize_rcu_cb -> nmx_curthread -> nmx_thread_get -> IOSimpleLockLock, ending in a TLB-shootdown timeout"
+            ],
+            "finding": "The r14 stack spent the grace period spinning inside the thread-registry simple lock, which is exactly the shape that starves a TLB shootdown. Today the callback sleeps outside every lock, so that mechanism is gone from source. This does not prove the close path is safe on the target, only that the specific r14 mechanism is no longer present."
+          },
+          {
+            "edge": "failure modes are separated instead of sharing one path",
+            "anchors": [
+              "probe: main.cpp:548-551 submit failure exits 2 without teardown",
+              "probe: main.cpp:553-556 fence timeout exits 124, other fence errors exit 2",
+              "probe: main.cpp:106-118 the overall deadline, which includes teardown, exits 124",
+              "probe: main.cpp:563 a readback mismatch throws and unwinds normally"
+            ],
+            "finding": "Normal exit, compute error, submit failure, wait timeout and deadline expiry are distinguishable from the exit code and the last printed stage, which is what T7 asks to be recorded separately."
+          }
+        ],
+        "open": [
+          "driver-internal release ordering below drm_release (upstream i915 teardown) is not traced in this entry",
+          "VFS is relied on to call d_close only after the last file reference; nothing here tests that a concurrent ioctl cannot hold the open record",
+          "a long-lived REGULAR RCU reader would stall the close grace period; that lands on the deadline and exits 124 without cleanup",
+          "the r14 panic itself is a hardware-observed event; no source change can be claimed to have fixed it on the target without a run"
+        ],
+        "hardware_executed": false
+      }
     }
   ],
   "test_limit": "Existing fixtures are evidence only for their actual extracted code and exercised contracts. Kernel services or hardware replaced by host mocks are not verified by those mocks.",
