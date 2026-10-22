@@ -1,5 +1,5 @@
-run 39752294845 attempt 1
-commit b5bb28c96aeaef0016f59a3213240eb58d3cde99
+run 39761550305 attempt 1
+commit 7d9245422e5af962499f273751b1cfaabdc531f4
 freebsd-src 7668705cb9837d4c3a6db9b3434b3a522220c8ea
 
 ===== /tmp/genflags.log
@@ -30,4 +30,4 @@ Local storage:
 
 ===== first failing sources
 ===== kext
--rwxr-xr-x  1 runner  staff  13548088 Oct 22 09:34 /Users/runner/work/nvidia-macos-driver/nvidia-macos-driver/out/NMXGPU.kext/Contents/MacOS/NMXGPU
+-rwxr-xr-x  1 runner  staff  13548088 Oct 22 12:19 /Users/runner/work/nvidia-macos-driver/nvidia-macos-driver/out/NMXGPU.kext/Contents/MacOS/NMXGPU
