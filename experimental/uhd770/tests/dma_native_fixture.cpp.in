@@ -1,0 +1,180 @@
+/* Actual IOKit DMA adapter joined to actual Linux/BSD mapping and rollback.
+ * IOKit descriptors/commands and mutex/allocator services are controlled
+ * primitives; physical inputs represent pinned GEM pages. No GPU executes. */
+#include <atomic>
+#include <cassert>
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <initializer_list>
+#include <cstdlib>
+#include <mutex>
+#include <new>
+#include <stdexcept>
+#include "nmx_checked_ranges.h"
+#ifdef _MSC_VER
+#pragma warning(disable: 4100 4505)
+#endif
+using UInt8=unsigned char;
+using UInt32=unsigned int;
+using UInt64=unsigned long long;
+using IOPhysicalAddress=UInt64;
+using IOReturn=int;
+constexpr IOReturn kIOReturnSuccess=0,kIOReturnError=1;
+constexpr int kIODirectionInOut=3;
+enum Failure { None,Descriptor,Command,Prepare,PrepareOwned,Generate,Split,Short,Handle };
+static Failure failure=None;
+static unsigned fail_at=0,attempts=0,live_md=0,live_cmd=0,live_handles=0;
+static uint64_t iova_delta=0;
+static unsigned last_bits;
+static bool fail_now(Failure at) { return failure==at && attempts==fail_at; }
+class IOMapper { public:static IOMapper *gSystem; };
+IOMapper *IOMapper::gSystem=nullptr;
+static IOMapper mapper;
+class IOMemoryDescriptor {
+    unsigned refs=1;
+public:
+    uint64_t pa,size;
+    IOMemoryDescriptor(uint64_t p,uint64_t n):pa(p),size(n) { ++live_md; }
+    static IOMemoryDescriptor *withPhysicalAddress(IOPhysicalAddress pa,size_t n,int)
+    {
+        ++attempts;if(fail_now(Descriptor)) return nullptr;
+        return new(std::nothrow) IOMemoryDescriptor(pa,n);
+    }
+    void retain() { ++refs; }
+    void release() { assert(refs);if(--refs==0) { --live_md;delete this; } }
+};
+class IODMACommand {
+    IOMemoryDescriptor *md=nullptr;
+public:
+    enum { OutputHost64=1,kMapped=2 };
+    struct Segment64 { UInt64 fIOVMAddr,fLength; };
+    IODMACommand() { ++live_cmd; }
+    static IODMACommand *withSpecification(int,UInt8 bits,int,int,int,int,IOMapper *m,void *)
+    {
+        assert(m==IOMapper::gSystem && m);last_bits=bits;
+        if(fail_now(Command)) return nullptr;return new(std::nothrow) IODMACommand;
+    }
+    IOReturn setMemoryDescriptor(IOMemoryDescriptor *p,bool prepare)
+    {
+        assert(prepare && !md);
+        if(fail_now(Prepare)) return kIOReturnError;
+        md=p;md->retain();return fail_now(PrepareOwned)?kIOReturnError:kIOReturnSuccess;
+    }
+    IOReturn gen64IOVMSegments(UInt64 *offset,Segment64 *seg,UInt32 *count)
+    {
+        assert(md && *offset==0 && *count==1);
+        if(fail_now(Generate)) return kIOReturnError;
+        seg->fIOVMAddr=md->pa+iova_delta;
+        seg->fLength=md->size-(fail_now(Short)?1:0);
+        *offset=md->size;*count=fail_now(Split)?2:1;return kIOReturnSuccess;
+    }
+    void clearMemoryDescriptor(bool complete) { assert(complete);if(md) { md->release();md=nullptr; } }
+    void release() { clearMemoryDescriptor(true);--live_cmd;delete this; }
+};
+static void *IOMalloc(size_t n)
+{
+    if(fail_now(Handle)) return nullptr;
+    void *p=std::malloc(n);if(p) ++live_handles;return p;
+}
+static void IOFree(void *p,size_t) { assert(p && live_handles);--live_handles;std::free(p); }
+/* ACTUAL_NATIVE_DMA */
+
+extern "C" {
+void *fixture_dma_context(uint64_t);
+int fixture_dma_map_sg(void *,const uint64_t *,const unsigned *,int,uint64_t *);
+void fixture_dma_unmap_sg(void *);
+void fixture_dma_destroy(void *);
+bool fixture_dma_identity(void *,uint64_t,uint64_t);
+void fixture_dma_fail_alloc(unsigned);
+unsigned fixture_dma_live_allocations(void);
+struct mtx { void *native; };
+void fixture_mutex_init(mtx *m) { m->native=new std::mutex; }
+void fixture_mutex_destroy(mtx *m) { delete static_cast<std::mutex *>(m->native); }
+void fixture_mutex_lock(mtx *m) { static_cast<std::mutex *>(m->native)->lock(); }
+void fixture_mutex_unlock(mtx *m) { static_cast<std::mutex *>(m->native)->unlock(); }
+void fixture_native_fence() { std::atomic_thread_fence(std::memory_order_seq_cst); }
+}
+static constexpr uint64_t mask39=(uint64_t(1)<<39)-1;
+static void require(bool v,const char *why) { if(!v) throw std::runtime_error(why); }
+static void clean()
+{
+    require(!live_md && !live_cmd && !live_handles && !fixture_dma_live_allocations(),
+            "DMA descriptor/command/map allocation ownership leaked");
+}
+static void reset(bool mapped,Failure mode=None,unsigned at=1)
+{
+    clean();IOMapper::gSystem=mapped?&mapper:nullptr;
+    iova_delta=mapped?0x400000000ULL:0;failure=mode;fail_at=at;attempts=0;last_bits=0;fixture_dma_fail_alloc(0);
+}
+static void scatterlist(bool mapped)
+{
+    reset(mapped);void *c=fixture_dma_context(mask39);
+    uint64_t pa[]={0x100000000ULL,0x111111000ULL,0x200000000ULL},out[3]{};
+    unsigned length[]={4096,4096,8192};
+    require(fixture_dma_map_sg(c,pa,length,3,out)==3,"real Linux scatterlist map failed");
+    for(unsigned i=0;i<3;++i) require(out[i]==pa[i]+iova_delta,"device address did not flow through real Linux/BSD/native chain");
+    if(mapped) require(last_bits==39 && live_handles==3 && live_md==3 && live_cmd==3,"39-bit IODMA command or range lifetime lost");
+    else require(!attempts && !live_handles,"identity mapping unexpectedly created IOMMU descriptors");
+    fixture_dma_unmap_sg(c);fixture_dma_destroy(c);clean();
+}
+static void partial_failures()
+{
+    for(Failure mode:{Descriptor,Command,Prepare,PrepareOwned,Generate,Split,Short,Handle}) {
+        reset(true,mode,2);void *c=fixture_dma_context(mask39);
+        uint64_t pa[]={0x200000000ULL,0x200002000ULL,0x200004000ULL},out[3]={7,7,7};unsigned len[]={4096,4096,4096};
+        require(fixture_dma_map_sg(c,pa,len,3,out)==0,"partial native DMA failure was advertised as a successful S/G map");
+        require(out[0]==7 && !live_handles && !live_cmd && !live_md,"partial native failure did not roll back earlier ranges");
+        failure=None;
+        require(fixture_dma_map_sg(c,pa,len,3,out)==3,"real S/G retry after rollback retained broken state");
+        fixture_dma_destroy(c);clean();
+    }
+}
+static void address_limits()
+{
+    for(bool mapped:{false,true}) {
+        reset(mapped);void *c=fixture_dma_context(mask39);
+        uint64_t pa[]={mask39-4095},out[]={99};unsigned len[]={8192};
+        require(fixture_dma_map_sg(c,pa,len,1,out)==0 && out[0]==99,"39-bit range overflow accepted");
+        if(!mapped) {
+            require(fixture_dma_identity(c,0x1000,4096),"valid identity range refused");
+            require(!fixture_dma_identity(c,mask39-4095,8192),"identity fast path ignored last-address limit");
+        } else require(!fixture_dma_identity(c,0x1000,4096),"IOMapper incorrectly used identity fast path");
+        fixture_dma_destroy(c);clean();
+    }
+    reset(true);void *c=fixture_dma_context(mask39);iova_delta=uint64_t(1)<<39;
+    uint64_t pa[]={0x1000},out[]={99};unsigned len[]={4096};
+    require(fixture_dma_map_sg(c,pa,len,1,out)==0 && out[0]==99,"translated IOVA beyond DMA mask accepted");
+    fixture_dma_destroy(c);clean();
+}
+static void map_growth_and_allocation_failure()
+{
+    for(unsigned fail:{0U,1U,2U}) {
+        reset(true);void *c=fixture_dma_context(mask39);fixture_dma_fail_alloc(fail);
+        uint64_t pa[8],out[8]{};unsigned len[8];
+        for(unsigned i=0;i<8;++i) { pa[i]=0x100000000ULL+i*8192;len[i]=4096; }
+        int result=fixture_dma_map_sg(c,pa,len,8,out);
+        require(result==(fail?0:8),"map creation/growth allocation failure not propagated");
+        fixture_dma_destroy(c);clean();
+    }
+}
+static void direct_native_bounds()
+{
+    reset(false);uint64_t out=99;void *h=reinterpret_cast<void *>(1);
+    require(nmx_xnu_dma_map(nullptr,UINT64_MAX-3,8,mask39,&out,&h)==EINVAL && out==0 && h==nullptr,
+            "native range wrap/output initialization not enforced");
+    require(nmx_xnu_dma_map(nullptr,0x1000,0,mask39,&out,&h)==EINVAL,"zero native DMA length accepted");clean();
+}
+int main()
+{
+    try {
+        scatterlist(false);std::puts("PASS actual S/G -> BSD -> native identity DMA");
+        scatterlist(true);std::puts("PASS actual S/G -> BSD -> IODMACommand 39-bit IOVA");
+        partial_failures();std::puts("PASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings");
+        address_limits();std::puts("PASS physical/translated 39-bit DMA masks and identity fast-path limits");
+        map_growth_and_allocation_failure();std::puts("PASS actual mapping-array growth and allocation rollback");
+        direct_native_bounds();std::puts("PASS native overflow/zero-size and initialized failure outputs");
+        std::puts("Actual Linux/BSD/native DMA contracts passed; IOKit/allocator/flat S/G primitives modeled; no GPU executed.");return 0;
+    } catch(const std::exception &e) { std::printf("FAIL DMA contract: %s\n",e.what());return 1; }
+}

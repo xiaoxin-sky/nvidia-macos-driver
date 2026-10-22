@@ -207,6 +207,25 @@ jobs:
             2>&1 | tee /tmp/nmx-kernel-clock-compile.log
           python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-kernel-clock-test"], timeout=60, check=True)' \
             2>&1 | tee /tmp/nmx-kernel-clock-test.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_dma_fixture.py" \
+            --port "$X" --templates "$GITHUB_WORKSPACE/experimental/uhd770/tests" \
+            --output /tmp/nmx-dma-fixture
+          cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function \
+            -c /tmp/nmx-dma-fixture/dma-bus-test.c -o /tmp/nmx-dma-bus-test.o \
+            2>&1 | tee /tmp/nmx-dma-c-compile.log
+          c++ -std=c++17 -pthread -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function \
+            /tmp/nmx-dma-fixture/dma-native-test.cpp /tmp/nmx-dma-bus-test.o -o /tmp/nmx-dma-test \
+            2>&1 | tee /tmp/nmx-dma-cpp-compile.log
+          python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-dma-test"], timeout=60, check=True)' \
+            2>&1 | tee /tmp/nmx-dma-test.log
+          cc -std=c11 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
+            -Wno-unused-parameter -Wno-unused-function -c /tmp/nmx-dma-fixture/dma-bus-test.c \
+            -o /tmp/nmx-dma-asan-bus.o 2>&1 | tee /tmp/nmx-dma-asan-c-compile.log
+          c++ -std=c++17 -pthread -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
+            -Wno-unused-parameter -Wno-unused-function /tmp/nmx-dma-fixture/dma-native-test.cpp \
+            /tmp/nmx-dma-asan-bus.o -o /tmp/nmx-dma-asan 2>&1 | tee /tmp/nmx-dma-asan-cpp-compile.log
+          python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-dma-asan"], timeout=60, check=True)' \
+            2>&1 | tee /tmp/nmx-dma-asan.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_fb_start_fixture.py" \
             "$X/xnu/nmx_fb.cpp" "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_start_fixture.cpp.in" \
             /tmp/nmx-fb-start-test.cpp
@@ -409,6 +428,8 @@ jobs:
           cp /tmp/nmx-tasklet-test.cpp /tmp/nmx-tasklet*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-native-lock-test.cpp /tmp/nmx-native-lock*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-kernel-clock-test.cpp /tmp/nmx-kernel-clock*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-dma*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-dma-fixture/dma-bus-test.c /tmp/nmx-dma-fixture/dma-native-test.cpp "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$GITHUB_WORKSPACE/experimental/uhd770/patches/freebsd.patch" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-fb-start-test.cpp /tmp/nmx-fb-start-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-runtime-pm-test.c /tmp/nmx-runtime-pm-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true

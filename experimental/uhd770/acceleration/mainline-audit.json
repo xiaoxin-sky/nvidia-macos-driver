@@ -37,8 +37,8 @@
     {
       "id": "memory",
       "route": "GEM create -> backing pages -> DMA/IOMMU -> PPGTT/GGTT -> NMX mmap -> IOKit user map",
-      "status": "SHARED MM/NATIVE TASK OWNERSHIP REPAIRED; joined native CI passed",
-      "remaining": "Complete DMA/GPU VA/visibility review and validate actual target memory paths; native fixtures model Mach task/IOKit primitives",
+      "status": "SHARED MM/TASK OWNERSHIP PASSED NATIVE; joined S/G-DMA ownership/address fixture host-passed, native pending",
+      "remaining": "Native DMA fixture/ASan verification; scalar page-table DMA registry and actual page allocation; complete GPU VA/cache-alias/visibility review and target DMA/coherency evidence",
       "source_findings": [
         "PROC_LOCK only refreshes signals, so process p_lkpi_mm publication/acquisition lacks its expected lock",
         "linux_mm_dtor clears current process mm rather than locating the original mm owner",
@@ -52,7 +52,23 @@
         "sha256": "282484b2aa1ad4e6681a408df1812b975f8896a445c29dcff59fd61051322051",
         "result": "joined Linux/native mm fixture and kernel KC checks passed"
       },
-      "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json"
+      "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json",
+      "dma_interface": {
+        "status": "joined Linux/BSD/native DMA fixture passed on Windows; native macOS and ASan/UBSan pending",
+        "groups": 6,
+        "executed": "actual linux_dma_map_sg_attrs/unmap -> actual busdma map growth/bounds/rollback -> actual nmx_xnu_dma_map/unmap",
+        "covered": [
+          "No-IOMapper identity path with fragmented S/G addresses above 4GiB",
+          "Translated IOVA path with 39-bit IODMACommand limit and complete per-range lifetime",
+          "Descriptor, command, prepare before/after retention, segment generation, split/short segment and handle-allocation failures on second range; all prior mappings rolled back and retry succeeds",
+          "Physical and translated last-address limits; no false identity path while IOMapper exists",
+          "Inline handle-array growth and native map/allocation failure rollback",
+          "Native range overflow, zero length and cleared error outputs"
+        ],
+        "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nActual Linux/BSD/native DMA contracts passed; IOKit/allocator/flat S/G primitives modeled; no GPU executed.\n",
+        "limits": "IOKit descriptor/command, allocator, mutex and flat S/G storage are primitives; no real device/IOMMU DMA, GEM page residency, S/G chaining, scalar pctrie mapping or GPU PTE/cache behavior executed.",
+        "hardware_executed": false
+      }
     },
     {
       "id": "submission",
@@ -64,8 +80,8 @@
     {
       "id": "completion",
       "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
-      "status": "THREADED BH/NATIVE MUTEX/CSB AND MONOTONIC CLOCK PASSED NATIVE MACOS CHECKS; PCODE retry pending",
-      "remaining": "Verify kernel clock and PCODE retry on native macOS; finish remaining native critical/seqcount/IRQ-work/allocation paths and actual GPU request/IRQ/fence evidence",
+      "status": "THREADED BH/NATIVE MUTEX/CSB, MONOTONIC CLOCK AND PCODE RETRY PASSED NATIVE MACOS CHECKS; real IRQ/fence pending",
+      "remaining": "Finish remaining critical/IRQ-work and real GPU request/breadcrumb/fence delivery, with target evidence still absent",
       "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
       "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018",
       "next_review": "Complete remaining critical-scope transitive audit and actual GPU context/memory/submission/visibility/cleanup contracts; no hardware request merely for a passing build",
@@ -122,12 +138,20 @@
         }
       },
       "pcode_retry_repair": {
-        "status": "implemented, native verification pending",
+        "status": "native macOS fixture/kernel/KC checks passed; mailbox/hardware still modeled",
         "change": "NMX-only 50ms retry uses actual non-atomic wait helper; mailbox sb_lock, request/ack condition, retry budget and status precedence preserved",
         "source_trace": "__snb_pcode_rw uses forcewake-independent raw mailbox MMIO and __intel_wait_for_register_fw; nested fast polling uses non-atomic helper with only short clock snapshots critical",
         "test_scope": "Actual skl_pcode_request + actual i915 wait macros + actual native clock adapter; mailbox transaction modeled; GNU expressions/PCODE tests require native clang and were not executed by the Windows fixture",
         "hardware_executed": false,
-        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39724583464"
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39724583464",
+        "native_evidence": {
+          "source": "2669b1879818143bae11805151b1349ff8f78007",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39724583464",
+          "artifact_id": 12403505254,
+          "sha256": "ff5bdaecd18b5c2986d97603d099c10f4a423cca478d8dcf3c884efa27cad97a",
+          "result": "Actual PCODE retry/timeout/status precedence with modeled mailbox and actual wait/clock source passed on macOS; tasklet/native-lock TSan and all 1250 kernel units/KC preflight passed",
+          "hardware_executed": false
+        }
       }
     },
     {
@@ -208,7 +232,7 @@
         "staged_match": "all patched source text identical after CRLF/LF normalization"
       }
     },
-    "current_native_ci_status": "PCODE retry source 2669b18 run 39724583464 live at last verified observation; no current GPU proof",
+    "current_native_ci_status": "DMA fixture is host-passed and awaiting native dispatch/verification; driver implementation through 2669b18 passed native build",
     "new_user_test_requested": false,
     "usb_package_changed": false,
     "kernel_clock": {
@@ -235,6 +259,30 @@
       "artifact_id": 12401299994,
       "sha256": "7c22e28eacd1f5b4328cc83966487bf29f4d82a2de578c46174882c12e22b9dc",
       "result": "7 actual native lock/BH/critical/CSB cases and 12 tasklet/i915 cases passed normally and under ThreadSanitizer; all 1250 kernel units and native KC preflight passed",
+      "hardware_executed": false
+    },
+    "pcode_native_evidence": {
+      "source": "2669b1879818143bae11805151b1349ff8f78007",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39724583464",
+      "artifact_id": 12403505254,
+      "sha256": "ff5bdaecd18b5c2986d97603d099c10f4a423cca478d8dcf3c884efa27cad97a",
+      "result": "Actual PCODE retry/timeout/status precedence with modeled mailbox and actual wait/clock source passed on macOS; tasklet/native-lock TSan and all 1250 kernel units/KC preflight passed",
+      "hardware_executed": false
+    },
+    "dma_interface": {
+      "status": "joined Linux/BSD/native DMA fixture passed on Windows; native macOS and ASan/UBSan pending",
+      "groups": 6,
+      "executed": "actual linux_dma_map_sg_attrs/unmap -> actual busdma map growth/bounds/rollback -> actual nmx_xnu_dma_map/unmap",
+      "covered": [
+        "No-IOMapper identity path with fragmented S/G addresses above 4GiB",
+        "Translated IOVA path with 39-bit IODMACommand limit and complete per-range lifetime",
+        "Descriptor, command, prepare before/after retention, segment generation, split/short segment and handle-allocation failures on second range; all prior mappings rolled back and retry succeeds",
+        "Physical and translated last-address limits; no false identity path while IOMapper exists",
+        "Inline handle-array growth and native map/allocation failure rollback",
+        "Native range overflow, zero length and cleared error outputs"
+      ],
+      "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nActual Linux/BSD/native DMA contracts passed; IOKit/allocator/flat S/G primitives modeled; no GPU executed.\n",
+      "limits": "IOKit descriptor/command, allocator, mutex and flat S/G storage are primitives; no real device/IOMMU DMA, GEM page residency, S/G chaining, scalar pctrie mapping or GPU PTE/cache behavior executed.",
       "hardware_executed": false
     }
   }

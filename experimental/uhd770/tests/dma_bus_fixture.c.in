@@ -1,0 +1,120 @@
+/* Real Linux S/G mapper -> BSD busdma -> native C ABI. Allocator, mutex and
+ * flat S/G storage are host primitives. Inputs stand for already pinned GEM
+ * pages; page allocation and GPU execution are outside this fixture. */
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <limits.h>
+#include <errno.h>
+#include "nmx_checked_ranges.h"
+#ifdef _MSC_VER
+#pragma warning(disable: 4100 4505)
+#define __ATOMIC_SEQ_CST 0
+void fixture_native_fence(void);
+#define __atomic_thread_fence(v) fixture_native_fence()
+#endif
+#ifndef __unused
+#define __unused
+#endif
+typedef unsigned int u_int;
+typedef uint64_t bus_size_t, bus_addr_t, vm_paddr_t;
+typedef struct bus_dma_tag *bus_dma_tag_t;
+typedef struct bus_dmamap *bus_dmamap_t;
+typedef struct { bus_addr_t ds_addr;bus_size_t ds_len; } bus_dma_segment_t;
+typedef int bus_dmasync_op_t;
+typedef int bus_dma_filter_t(void *,bus_addr_t);
+typedef void bus_dma_lock_t(void *,int);
+#define BUS_SPACE_MAXADDR UINT64_MAX
+#define BUS_SPACE_MAXSIZE UINT64_MAX
+#define BUS_DMA_NOWAIT 1
+#define BUS_DMASYNC_PREREAD 1
+#define BUS_DMASYNC_POSTREAD 2
+#define BUS_DMASYNC_PREWRITE 4
+#define BUS_DMASYNC_POSTWRITE 8
+#define M_WAITOK 1
+#define M_NOWAIT 2
+#define M_ZERO 4
+#define M_BUSDMA 0
+static unsigned live_allocations,allocations,fail_allocation;
+static void *host_alloc(size_t n,int flags)
+{
+    if(++allocations==fail_allocation) return NULL;
+    void *p=(flags&M_ZERO)?calloc(1,n):malloc(n);
+    if(p) ++live_allocations;
+    return p;
+}
+static void host_free(void *p) { if(p) { assert(live_allocations);--live_allocations;free(p); } }
+struct mtx { void *native; };
+void fixture_mutex_init(struct mtx *);
+void fixture_mutex_destroy(struct mtx *);
+void fixture_mutex_lock(struct mtx *);
+void fixture_mutex_unlock(struct mtx *);
+struct pctrie { int unused; };
+struct device { void *dma_priv; };
+struct scatterlist { uint64_t phys;unsigned length;uint64_t dma_address;unsigned dma_length;bus_dmamap_t dma_map; };
+#define sg_phys(sg) ((sg)->phys)
+#define sg_dma_address(sg) ((sg)->dma_address)
+#define for_each_sg(sgl,sg,n,i) for((i)=0,(sg)=(sgl);(i)<(n);++(i),++(sg))
+#define DMA_PRIV_LOCK(priv) fixture_mutex_lock(&(priv)->lock)
+#define DMA_PRIV_UNLOCK(priv) fixture_mutex_unlock(&(priv)->lock)
+#define KASSERT(v,msg) assert(v)
+#define DMA_ATTR_SKIP_CPU_SYNC (1u<<5)
+enum dma_data_direction { DMA_BIDIRECTIONAL=0,DMA_TO_DEVICE=1,DMA_FROM_DEVICE=2,DMA_NONE=3 };
+int nmx_xnu_iommu_active(void);
+int nmx_xnu_dma_map(void *,uint64_t,size_t,uint64_t,uint64_t *,void **);
+void nmx_xnu_dma_unmap(void *);
+void bus_dmamap_unload(bus_dma_tag_t,bus_dmamap_t);
+void bus_dmamap_sync(bus_dma_tag_t,bus_dmamap_t,bus_dmasync_op_t);
+#define malloc(n,type,flags) host_alloc((n),(flags))
+#define free(p,type) host_free(p)
+/* ACTUAL_LINUX_BSD_DMA */
+#undef malloc
+#undef free
+
+struct fixture_context {
+    struct device dev;
+    struct linux_dma_priv priv;
+    struct scatterlist entries[32];
+    bus_dma_tag_t root;
+    int active;
+};
+void *fixture_dma_context(uint64_t mask)
+{
+    struct fixture_context *c=calloc(1,sizeof(*c));assert(c);
+    c->dev.dma_priv=&c->priv;fixture_mutex_init(&c->priv.lock);
+    c->root=nmx_busdma_root_tag(NULL);assert(c->root);
+    int error=bus_dma_tag_create(c->root,1,0,mask,UINT64_MAX,NULL,NULL,UINT64_MAX,1,
+                                UINT64_MAX,0,NULL,NULL,&c->priv.dmat);
+    assert(error==0);
+    return c;
+}
+int fixture_dma_map_sg(void *ptr,const uint64_t *addresses,const unsigned *lengths,
+                       int count,uint64_t *out)
+{
+    struct fixture_context *c=ptr;assert(count>0 && count<=32 && !c->active);
+    memset(c->entries,0,sizeof(c->entries));
+    for(int i=0;i<count;++i) { c->entries[i].phys=addresses[i];c->entries[i].length=lengths[i]; }
+    int result=linux_dma_map_sg_attrs(&c->dev,c->entries,count,DMA_BIDIRECTIONAL,0);
+    c->active=result>0;
+    if(result) for(int i=0;i<count;++i) { out[i]=c->entries[i].dma_address;assert(c->entries[i].dma_length==lengths[i]); }
+    return result;
+}
+void fixture_dma_unmap_sg(void *ptr)
+{
+    struct fixture_context *c=ptr;
+    if(c->active) { linux_dma_unmap_sg_attrs(&c->dev,c->entries,0,DMA_BIDIRECTIONAL,0);c->active=0; }
+}
+bool fixture_dma_identity(void *ptr,uint64_t pa,uint64_t len)
+{
+    struct fixture_context *c=ptr;return bus_dma_id_mapped(c->priv.dmat,pa,len);
+}
+void fixture_dma_destroy(void *ptr)
+{
+    struct fixture_context *c=ptr;fixture_dma_unmap_sg(c);
+    bus_dma_tag_destroy(c->priv.dmat);nmx_busdma_root_free(c->root);
+    fixture_mutex_destroy(&c->priv.lock);free(c);
+}
+void fixture_dma_fail_alloc(unsigned nth) { allocations=0;fail_allocation=nth; }
+unsigned fixture_dma_live_allocations(void) { return live_allocations; }

@@ -150,9 +150,17 @@
     }
   },
   "pcode_retry": {
-    "status": "implemented, native tests pending",
+    "status": "native macOS actual wait/clock/retry fixture and full kernel/KC checks passed; hardware acknowledgment modeled",
     "policy": "Mailbox mutex remains held; retry predicate and 50ms budget unchanged. Only short per-iteration clock snapshots enter native CPU critical sections. No forced acknowledgment or success fallback.",
     "coverage": "Actual request retry/timeout/status precedence and actual wait/clock bodies, modeled mailbox transaction; native clang required for GNU wait expressions",
-    "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39724583464"
+    "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39724583464",
+    "native_evidence": {
+      "source": "2669b1879818143bae11805151b1349ff8f78007",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39724583464",
+      "artifact_id": 12403505254,
+      "sha256": "ff5bdaecd18b5c2986d97603d099c10f4a423cca478d8dcf3c884efa27cad97a",
+      "result": "Actual PCODE retry/timeout/status precedence with modeled mailbox and actual wait/clock source passed on macOS; tasklet/native-lock TSan and all 1250 kernel units/KC preflight passed",
+      "hardware_executed": false
+    }
   }
 }
