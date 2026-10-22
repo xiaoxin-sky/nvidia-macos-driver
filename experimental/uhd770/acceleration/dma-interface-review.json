@@ -241,5 +241,71 @@
       "scratch/TLB interaction when a parent entry is replaced or cleared while the GPU is using it"
     ],
     "hardware_executed": false
+  },
+  "cpu_alias_cache_modes": {
+    "status": "source-verified alias encoding round trip, alias creation and flush primitives; real visibility and snooping unverified",
+    "question": "When the CPU writes through a kernel alias and the GPU reads the same page through DMA, do the two agree on the cache mode, and is there any place that asks for a mode change the port silently ignores?",
+    "encoding": [
+      "cachemode2protval(attr) = (attr << LINUXKPI_CACHE_MODE_SHIFT) | LINUXKPI_PROT_VALID, shift 4, valid bit 1<<3 (override/include/linux/page.h:53-64)",
+      "pgprot_writecombine keeps VM_PROT_ALL and encodes VM_MEMATTR_WRITE_COMBINING (page.h:89-90); pgprot_noncached encodes VM_MEMATTR_UNCACHEABLE (page.h:86-87)",
+      "pgprot2cachemode returns prot >> 4 when the valid bit is set and VM_MEMATTR_DEFAULT otherwise (page.h:66-73)",
+      "the values in machine/vm.h are PAT encodings (UC 0x00, WC 0x01, WT 0x04, WB 0x06), so the decoded mode is also the value cache_option() switches on"
+    ],
+    "verified": [
+      {
+        "edge": "single-page write-back mapping reuses the allocator's own alias",
+        "anchors": [
+          "drm: gem/i915_gem_pages.c:302-303 I915_MAP_WB returns page_address(sg_page(...)) instead of creating a mapping",
+          "port: override/src/linux_page.c:85-90 linux_page_address returns page->nmx_kva",
+          "port: bsdcompat/src/nmx_page.c:206-213 page_prepare sets md.pat_mode = VM_MEMATTR_WRITE_BACK and zeroes through that same alias"
+        ],
+        "finding": "For a single page the WB view is exactly the alias the allocator already has, so a CPU write and the zeroing done at allocation time are the same view."
+      },
+      {
+        "edge": "multi-page write-back mapping lands on the cached default",
+        "anchors": [
+          "drm: gem/i915_gem_pages.c:304-305,321 multi-page WB uses vmap(..., PAGE_KERNEL)",
+          "port: override/include/linux/page.h:66-73 PAGE_KERNEL carries no valid bit, so pgprot2cachemode yields VM_MEMATTR_DEFAULT",
+          "port: override/src/linux_page.c:378-386 vmap then substitutes pages[0]->md.pat_mode when the decoded mode is VM_MEMATTR_DEFAULT, which is WRITE_BACK for these pages",
+          "port: xnu/nmx_vm.cpp:21-28 VM_MEMATTR_WRITE_BACK (0x06) reaches the default branch and maps with kIOMapDefaultCache"
+        ],
+        "finding": "WB does not accidentally become uncached: the default-prot branch falls back to the page's recorded attribute rather than to cache mode zero."
+      },
+      {
+        "edge": "write-combined and uncached aliases decode exactly",
+        "anchors": [
+          "drm: gem/i915_gem_pages.c:306-308 I915_MAP_WC uses pgprot_writecombine(PAGE_KERNEL_IO), and PAGE_KERNEL_IO is 0x0000 (page.h:58)",
+          "port: override/include/linux/page.h:89-90 pgprot_writecombine(0) = 0x18, decoding to VM_MEMATTR_WRITE_COMBINING (0x01)",
+          "port: xnu/nmx_vm.cpp:24-26 0x01 is NMX_CACHE_WC and maps with kIOMapWriteCombineCache; 0x00 is NMX_CACHE_UC and maps with kIOMapInhibitCache"
+        ],
+        "finding": "The three modes i915 asks for (WB, WC, UC) map one-to-one onto the three IOKit mapping options, and the encode/decode round trip is exact for each."
+      },
+      {
+        "edge": "two aliases of one page are expected, not accidental",
+        "anchors": [
+          "drm: gem/i915_gem_pages.c:302-321 WB may return the allocator alias while WC always creates a vmap alias of the same pages",
+          "port: bsdcompat/src/nmx_page.c:706-710 pmap_page_set_memattr invalidates the kernel alias when a page leaves write-back",
+          "port: bsdcompat/src/nmx_page.c:693-696 pmap_change_attr returns 0 without changing any existing mapping"
+        ],
+        "finding": "The allocator keeps a WB alias at nmx_kva and i915 may add a WC alias on top. Changing an existing alias is not what happens: i915 chooses the mode when it creates the mapping. The WB alias is only invalidated if the page's recorded attribute itself changes, which this path does not do."
+      },
+      {
+        "edge": "the empty pmap_change_attr is reachable, but not from the i915 compute path",
+        "anchors": [
+          "port: bsdcompat/src/nmx_page.c:693-696 pmap_change_attr returns 0 with no effect",
+          "freebsd: sys/compat/linuxkpi/common/include/linux/set_memory.h:88-118 set_pages_array_wb/wc/uc are built on pmap_change_attr",
+          "drm: drivers/gpu/drm/ttm/ttm_pool.c:183-202 ttm_pool_apply_caching calls set_pages_array_wc/uc under #ifdef CONFIG_X86, which gen_flags.py does define",
+          "grep over the pinned DRM tree: no i915 source calls set_pages_array_*, set_memory_* or pmap_change_attr"
+        ],
+        "finding": "The stub is a real unimplemented behaviour: a TTM caller asking for WC or UC on existing pages is told it succeeded while nothing changes. It is off today's path because i915 selects the mode when creating the mapping, but it must not be cited as evidence that a mode change works."
+      }
+    ],
+    "open": [
+      "real cache visibility between CPU and GPU, and whether the part actually snoops through the LLC",
+      "DMA posting and read ordering for MMIO completion observed by the CPU",
+      "whether a user-mapped WC buffer needs an explicit flush before submission on this target; the flush primitive exists and is used by i915, but the need is platform behaviour",
+      "ttm_pool_apply_caching remains a silent no-op for any caller that is added later"
+    ],
+    "hardware_executed": false
   }
 }

@@ -452,9 +452,17 @@
     {
       "id": "visibility",
       "route": "GPU writes -> completion -> cache/barrier handling -> host readback",
-      "status": "NOT FULLY REVIEWED",
-      "remaining": "trace coherency assumptions and WC/WB mapping options; host tests cannot validate real cache visibility",
-      "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json"
+      "status": "ALIAS CACHE MODES, ENCODING ROUND TRIP AND FLUSH PRIMITIVES VERIFIED IN SOURCE; real visibility, LLC snooping and DMA posting unverified",
+      "remaining": "Still open: whether the part actually snoops CPU caches through the LLC for GPU writes to write-back pages and for CPU reads of GPU-written data; DMA posting/read ordering around the MMIO completion path; and whether a user-mapped write-combined buffer needs an explicit flush on this target. The empty pmap_change_attr is only reachable through TTM's pool, not through the i915 compute path.",
+      "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json",
+      "verified_edges": [
+        "single-page write-back mapping reuses the allocator's own alias",
+        "multi-page write-back mapping lands on the cached default",
+        "write-combined and uncached aliases decode exactly",
+        "two aliases of one page are expected, not accidental",
+        "the empty pmap_change_attr is reachable, but not from the i915 compute path"
+      ],
+      "detail": "experimental/uhd770/acceleration/dma-interface-review.json cpu_alias_cache_modes"
     },
     {
       "id": "cleanup",
