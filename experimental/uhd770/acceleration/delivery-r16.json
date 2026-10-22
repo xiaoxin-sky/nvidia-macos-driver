@@ -32,7 +32,13 @@
       "binary_in_package": "NMXGPU.kext/Contents/MacOS/NMXGPU",
       "binary_sha256": "5d0b123e2dcb51c16d4c1bef966d045da02c92fd430459ebce40abd1392ce5c0",
       "binary_bytes": 13548088,
-      "binary_equals_ci_artifact": true
+      "binary_equals_ci_artifact": true,
+      "installed_binary_is_resigned_derivative": {
+        "fact": "prepare installs an ad-hoc re-signed derivative of the packaged kext (codesign --force --sign -), so the bytes in /Library/Extensions are not the packaged bytes",
+        "identity_mechanism": "bundle id plus LC_UUID: run-probe.sh reads the staged binary's UUID and requires exactly one kextstat row for com.nullmoth.NMXGPU with that UUID",
+        "why_it_still_works": "code signing preserves LC_UUID, and the r14 run reached the Vulkan loader, so the UUID comparison passed with a re-signed derivative",
+        "record_correction": "the earlier field binary_equals_ci_artifact refers to the kext inside the package; it does not mean the installed copy is byte identical"
+      }
     },
     "userland": {
       "source_commit": "991e460dff9a71a6a1bba0427c3dd602267145a0",
@@ -374,5 +380,36 @@
     "conclusion": "because boot-args is deleted and re-added with WriteFlash, switching the USB to the test config replaces the NVRAM value rather than being ignored, so the test boot should see nmxintel=1 and no -nvoff",
     "why_it_mattered": "had the Delete entry been missing, OpenCore would have kept the existing -nvoff and session-user.sh would have refused with 'This is not the prepared Intel test boot', wasting the hardware round",
     "limit": "this is the configuration's intent; the boot that runs is the only proof, and the session refuses rather than proceeding wrong if it is missing"
+  },
+  "install_path_review": {
+    "method": "a third independent reviewer read session.sh, manage.sh, session-lib.sh, Start-UHD770.command and preflight.sh and answered fixed questions about what is installed, how it is verified, how the next boot is arranged and what happens on failure",
+    "verdict": "the arm-last design holds: the only thing that enables the driver on the next boot is the USB config swap, and that swap is the last action after every install and check; no path was found to a PREPARED state with an unbuilt kernel collection or an unverified runtime",
+    "confirmed": [
+      "the kernel collection is auxiliary only; the boot collection is an input and is never written",
+      "the final collection is built from the final /Library/Extensions after the kexts are replaced, then inspected and required to contain every live kext",
+      "the userland runtime is verified before and after install against a strict per-file manifest that rejects missing and extra files",
+      "armed is written only after the USB sync, all ten installs, the runtime check, the root job bootstrap and the opt-out restore",
+      "a second prepare is refused rather than upgrading in place"
+    ],
+    "actionable_gap_found": {
+      "what": "the capture LaunchDaemon is written by prepare but is not in the journal that restore replays, so session.sh restore leaves it installed, and prepare refuses to run while it exists",
+      "consequence": "the upgrade path needs the package's own Archive step, which the previous instructions on the USB omitted; a user following them would have been stopped at prepare",
+      "fix": "the USB instructions now require session.sh restore followed by Archive-UHD770-Failed.command --restored-session before Start, state the expected output of each, and give manage.sh remove-recorder as the remedy if prepare reports an earlier capture job",
+      "type": "instructions corrected; no package change"
+    },
+    "known_limits_recorded": [
+      "rollback is skipped when the root job cannot be confirmed stopped, leaving the new install in place with state failed and the opt-out restored",
+      "the first write to the USB happens after all ten live replacements, so a read-only or full ESP fails late and relies on rollback",
+      "a stale config.plist.uhd770-pending can survive a failed arm",
+      "a hard kill or power loss mid-install can leave a mixed install that is not armed and must be recovered with the journal restore",
+      "extra pre-existing kexts in /Library/Extensions are carried into the rebuilt collection; only the ten known targets are replaced",
+      "the arm is not re-read from the ESP after the rename, only the pending copy is hashed"
+    ],
+    "open_question_settled_empirically": {
+      "question": "whether the booter consumes /Library/KernelCollections/AuxiliaryKernelExtensions.kc rather than the system path",
+      "evidence": "in the last target run the kext was loaded: loaded-kexts.txt lists com.nullmoth.NMXGPU at index 121 with the UUID that the panic also names",
+      "conclusion": "on this machine the collection installed by this script is the one that takes effect"
+    },
+    "hardware_executed": false
   }
 }
