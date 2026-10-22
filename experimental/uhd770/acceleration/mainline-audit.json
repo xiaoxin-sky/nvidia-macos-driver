@@ -22,8 +22,10 @@
     {
       "id": "ioctl",
       "route": "Darwin cdev ioctl -> linux_file_ioctl_sub -> synthetic top-level user pointer -> DRM dispatch -> nested user pointers",
-      "status": "JOINT TRANSPORT/DISPATCH FIXTURE ADDED; native execution pending",
-      "remaining": "actual dispatcher tests for direction/size/nested-pointer copy, context restoration and errno transport"
+      "status": "NATIVE JOINT TRANSPORT/DISPATCH FIXTURE PASSED; real i915 command execution still pending",
+      "remaining": "No finding of a transport failure in these cases; actual I915 QUERY/GETPARAM/context/execbuf handler behavior requires the separate contracts below",
+      "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39709715137",
+      "host_evidence": "Actual LinuxKPI transport/copy helpers + actual DRM dispatch/permissions; inert driver callback with pinned i915 query layout; sizes, directions, nested pointers, errno and context cleanup passed"
     },
     {
       "id": "identity_context",
@@ -66,10 +68,27 @@
       "id": "cleanup",
       "route": "fence/context/BO destruction -> user unmap -> final file/MM/task release -> RCU callbacks",
       "status": "REVIEW IN PROGRESS",
-      "remaining": "file final-drop repaired; native task reference retention and mm lifecycle require review"
+      "remaining": "file final-drop repaired; native task reference retention and mm lifecycle require review",
+      "source_findings": [
+        "Device cdev callbacks never invoke the documented nmx_thread_enter/nmx_thread_leave path",
+        "Wiring that path blindly can free struct thread while a retained task_struct still points to task_thread",
+        "mm final destruction does not explicitly destroy its allocated native mmap_sem sx lock"
+      ]
     }
   ],
   "test_limit": "Existing fixtures are evidence only for their actual extracted code and exercised contracts. Kernel services or hardware replaced by host mocks are not verified by those mocks.",
   "next_hardware_request": "Do not request another reboot solely because a new build or isolated fixture passes. Complete the source/interface review and consolidate known defects first.",
-  "completion_limit": "Windows/CI cannot prove target GPU execution. Keep the goal active until actual target execution/readback/clean exit evidence is available."
+  "completion_limit": "Windows/CI cannot prove target GPU execution. Keep the goal active until actual target execution/readback/clean exit evidence is available.",
+  "latest_host_verification": {
+    "date": "2026-10-22",
+    "source": "4964d5ea9fac0e99afc1aabd250af040632f40be",
+    "artifact_id": 12395963693,
+    "artifact_sha256": "84017734af3f751409193ed4cab7edc9367890915a6b726703be9b41ff12d0f0",
+    "digest_source": "GitHub official run HTML artifact digest",
+    "sleep_and_ioctl_native_fixtures": "passed",
+    "kernel_units": "1250 compiled, no failures",
+    "native_KC_preflight": "passed",
+    "hardware_executed": false,
+    "new_user_test_requested": false
+  }
 }
