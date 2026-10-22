@@ -1,0 +1,76 @@
+{
+  "delivery": "r16",
+  "date": "2026-10-22",
+  "classification": "manual-hardware-test candidate; no GPU executed during build, packaging or review",
+  "package": {
+    "name": "UHD770-MVP-manual-20261022-r16.zip",
+    "path": "D:\\UHD770-driver-kit\\UHD770-MVP-manual-20261022-r16.zip",
+    "bytes": 62890492,
+    "sha256": "4ee0488be045b3d7f097810146dfe25d48baa805f20c318056c0e55ef390a899",
+    "delivery_dir": "D:\\UHD770-driver-kit\\build-audit\\delivery-20261022-r16",
+    "usb_written": false
+  },
+  "change_since_previous_delivery": {
+    "kernel": "vmmap registration failure now returns -ENOMEM and each caller rolls back with the primitive that matches its registry (pmap_unmapdev for the device path, nmx_xnu_unmap for vmap); plus the new ring space/wrap fixture, which changes no runtime behaviour",
+    "userland": "none",
+    "metal": "none"
+  },
+  "components": {
+    "kernel": {
+      "source_commit": "b5bb28c96aeaef0016f59a3213240eb58d3cde99",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39752294845",
+      "artifact_id": 12416011998,
+      "artifact_sha256": "c514ca1539d8dce5701f7d02b15d4e261518626bee2e0196d52bf705349a145d",
+      "binary_in_package": "NMXGPU.kext/Contents/MacOS/NMXGPU",
+      "binary_sha256": "5d0b123e2dcb51c16d4c1bef966d045da02c92fd430459ebce40abd1392ce5c0",
+      "binary_bytes": 13548088,
+      "binary_equals_ci_artifact": true
+    },
+    "userland": {
+      "source_commit": "991e460dff9a71a6a1bba0427c3dd602267145a0",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39704724791",
+      "artifact_id": 12393719352,
+      "artifact_sha256": "38a9c74d9d5273c75820f97455397a9d5fb8221f49c0d3036c5311cbe0d7f993",
+      "binary_in_package": "probe/uhd770-compute-probe",
+      "binary_sha256": "31a13e5760df4d1f607607084d9d99c5788a59738c504dc11a8b11d7ce3f23de",
+      "binary_bytes": 45624,
+      "binary_equals_ci_artifact": true,
+      "rebuilt_for_this_delivery": false,
+      "reuse_basis": [
+        "the pins in sources.json and acceleration/sources.json are unchanged since 991e460",
+        "the nmx_drm_uapi.h hunks in xkpi.patch are byte identical to the ones at 991e460",
+        "acceleration/sources.json, acceleration/patches/**, probe/**, build_userland.sh and stage.py are unchanged since 991e460",
+        "the probe includes only the C/C++ standard library and vulkan.h, no kernel header",
+        "the drm-kmod.patch additions since then touch i915 GT/tasklet/pcode only and the freebsd.patch additions touch linuxkpi locks only; neither touches a UAPI header"
+      ]
+    },
+    "metal": {
+      "source_commit": "222351ae2ba33abadc8a5b32e2319a63db31ff3f",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39443141719",
+      "artifact_sha256": "76937c6637184216b3ef4703d43897d1c638cb041a2e29dc65d6d54b4619844f",
+      "note": "unchanged signed bundle carried over from the previous delivery; outside this stage's scope"
+    }
+  },
+  "verification_performed_here": [
+    "every component zip digest was compared with its GitHub API digest and the values were asserted by the packaging script",
+    "the assembler refused unless the kernel artifact carried 1250 unit logs, exact all/i915/runtime source counts, every required fixture marker and a passed KC preflight",
+    "the packaged SHA256SUMS was re-verified file by file: 0 mismatches",
+    "the kext binary in the package is byte identical to the CI artifact binary",
+    "the probe binary in the package is byte identical to the 991e460 artifact binary",
+    "the booting EFI config digest still matches 22a185d96105258fc24b0d0ca842206dc36fc885fbb8b7d0559e58bf1ae2f6f9, so no boot configuration was changed"
+  ],
+  "how_to_confirm_the_loaded_version": [
+    "before running: shasum -a 256 on the installed NMXGPU and on probe/uhd770-compute-probe, compared with the two binary_sha256 values above",
+    "after boot: the session tooling records the loaded kext identity and the probe prints its own stage log, which the report carries back",
+    "the two checks together distinguish a stale installed kext from the artifact recorded here"
+  ],
+  "does_not_prove": [
+    "any GPU execution, completion, cache visibility, physical interrupt or machine stability",
+    "that the reused 991e460 userland actually works with this kernel; the reuse is an interface argument, not a run",
+    "Metal, WindowServer or display acceleration, which are later stages"
+  ],
+  "acceptance_for_this_package": {
+    "success": "in one macOS session on the target: 8086:4680 with the recorded binaries, GPU executes the varying workloads, every output word compares, COMPUTE_READBACK_VERIFIED is printed before teardown, the process exits 0 and the system shows no panic, hang or GPU timeout",
+    "failure": "collect the session report folder; the last recorded stage names the failing edge, and another package is prepared only after that edge is traced in source"
+  }
+}
