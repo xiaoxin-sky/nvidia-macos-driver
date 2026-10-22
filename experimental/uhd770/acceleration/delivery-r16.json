@@ -132,5 +132,27 @@
     "finding": "the GPU and CPU formulas are identical term by term, including that the final xor uses the unrotated input, and the shift stays in 1..31 so no undefined shift can occur; the dispatch covers ceil(count/64) groups of 64 invocations and the probe bounds-checks i against count",
     "synchronization": "host->compute and compute->host pipeline barriers bracket the dispatch, and the readback invalidates non-coherent memory before comparing",
     "limits": "this shows the probe would detect a wrong result rather than agreeing with itself; it does not show the GPU ran"
+  },
+  "kext_loading_check": {
+    "method": "parsed the packaged kext Info.plist and Mach-O header, and read what the CI preflight actually runs",
+    "personality": {
+      "NMXGPUIntel": "IOProviderClass IOPCIDevice, IOPCIPrimaryMatch 0x00008086 & 0x0000ffff (any Intel vendor), IOPCIClassMatch 0x03000000 & 0xff000000 (display class), IOProbeScore 60000",
+      "finding": "the personality matches 8086:4680 as an Intel display-class PCI device, so attachment does not depend on a hard-coded device ID"
+    },
+    "binary": {
+      "arch": "x86_64, thin (no arm64 slice)",
+      "filetype": "MH_KEXT_BUNDLE (11)",
+      "code_signature_present": false,
+      "amfi_relaxed_by_boot_arg": "amfi=0x80 is present in both the safe and the test boot configurations",
+      "segments": "__TEXT 0xac2000 vmsize, __DATA 0x113000, __LINKEDIT 0x187000; LC_SYMTAB, LC_DYSYMTAB and LC_UUID present"
+    },
+    "preflight_strength": {
+      "what_it_does": "the CI preflight copies the candidate into a temporary repository, runs kmutil create against the runner's real BootKernelExtensions.kc with --allow-missing-kdk, requires the create to succeed, then kmutil inspect verifies com.nullmoth.NMXGPU is in the produced collection",
+      "artifact": "logs/kernel-collection-preflight.txt says the preflight passed",
+      "limits": [
+        "the runner is macOS 15.5 while the target is 15.7.9; KPI 8.0 libraries are stable but this is not the target build",
+        "the temporary collection is deliberately never installed, so the real collection for the test boot is built at prepare time on the target"
+      ]
+    }
   }
 }
