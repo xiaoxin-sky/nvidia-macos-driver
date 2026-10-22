@@ -394,8 +394,10 @@
     "actionable_gap_found": {
       "what": "the capture LaunchDaemon is written by prepare but is not in the journal that restore replays, so session.sh restore leaves it installed, and prepare refuses to run while it exists",
       "consequence": "the upgrade path needs the package's own Archive step, which the previous instructions on the USB omitted; a user following them would have been stopped at prepare",
-      "fix": "the USB instructions now require session.sh restore followed by Archive-UHD770-Failed.command --restored-session before Start, state the expected output of each, and give manage.sh remove-recorder as the remedy if prepare reports an earlier capture job",
-      "type": "instructions corrected; no package change"
+      "fix": "the USB steps now start by running Start-UHD770.command and only prescribe cleanup if it stops at the top, because those refusals happen before any system file is replaced: session.sh restore plus Archive-UHD770-Failed.command --restored-session when an old session is staged, manage.sh remove-recorder when an earlier capture job exists, and a USB check when the volume is not recognised. Each step states the output it must print.",
+      "type": "instructions corrected; no package change",
+      "second_revision": "the first revision assumed an older session was installed, so a machine with nothing staged would have hit a restore with nothing to restore. The steps are now state-independent.",
+      "in_zip_copy_is_stale": "the NEXT-STEPS.txt inside the zip carries the earlier wording of the same instructions, so both the USB copy and the USB root pointer say to follow UHD770-当前使用/r16-操作步骤.txt where the two differ. Rebuilding the package only to refresh a text file was judged not worth invalidating a verified artifact and its recorded hash."
     },
     "known_limits_recorded": [
       "rollback is skipped when the root job cannot be confirmed stopped, leaving the new install in place with state failed and the opt-out restored",
