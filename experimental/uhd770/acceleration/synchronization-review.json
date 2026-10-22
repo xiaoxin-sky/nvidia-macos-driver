@@ -122,5 +122,15 @@
     ],
     "host_evidence": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nActual native mutex/BH/critical/CSB contracts passed; native primitives/MMIO modeled; no GPU executed.\n",
     "limits": "Native lock/thread registry/timer/MMIO services are modeled; no real GPU or target panic reproduction. The native thread registry has its separate actual-source fixture."
+  },
+  "kernel_clock": {
+    "repair": "Pinned FreeBSD LinuxKPI local_clock now calls nanouptime -> actual nmx_time uptime_ns -> mach_absolute_time, preserving monotonic GPU polling deadlines across calendar changes",
+    "patch": "experimental/uhd770/patches/freebsd.patch",
+    "patch_sha256": "74bfab1205cd77248b0b136b44bbb74c5a01db26baf2f5ce7ff991d2df106984",
+    "baseline": "kernel-clock-old.cpp\nFAIL kernel clock: local_clock still reads calendar time\n",
+    "host_result": "kernel-clock-test.cpp\nPASS actual clock/uptime adapter with forward/backward calendar jumps\nGNU i915 wait expressions require native clang; not executed by Windows fixture.\nKernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.\n",
+    "native_status": "pending; native clang additionally executes actual i915 GNU wait macro, migration/success/timeout branches",
+    "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
+    "hardware_executed": false
   }
 }

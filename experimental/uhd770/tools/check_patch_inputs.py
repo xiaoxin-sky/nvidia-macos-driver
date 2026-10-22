@@ -1,6 +1,6 @@
 """Check this batch against clean pinned source trees without building a kext.
 
-Copies inputs into a disposable directory, applies both patches using Git's real
+Copies inputs into a disposable directory, applies all three patches using Git's real
 patch parser, checks shared C ABI declarations, and prepares the native iterator
 fixture. No driver is loaded and no original source checkout is modified.
 """
@@ -19,21 +19,27 @@ from enable_ccache import enable
 from prepare_bridge_fixture import prepare as prepare_bridge
 from prepare_irq_fixture import prepare as prepare_irq
 from prepare_native_display_fixture import prepare as prepare_native_display
+from prepare_kernel_clock_fixture import prepare as prepare_kernel_clock
 
 
-def check(port, drm, package):
-    """Apply the reviewed patch pair to disposable copies and check integration.
+def check(port, drm, package, freebsd):
+    """Apply the port/DRM/FreeBSD patches to disposable copies and check integration.
 
-    port/drm must be the clean revisions in sources.json. This validates source
-    integration and cross-module ABI consistency, not hardware or memory timing.
+    port/drm/freebsd must be clean revisions from sources.json; package owns the
+    three matching patches and fixture templates. FreeBSD is the sparse kernel
+    dependency tree, not the pristine shared cache to be modified in place.
+    This validates source integration/ABI and prepares the actual native clock
+    chain; compiling it and proving real hardware timing are separate checks.
     """
     with tempfile.TemporaryDirectory(prefix="uhd770-source-check-") as temporary:
         root = Path(temporary)
         x = root / "xkpi"
         d = root / "drm-kmod"
+        f = root / "freebsd-src"
         shutil.copytree(port, x)
         shutil.copytree(drm, d)
-        for tree, patch in [(x, "xkpi.patch"), (d, "drm-kmod.patch")]:
+        shutil.copytree(freebsd, f)
+        for tree, patch in [(x, "xkpi.patch"), (d, "drm-kmod.patch"), (f, "freebsd.patch")]:
             path = package / "patches" / patch
             subprocess.run(["git", "-C", str(tree), "apply", "--check", str(path)], check=True)
             subprocess.run(["git", "-C", str(tree), "apply", str(path)], check=True)
@@ -45,6 +51,7 @@ def check(port, drm, package):
         prepare_bridge(x / "override/src/nmx_fb_bridge.c", package / "tests/fb_bridge_fixture.c.in", root / "fb-bridge-test.c")
         prepare_irq(x / "bsdcompat/src/nmx_bus.c", package / "tests/irq_drain_fixture.c.in", root / "irq-drain-test.c")
         prepare_native_display(x / "xnu/nmx_fb.cpp", package / "tests/native_display_fixture.cpp.in", root / "native-display-test.cpp")
+        prepare_kernel_clock(x, f, d, package / "tests/kernel_clock_fixture.cpp.in", root / "kernel-clock-test.cpp")
         for folder, template, output in [
             ("kernel-tests", "mmap_fixture.c.in", "i915-mmap-test.c"),
             ("workqueue-tests", "taskqueue_fixture.cpp.in", "taskqueue-test.cpp"),
@@ -60,7 +67,7 @@ def check(port, drm, package):
         flags = (root / "amd.flags").read_text(encoding="utf-8")
         assert "CONFIG_DRM_DISPLAY_DP_TUNNEL" not in flags and "CONFIG_DRM_I915_DP_TUNNEL" not in flags
         result = {
-            "patch_application": "passed",
+            "patch_application": "passed for port, DRM and FreeBSD",
             "shared_headers": "passed",
             "python_syntax": "passed",
             "fixture_preparation": "passed; compilation/execution requires a C++ host compiler",
@@ -77,6 +84,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", required=True, type=Path)
     parser.add_argument("--drm", required=True, type=Path)
+    parser.add_argument("--freebsd", required=True, type=Path)
     parser.add_argument("--package", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
-    check(args.port, args.drm, args.package)
+    check(args.port, args.drm, args.package, args.freebsd)

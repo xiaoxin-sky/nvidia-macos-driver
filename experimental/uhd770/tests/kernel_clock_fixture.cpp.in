@@ -1,0 +1,81 @@
+/* Actual Linux local_clock -> native nanouptime/mach timer, and actual i915
+ * polling on the native clang compiler. Wall clock and uptime are modeled
+ * separately. No driver is loaded and no GPU is executed. */
+#include <atomic>
+#include <cassert>
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <ctime>
+#include <stdexcept>
+#ifdef _MSC_VER
+#pragma warning(disable: 4100 4505)
+#endif
+using u64=uint64_t;
+#ifdef __APPLE__
+#include <mach/clock_types.h>
+#else
+using clock_sec_t=uint64_t;
+using clock_nsec_t=uint32_t;
+#endif
+constexpr uint64_t NSEC_PER_SEC=1000000000ULL;
+static uint64_t uptime=0,step=0,calendar=0;
+static unsigned calendar_reads=0;
+static volatile time_t time_second;
+static uint64_t mach_absolute_time() { uint64_t value=uptime;uptime+=step;return value; }
+static void absolutetime_to_nanoseconds(uint64_t value,uint64_t *out) { *out=value; }
+static void clock_get_calendar_nanotime(clock_sec_t *s,clock_nsec_t *n)
+{
+    ++calendar_reads;*s=static_cast<clock_sec_t>(calendar/NSEC_PER_SEC);*n=static_cast<clock_nsec_t>(calendar%NSEC_PER_SEC);
+}
+static unsigned preempt_depth=0,cpu=0,relaxes=0;
+static void host_preempt_disable() { ++preempt_depth; }
+static void host_preempt_enable() { assert(preempt_depth);--preempt_depth; }
+#define preempt_disable() host_preempt_disable()
+#define preempt_enable() host_preempt_enable()
+#define _WAIT_FOR_ATOMIC_CHECK(v) do { if(v) assert(preempt_depth); } while(0)
+#define barrier() std::atomic_signal_fence(std::memory_order_seq_cst)
+#define unlikely(v) (v)
+static int smp_processor_id() { return static_cast<int>(cpu); }
+static void cpu_relax()
+{
+    ++relaxes;calendar=(relaxes%2)?0:9000000000000000000ULL;
+    if(!preempt_depth) cpu^=1;
+}
+/* ACTUAL_KERNEL_CLOCK_CHAIN */
+
+static void require(bool v,const char *why) { if(!v) throw std::runtime_error(why); }
+static void run_tests()
+{
+    uptime=4000000123ULL;calendar=9000000000000000000ULL;
+    require(local_clock()==4000000123ULL,"local_clock still reads calendar time");
+    calendar=0;uptime=4000000456ULL;
+    require(local_clock()==4000000456ULL,"calendar rollback changed local_clock");
+    require(calendar_reads==0,"deadline clock read calendar primitive");
+    struct timespec wall{};nanotime(&wall);require(calendar_reads==1 && wall.tv_sec==0,"calendar control primitive not exercised");
+    uptime=9999999999ULL;calendar=123;
+    require(local_clock()==9999999999ULL,"native uptime second/nanosecond conversion changed");
+    std::puts("PASS actual clock/uptime adapter with forward/backward calendar jumps");
+#ifndef _MSC_VER
+    step=1000;uptime=0;calendar_reads=0;unsigned checks=0;
+    int ret=_wait_for_atomic(++checks>=7,100,0);
+    require(ret==0 && checks==7 && preempt_depth==0,"actual i915 wait lost success or preemption balance");
+    require(relaxes && calendar_reads==0,"migration/calendar interleaving was not covered");
+    std::puts("PASS actual i915 wait success with migration and calendar jumps");
+    uptime=0;checks=0;
+    ret=_wait_for_atomic((++checks,false),20,0);
+    require(ret==-ETIMEDOUT && checks>1 && checks<100 && preempt_depth==0,"actual i915 wait timeout did not terminate/balance");
+    preempt_disable();uptime=0;checks=0;
+    ret=_wait_for_atomic(++checks>=3,20,1);
+    require(ret==0 && preempt_depth==1,"atomic i915 wait dropped caller critical ownership");preempt_enable();
+    std::puts("PASS actual i915 timeout and caller-owned atomic scope");
+#else
+    std::puts("GNU i915 wait expressions require native clang; not executed by Windows fixture.");
+#endif
+    std::puts("Kernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.");
+}
+int main()
+{
+    try { run_tests();return 0; }
+    catch(const std::exception &e) { std::printf("FAIL kernel clock: %s\n",e.what());return 1; }
+}

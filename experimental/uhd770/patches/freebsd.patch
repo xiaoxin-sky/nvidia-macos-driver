@@ -1,0 +1,13 @@
+--- a/sys/compat/linuxkpi/common/include/linux/sched.h
++++ b/sys/compat/linuxkpi/common/include/linux/sched.h
+@@ -206,7 +206,9 @@
+ {
+ 	struct timespec ts;
+ 
+-	nanotime(&ts);
++	/* i915 polling and busywait deadlines must survive calendar correction.
++	 * The Darwin nanouptime adapter uses mach_absolute_time on every CPU. */
++	nanouptime(&ts);
+ 	return ((uint64_t)ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec);
+ }
+ 

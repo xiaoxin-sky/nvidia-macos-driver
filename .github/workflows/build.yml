@@ -117,8 +117,10 @@ jobs:
           grep -c 'freebsd-src/sys' cc.sh cc-i915.sh cclk.sh ccsrc.sh || true
           git -C "$X" apply --check "$GITHUB_WORKSPACE/experimental/uhd770/patches/xkpi.patch"
           git -C "$S/kpi/drm-kmod" apply --check "$GITHUB_WORKSPACE/experimental/uhd770/patches/drm-kmod.patch"
+          git -C "$S/kpi/freebsd-src" apply --check "$GITHUB_WORKSPACE/experimental/uhd770/patches/freebsd.patch"
           git -C "$X" apply "$GITHUB_WORKSPACE/experimental/uhd770/patches/xkpi.patch"
           git -C "$S/kpi/drm-kmod" apply "$GITHUB_WORKSPACE/experimental/uhd770/patches/drm-kmod.patch"
+          git -C "$S/kpi/freebsd-src" apply "$GITHUB_WORKSPACE/experimental/uhd770/patches/freebsd.patch"
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/enable_ccache.py" "$X"
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_drm_node_fixture.py" \
             "$X" /tmp/nmx-drm-node-test.c
@@ -196,6 +198,15 @@ jobs:
             2>&1 | tee /tmp/nmx-native-lock-tsan-compile.log
           python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-native-lock-tsan"], timeout=60, check=True)' \
             2>&1 | tee /tmp/nmx-native-lock-tsan.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_kernel_clock_fixture.py" \
+            --port "$X" --freebsd "$S/kpi/freebsd-src" --drm "$S/kpi/drm-kmod" \
+            --template "$GITHUB_WORKSPACE/experimental/uhd770/tests/kernel_clock_fixture.cpp.in" \
+            --output /tmp/nmx-kernel-clock-test.cpp
+          c++ -std=c++17 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Wno-sign-compare \
+            /tmp/nmx-kernel-clock-test.cpp -o /tmp/nmx-kernel-clock-test \
+            2>&1 | tee /tmp/nmx-kernel-clock-compile.log
+          python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-kernel-clock-test"], timeout=60, check=True)' \
+            2>&1 | tee /tmp/nmx-kernel-clock-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_fb_start_fixture.py" \
             "$X/xnu/nmx_fb.cpp" "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_start_fixture.cpp.in" \
             /tmp/nmx-fb-start-test.cpp
@@ -397,6 +408,8 @@ jobs:
           cp /tmp/nmx-thread-compile.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-tasklet-test.cpp /tmp/nmx-tasklet*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-native-lock-test.cpp /tmp/nmx-native-lock*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-kernel-clock-test.cpp /tmp/nmx-kernel-clock*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp "$GITHUB_WORKSPACE/experimental/uhd770/patches/freebsd.patch" "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-fb-start-test.cpp /tmp/nmx-fb-start-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-runtime-pm-test.c /tmp/nmx-runtime-pm-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/amd.flags" "$GITHUB_WORKSPACE/out/logs/amd.flags" 2>/dev/null || true

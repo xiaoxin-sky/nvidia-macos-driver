@@ -88,6 +88,17 @@
         "host_cases_passed": 7,
         "validation": "Actual native locking/BH/critical bodies plus actual CSB function and uncore read macros; real host mutex contention and parallel writers; native services, registry and MMIO modeled",
         "native_status": "pending",
+        "hardware_executed": false,
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39721909038"
+      },
+      "kernel_clock_repair": {
+        "repair": "Pinned FreeBSD LinuxKPI local_clock now calls nanouptime -> actual nmx_time uptime_ns -> mach_absolute_time, preserving monotonic GPU polling deadlines across calendar changes",
+        "patch": "experimental/uhd770/patches/freebsd.patch",
+        "patch_sha256": "74bfab1205cd77248b0b136b44bbb74c5a01db26baf2f5ce7ff991d2df106984",
+        "baseline": "kernel-clock-old.cpp\nFAIL kernel clock: local_clock still reads calendar time\n",
+        "host_result": "kernel-clock-test.cpp\nPASS actual clock/uptime adapter with forward/backward calendar jumps\nGNU i915 wait expressions require native clang; not executed by Windows fixture.\nKernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.\n",
+        "native_status": "pending; native clang additionally executes actual i915 GNU wait macro, migration/success/timeout branches",
+        "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
         "hardware_executed": false
       }
     },
@@ -170,6 +181,16 @@
     },
     "current_native_ci_status": "not yet verified",
     "new_user_test_requested": false,
-    "usb_package_changed": false
+    "usb_package_changed": false,
+    "kernel_clock": {
+      "repair": "Pinned FreeBSD LinuxKPI local_clock now calls nanouptime -> actual nmx_time uptime_ns -> mach_absolute_time, preserving monotonic GPU polling deadlines across calendar changes",
+      "patch": "experimental/uhd770/patches/freebsd.patch",
+      "patch_sha256": "74bfab1205cd77248b0b136b44bbb74c5a01db26baf2f5ce7ff991d2df106984",
+      "baseline": "kernel-clock-old.cpp\nFAIL kernel clock: local_clock still reads calendar time\n",
+      "host_result": "kernel-clock-test.cpp\nPASS actual clock/uptime adapter with forward/backward calendar jumps\nGNU i915 wait expressions require native clang; not executed by Windows fixture.\nKernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.\n",
+      "native_status": "pending; native clang additionally executes actual i915 GNU wait macro, migration/success/timeout branches",
+      "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
+      "hardware_executed": false
+    }
   }
 }
