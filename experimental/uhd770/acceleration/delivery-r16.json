@@ -286,6 +286,20 @@
         "why_the_missing_log_line_is_not_evidence": "the failing boot's captured kernel stream in the r14 report is one of the 293-byte ones that carry only the filter header, so the absence of the port's failure line there says nothing either way",
         "discriminator_for_the_next_run": "grep the new report's kernel streams for 'NullMoth devfs: open id=': present with error=19 means the driver's open refused and the render minor was not registered; absent, in a report that did capture streams, means open(2) was refused before the port's callback and the XNU devfs layer is the place to look. A root open of /dev/dri/card0 separates 'no minor registered at all' from 'render minor missing'.",
         "hardware_executed": false
+      },
+      "strongest_current_hypothesis": {
+        "evidence": "across the whole r14 report - 33 kernel-stream captures and 268 dmesg snapshots - there is not one 'NullMoth devfs: open' line, and the dmesg snapshots demonstrably do carry the port's printf output",
+        "inference": "the ENODEV therefore did not travel through the port's device-open path, which prints twice on every error; the refusal came from below it, in the XNU devfs layer, or the path being opened was not the node the port created",
+        "what_it_rules_out": [
+          "drm_minor_acquire finding no registered render minor, which would have printed",
+          "the linux_dev_fdopen guard, which would also have printed"
+        ],
+        "caveats": [
+          "dmesg is a ring buffer, so a very early line could have rolled off before the first snapshot",
+          "the probe's own discovery line proves open(2) failed with errno 19, not that the port was bypassed; both facts together are what narrow it"
+        ],
+        "next_step_if_reproduced": "one print at the top of nmx_open recording the minor would settle whether XNU reaches the port's callback at all. That needs a kext rebuild and a new package, so it is held until the next run shows the same signature",
+        "hardware_executed": false
       }
     },
     "artifacts_to_bring_back": {
@@ -310,6 +324,11 @@
       "failure_report": "r14 with its panic file: reproduces the panic verdict, lists the sessions and the discovery lines, and reports that no port-side open failure line exists across 33 captured streams",
       "success_report": "a synthetic report with a COMPUTE_READBACK_VERIFIED probe log and coordinator_exit=0: verdict reports the marker instead of a failure",
       "reason": "the tool is what decides the next step from a returned report, so both outcomes were exercised rather than only the one that happened to be available"
+    },
+    "dmesg_is_a_second_record_of_the_kernel_log": {
+      "finding": "the collector writes two independent records of the kernel log: the log-stream captures and periodic dmesg snapshots that are 128 KB each. The r14 report holds 33 stream files and 268 dmesg snapshots, and the dmesg ones are full of the port's own NullMoth trace and dbg lines, so kernel printf is captured there even when a stream file is only its header",
+      "tool_change": "the analyzer now scans both, and reports how many of each it read",
+      "why_it_mattered": "before this, the analyzer only read kernel-stream.txt. In r14 that file was empty for the failing boot, which is why the absence of the port's open-failure line looked like no evidence at all"
     }
   },
   "boot_flag_delivery_check": {
