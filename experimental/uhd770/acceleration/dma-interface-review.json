@@ -71,5 +71,45 @@
       "hardware_executed": false
     }
   },
-  "source_trace_update": "i915 page-table backing alloc_pt_dma -> i915_gem_object_create_internal -> i915_gem_object_get_pages_internal -> i915_gem_gtt_prepare_pages uses the same S/G DMA path, rather than necessarily the separate scalar pctrie mapping path. Root allocation/map_pt_dma and actual GPU page-table visibility remain review requirements."
+  "source_trace_update": "i915 page-table backing alloc_pt_dma -> i915_gem_object_create_internal -> i915_gem_object_get_pages_internal -> i915_gem_gtt_prepare_pages uses the same S/G DMA path, rather than necessarily the separate scalar pctrie mapping path. Root allocation/map_pt_dma and actual GPU page-table visibility remain review requirements.",
+  "page_map_registration": {
+    "status": "native macOS/ASan/kernel/KC passed on 358e6c1; device visibility unverified",
+    "defect": "override/src/linux_page.c:vmmap_add wrote vm_size/vm_addr/vm_handle through kmalloc(sizeof(*vmmap), GFP_KERNEL) without checking it, and returned void, so a refused registration both dereferenced NULL and left the caller unable to unwind the device or IOKit mapping it had already created.",
+    "repair": "vmmap_add returns -ENOMEM; _ioremap_attr rolls back with pmap_unmapdev(addr, size) and vmap/linuxkpi_vmap_pfn with nmx_xnu_unmap(handle). The generated override/src/linux_page.c and the fork script that regenerates it both carry the change, and it reaches the build only through patches/xkpi.patch.",
+    "executed": "actual vmmap_add/vmmap_remove, is_vmalloc_addr, _ioremap_attr, iounmap, vmap, linuxkpi_vmap_pfn and vunmap, joined to the actual pmap_mapdev_attr/pmap_unmapdev device registry",
+    "cases": 11,
+    "covered": [
+      "device mapping registered by address; iounmap releases the device record and the IOKit handle exactly once",
+      "vmap and linuxkpi_vmap_pfn register the IOKit handle; vunmap releases it exactly once",
+      "refused vmmap registration returns NULL and gives back exactly what was created (pmap_unmapdev for the device path, nmx_xnu_unmap for the vmap paths)",
+      "a refused staging array maps nothing, releases nothing and leaves nothing allocated",
+      "a refused native mapping leaves no device record, no vmmap record and nothing to release",
+      "the registry stays usable after a refusal",
+      "iounmap/vunmap of an unknown address release nothing"
+    ],
+    "negative_controls": [
+      {
+        "mutation": "unfixed pinned source, guard bypassed",
+        "result": "the fixture prints only the success case and then aborts with 0xC0000005 (NULL write in vmmap_add)",
+        "detected": "the allocation-failure case cannot pass without the fix"
+      },
+      {
+        "mutation": "fix removed from the pinned source",
+        "result": "prepare_page_map_fixture.py refuses to prepare",
+        "detected": "vmmap_add lost 'if (vmmap == NULL)'"
+      }
+    ],
+    "host_log": "PASS device mapping registers by address and iounmap releases it once\nPASS refused device-map registration unmaps through pmap_unmapdev\nPASS vmap registers the IOKit mapping and vunmap releases it once\nPASS refused vmap registration unmaps through nmx_xnu_unmap\nPASS pfn vmap registers and vunmap releases it once\nPASS refused pfn vmap registration unmaps through nmx_xnu_unmap\nPASS a failed staging array maps and releases nothing\nPASS a failed native vmap mapping leaves nothing to release\nPASS a failed native device map leaves no device record\nPASS a refused registration leaves the registry usable\nPASS unknown addresses do not trigger a native release\nActual vmmap registration, rollback and native release accounting passed; IOKit mapping primitives, allocator failures and mutexes are modelled; no GPU or real IOMemoryMap was created.\n",
+    "limits": "kmalloc and the FreeBSD typed allocator, the mutexes, the list primitives and the IOKit primitives (IOMemoryDescriptor/IOMemoryMap) are host models. No kernel extension is loaded and no IOMMU mapping, GPU page table, cache visibility or TLB effect is exercised; those remain target-machine evidence.",
+    "hardware_executed": false,
+    "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39746307678",
+    "native_evidence": {
+      "source": "358e6c1c4a1fb903668837165d11d2ff45e7f3b5",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39746307678",
+      "artifact_id": 12411804139,
+      "sha256": "8912c0c9ee2be922875d878afd1fccbcfe41ecd7e0c481dbd3db8353bcb6c6e3",
+      "result": "All 11 actual registration/rollback cases passed on macOS normally and under AddressSanitizer/UndefinedBehaviorSanitizer; the kernel extension build and native KC preflight passed in the same run",
+      "hardware_executed": false
+    }
+  }
 }
