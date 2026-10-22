@@ -241,8 +241,8 @@
     {
       "id": "submission",
       "route": "ANV batch construction -> EXECBUFFER2 -> i915 request/engine scheduling -> real device",
-      "status": "MMIO MAPPING, ACCESS-WIDTH, BARRIER AND EXECLISTS SUBMIT-REGISTER EDGES VERIFIED IN SOURCE; ring space, GGTT/HWSP addressing and GPU consumption still unverified",
-      "remaining": "Still open from the edge list: intel_ring_begin space/wrap for the RCS0 batch; agreement between the GGTT vma offset and the HWSP offset the completion path reads (T3); forcewake ACK settling on the target; whether the GPU consumes the ELSQ entry at all. Actual execution still requires UHD770.",
+      "status": "MMIO MAPPING, ACCESS-WIDTH, BARRIER, EXECLISTS SUBMIT-REGISTER AND RING SPACE/WRAP ARE COVERED (SOURCE AND NATIVE HOST FIXTURE); GPU consumption unverified",
+      "remaining": "Still open: the real wait for ring space (blocking on a request fence), GGTT/HWSP address agreement on the hardware side, forcewake ACK settling and whether the GPU consumes the ELSQ entry. Actual execution still requires UHD770.",
       "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json",
       "WW_reservation_progress": {
         "status": "25 joined host cases and native macOS/TSan/ASan/kernel/KC passed; actual GPU execution not proved",
@@ -282,7 +282,20 @@
         "execbuf-fence-array (VkFence path is I915_EXEC_FENCE_ARRAY, not the timeline extension)",
         "request-creation-order (in fences attach to the first submitted batch order)"
       ],
-      "submission_edge_review": "experimental/uhd770/acceleration/submission-interface-review.json"
+      "submission_edge_review": "experimental/uhd770/acceleration/submission-interface-review.json",
+      "ring_space_and_wrap": {
+        "status": "native macOS/ASan passed on b5bb28c; GPU consumption of the ring unverified",
+        "detail": "experimental/uhd770/acceleration/submission-interface-review.json ring_space_and_wrap",
+        "cases": 8,
+        "native_evidence": {
+          "source": "b5bb28c96aeaef0016f59a3213240eb58d3cde99",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39752294845",
+          "artifact_id": 12416011998,
+          "sha256": "c514ca1539d8dce5701f7d02b15d4e261518626bee2e0196d52bf705349a145d",
+          "result": "All 8 actual ring space/wrap cases passed on macOS normally and under AddressSanitizer/UndefinedBehaviorSanitizer in the same run that built the kernel extension and passed the native KC preflight",
+          "hardware_executed": false
+        }
+      }
     },
     {
       "id": "completion",

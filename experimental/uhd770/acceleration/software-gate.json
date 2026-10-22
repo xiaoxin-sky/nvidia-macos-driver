@@ -1,0 +1,139 @@
+{
+  "gate": "T8 software delivery",
+  "date": "2026-10-22",
+  "source": "b5bb28c96aeaef0016f59a3213240eb58d3cde99",
+  "pins": {
+    "port": "7222618727449426631d13d0654f8347634717e9",
+    "drm_kmod": "c16de0f9fa84f70b9551f69fde837a7f3a73c0e9",
+    "freebsd": "7668705cb9837d4c3a6db9b3434b3a522220c8ea"
+  },
+  "what_this_delivery_changed": "kernel-side vmmap registration fix (7c1f0f9, 358e6c1) plus the ring space/wrap fixture (b5bb28c); later commits to 455dbe1 and beyond are review records only and rebuild nothing",
+  "ci_success_conditions_unchanged": {
+    "claim": "no workflow gate was relaxed to make a red build green; the only workflow change adds two fixture steps",
+    "evidence": "the delivery commits touch experimental/uhd770/tests, experimental/uhd770/tools and .github/workflows/build.yml; no step was removed or made non-failing"
+  },
+  "patch_application": {
+    "command": "experimental/uhd770/tools/check_patch_inputs.py against the clean pinned port, drm-kmod and freebsd trees",
+    "result": "git apply --check and a real apply both succeed for xkpi.patch, drm-kmod.patch and freebsd.patch",
+    "expanded_source_matches_patch": "verified byte for byte for override/src/linux_page.c and fork_linux_page.py after applying xkpi.patch to an LF mirror of the pinned port tree",
+    "reviewed_tree_matches_build": {
+      "port": {
+        "applied": true,
+        "identical": 60,
+        "different": 0,
+        "missing": 0
+      },
+      "drm": {
+        "applied": true,
+        "identical": 13,
+        "different": 0,
+        "missing": 0
+      },
+      "freebsd": {
+        "applied": true,
+        "identical": 6,
+        "different": 0,
+        "missing": 0
+      }
+    },
+    "reviewed_tree_note": "every file each patch touches was compared byte for byte between the patch-applied tree and the reviewed tree, on LF mirrors so the Windows CRLF checkout does not create phantom differences"
+  },
+  "fixtures": [
+    {
+      "name": "ring space/wrap",
+      "cases": 8,
+      "logs": [
+        "nmx-ring-test.log",
+        "nmx-ring-asan.log"
+      ],
+      "models": "request wait modelled (the real one sleeps on a GPU fence); struct layout modelled from intel_ring_types.h; no GPU/GGTT/request object touched"
+    },
+    {
+      "name": "vmmap registration/rollback",
+      "cases": 11,
+      "logs": [
+        "nmx-page-map-test.log",
+        "nmx-page-map-asan.log"
+      ],
+      "models": "kmalloc and the FreeBSD typed allocator, mutexes, list primitives and IOKit IOMemoryDescriptor/IOMemoryMap are host models; no IOMMU or GPU page table is touched"
+    },
+    {
+      "name": "joined completion chain",
+      "cases": 11,
+      "logs": [
+        "nmx-completion-test.log",
+        "nmx-completion-tsan.log",
+        "nmx-completion-asan.log"
+      ],
+      "models": "HWSP writes and the interrupt identity are injected inputs; IOKit IRQ, queue and native sleepqueue are modelled; no physical IRQ or GPU execution"
+    }
+  ],
+  "logs_checked": [
+    {
+      "log": "nmx-ring-test.log",
+      "cases": 8,
+      "summary_present": true
+    },
+    {
+      "log": "nmx-ring-asan.log",
+      "cases": 8,
+      "summary_present": true
+    },
+    {
+      "log": "nmx-page-map-test.log",
+      "cases": 11,
+      "summary_present": true
+    },
+    {
+      "log": "nmx-page-map-asan.log",
+      "cases": 11,
+      "summary_present": true
+    },
+    {
+      "log": "nmx-completion-test.log",
+      "cases": 11,
+      "summary_present": true
+    },
+    {
+      "log": "nmx-completion-tsan.log",
+      "cases": 11,
+      "summary_present": true
+    },
+    {
+      "log": "nmx-completion-asan.log",
+      "cases": 11,
+      "summary_present": true
+    }
+  ],
+  "kernel": {
+    "build": "the kernel extension linked and the artifact carries NMXGPU.kext/Contents/MacOS/NMXGPU (13548088 bytes) with its Info.plist, from the same run that executed the fixtures",
+    "collection_preflight": "Native KC symbol/dependency preflight passed; nothing installed or loaded.",
+    "link_warnings": {
+      "count": 4,
+      "all_are_sdk_version_mismatch": true,
+      "unexplained": []
+    },
+    "compiler_cache": "1251/1251 cacheable calls were cache hits with 0 misses; the kernel sources are unchanged since run 39746307678, so the cache is expected to serve them, and the ccache invalidation probe passed (hit, header change, flag change, source change)",
+    "kernel_sources_changed_since": "39746307678 (358e6c1) - the earlier run compiled the vmmap fix with misses"
+  },
+  "native_evidence": {
+    "source": "b5bb28c96aeaef0016f59a3213240eb58d3cde99",
+    "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39752294845",
+    "artifact_id": 12416011998,
+    "sha256": "c514ca1539d8dce5701f7d02b15d4e261518626bee2e0196d52bf705349a145d",
+    "hardware_executed": false
+  },
+  "hardware_only_questions": [
+    "does the GPU consume the ELSQ entry and execute the batch at all",
+    "does it write the HWSP seqno and the output buffer, and does the CPU observe them",
+    "does the physical MSI interrupt arrive and acknowledge within the driver's wait windows",
+    "does the TLB invalidation complete inside 100us/4ms, and does the GPU page-walk reach the driver's parent entries",
+    "does close complete without panic, GPU reset or timeout, and does the probe exit 0"
+  ],
+  "not_proved_by_this_gate": [
+    "any GPU execution, cache visibility, physical interrupt or machine stability on the target",
+    "that a userland package built for an earlier commit is ABI compatible is recorded separately; no component was rebuilt here because none changed"
+  ],
+  "hardware_executed": false,
+  "new_hardware_test_requested": false
+}

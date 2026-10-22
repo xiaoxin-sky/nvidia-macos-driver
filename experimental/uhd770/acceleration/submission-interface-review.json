@@ -97,12 +97,6 @@
       "proves": "target run with a bounded forcewake wait and CSB progress"
     },
     {
-      "id": "ring-space-and-wrap",
-      "edge": "intel_ring_begin/ring space accounting for the RCS0 batch, including wrap",
-      "why": "Not read to the end for this pinned i915 revision; the ring is a GEM internal object whose pages come through the same allocator reviewed for T2, but the wrap and tail arithmetic has not been traced against the port's page ordering.",
-      "proves": "source trace plus a host fixture over intel_ring_begin/advance/wrap"
-    },
-    {
       "id": "ggtt-hwsp-address",
       "edge": "HWSP and context GGTT offsets the descriptor names, versus the addresses the completion path reads",
       "why": "The seqno half is now traced and recorded in dma-interface-review.json ggtt_hwsp_contract: hwsp_offset(rq) is a global GTT address and names the same in-page slot the CPU polls through a write-back mapping. What remains is the page-table side: that the GGTT PTE for that offset really points at the status page's DMA address, and the parent PDE/root programming beneath it.",
@@ -121,5 +115,45 @@
     "mapping_registration": "experimental/uhd770/acceleration/dma-interface-review.json page_map_registration"
   },
   "hardware_executed": false,
-  "new_hardware_test_requested": false
+  "new_hardware_test_requested": false,
+  "ring_space_and_wrap": {
+    "status": "native macOS/ASan passed on b5bb28c; GPU consumption of the ring unverified",
+    "executed": "actual intel_ring_begin, intel_ring_update_space, __intel_ring_space, intel_ring_wrap, intel_ring_direction, intel_ring_offset_valid, intel_ring_offset, intel_ring_advance, intel_ring_set_tail and assert_ring_tail_valid",
+    "cases": 8,
+    "covered": [
+      "62 packets of 64 bytes fill the ring without waiting, because the request reservation keeps the last 32 bytes unusable",
+      "the packet after that waits for 96 bytes (64 + 32 reserved) but does not wrap early",
+      "a tail that reaches exactly the end of the buffer wraps only on the following packet",
+      "a packet larger than the remaining usable space makes intel_ring_begin no-op fill the gap before restarting at zero; the fill is asserted byte by byte in the backing store",
+      "wrap and offset-validity predicates hold at the boundary, including rejecting a non-qword-aligned offset and an offset equal to size",
+      "intel_ring_direction keeps its sign forwards and backwards across the wrap point",
+      "space is recomputed from head and emit rather than tracked incrementally",
+      "tail assignment keeps the value the hardware will be given"
+    ],
+    "modelled": "the struct layout (copied from intel_ring_types.h without the kref/vma/pin fields these functions never touch), the request wait (the real wait_for_space sleeps on a GPU fence; here the GPU is simulated as retiring what was already emitted) and i915_request_timeline",
+    "negative_controls": [
+      {
+        "mutation": "ring->space -= need_wrap changed to +=",
+        "result": "the wrapped-space assertion fails",
+        "detected": "space accounting after the no-op fill"
+      },
+      {
+        "mutation": "CACHELINE_BYTES dropped from __intel_ring_space",
+        "result": "the initial-space assertion fails",
+        "detected": "the cacheline margin that keeps ring->head and ring->tail out of one line"
+      }
+    ],
+    "host_log": "PASS steady emission places packets and meters space exactly\nPASS reserved space forces a wait without wrapping early\nPASS a tail that reaches the end wraps on the following packet\nPASS a packet larger than the remainder no-ops the gap and restarts\nPASS wrap and offset-validity predicates hold at the boundary\nPASS ring direction keeps its sign across the wrap point\nPASS space is recomputed from head and emit, not tracked blindly\nPASS tail assignment keeps the value the hardware will read\nActual i915 ring space/wrap arithmetic passed; the request wait and timeline accessor are modelled; no GPU, GGTT or request object was touched.\n",
+    "limits": "No GPU, GGTT or request object is touched. The wait for space is modelled rather than executed, so ring-full stalls, fence timeouts and any hardware effect remain target evidence.",
+    "hardware_executed": false,
+    "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39752294845",
+    "native_evidence": {
+      "source": "b5bb28c96aeaef0016f59a3213240eb58d3cde99",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39752294845",
+      "artifact_id": 12416011998,
+      "sha256": "c514ca1539d8dce5701f7d02b15d4e261518626bee2e0196d52bf705349a145d",
+      "result": "All 8 actual ring space/wrap cases passed on macOS normally and under AddressSanitizer/UndefinedBehaviorSanitizer in the same run that built the kernel extension and passed the native KC preflight",
+      "hardware_executed": false
+    }
+  }
 }
