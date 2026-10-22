@@ -67,8 +67,10 @@
         ],
         "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nActual Linux/BSD/native DMA contracts passed; IOKit/allocator/flat S/G primitives modeled; no GPU executed.\n",
         "limits": "IOKit descriptor/command, allocator, mutex and flat S/G storage are primitives; no real device/IOMMU DMA, GEM page residency, S/G chaining, scalar pctrie mapping or GPU PTE/cache behavior executed.",
-        "hardware_executed": false
-      }
+        "hardware_executed": false,
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39726229681"
+      },
+      "native_shared_lock_review": "experimental/uhd770/acceleration/native-rw-owner-review.json"
     },
     {
       "id": "submission",
@@ -232,7 +234,7 @@
         "staged_match": "all patched source text identical after CRLF/LF normalization"
       }
     },
-    "current_native_ci_status": "DMA fixture is host-passed and awaiting native dispatch/verification; driver implementation through 2669b18 passed native build",
+    "current_native_ci_status": "DMA fixture source f3bc9b6 run 39726229681 live at verified observation; no real GPU execution yet",
     "new_user_test_requested": false,
     "usb_package_changed": false,
     "kernel_clock": {
@@ -283,7 +285,8 @@
       ],
       "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nActual Linux/BSD/native DMA contracts passed; IOKit/allocator/flat S/G primitives modeled; no GPU executed.\n",
       "limits": "IOKit descriptor/command, allocator, mutex and flat S/G storage are primitives; no real device/IOMMU DMA, GEM page residency, S/G chaining, scalar pctrie mapping or GPU PTE/cache behavior executed.",
-      "hardware_executed": false
+      "hardware_executed": false,
+      "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39726229681"
     }
   }
 }

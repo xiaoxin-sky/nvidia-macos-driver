@@ -1,0 +1,17 @@
+{
+  "date": "2026-10-22",
+  "status": "source finding awaiting joined native shared/exclusive-lock review; not an observed target failure",
+  "scope": "Linux mutex/rwsem and BSD sx/rw owner metadata over native lck_rw; used by GEM/VM/context paths",
+  "findings": [
+    "nmx_lock.c SX/RW owner probes and publication use volatile sx_lock/rw_owner, unlike the repaired explicit atomic mtx_owner path",
+    "sys/sx.h sx_xholder and pinned Linux mutex_is_locked read the same owner word directly; repairing only nmx_lock.c would leave these upper accessors inconsistent",
+    "Read/write counters are already atomic in most native methods, but downgrade, recursion, shared/exclusive unlock and native wait/reacquire semantics need joint coverage"
+  ],
+  "required_next": [
+    "Extract actual native SX/RW methods plus actual Linux mutex/rwsem accessors",
+    "Check reader/writer contention, exclusive identity, recursion, try/failed upgrade, atomic downgrade and wait-release/reacquire paths",
+    "Use native concurrency diagnostics before claiming this interface reviewed; preserve native lock exclusion and avoid dropping synchronization"
+  ],
+  "hardware_executed": false,
+  "new_hardware_test_requested": false
+}
