@@ -92,5 +92,37 @@
     "reference_optout_config_contains_nvoff": true,
     "finding": "the machine currently boots with -nvoff, so the driver is disabled by the live boot configuration; the package's config.safe.plist is byte identical to that live config, config.test.plist drops -nvoff to enable the driver, and reference-efi/config.optout-reference.plist keeps a no-GPU reference for recovery. The delivery itself modified no boot file.",
     "limits": "this verifies the files, not that OpenCore selects them on the next boot; only the target boot can show which configuration was actually applied"
+  },
+  "test_harness_verification": {
+    "method": "static review of the packaged scripts and of the safe/test boot configurations; nothing was executed",
+    "boot_flag_contract": {
+      "safe_config": "-v debug=0x100 keepsyms=1 -igfxvesa alcid=11 amfi=0x80 ipc_control_port_options=0 -nvoff",
+      "test_config": "-v debug=0x100 keepsyms=1 -igfxvesa alcid=11 amfi=0x80 ipc_control_port_options=0 nmxintel=1 nmxdiagdelay=180",
+      "difference": "exactly one line of boot-args",
+      "safe_hash_matches_live_usb_efi": true,
+      "test_hash_matches_package_test_config": true,
+      "finding": "the prepare step installs the test config, whose only change against the live safe config is that -nvoff becomes nmxintel=1 plus the diagnostic delay"
+    },
+    "refusals_before_any_gpu_work": [
+      "Run-UHD770-Test.command refuses without root, without /bin/bash -p, on a non-Darwin host, or before PREPARED (missing installed coordinator)",
+      "session.sh test refuses when the current boot is not the preparation boot that was armed",
+      "session.sh test refuses on an opt-out boot by matching -nvoff in kern.bootargs, and records next_boot_optout=verified only after restore_optout succeeds",
+      "session-user.sh manual refuses without nmxintel=1, without an armed state, without a root-owned per-boot authorization naming this uid, and when the recovery marker says NOT_VERIFIED",
+      "session-user.sh manual refuses a second manual session in the same boot, so an incomplete run cannot be repeated by accident"
+    ],
+    "pre_compute_gates": {
+      "recovery": "restore_optout writes the safe config to config.plist.uhd770-pending, re-hashes it, atomically renames it into place, re-hashes and syncs; a config changed independently is preserved and the step fails",
+      "recorder": "Root restarts the persistent capture job and waits for it to confirm startup before the compute phase",
+      "driver": "session-user.sh waits up to 330 seconds for next_boot_optout=verified and for IORegistry to show NMXGPU in a ready state, with distinct exits for deadline (124), unverified recovery (65), failed initialization (66), registry failure (67) and gate timeout (68)"
+    },
+    "log_capture": [
+      "Start-UHD770.command captures from its first command, including failures before the plan exists, and records the exact ancestor permissions that broke earlier attempts without changing them",
+      "it copies the preparation log to a USB volume only when exactly one mounted volume carries this package's exact safe or test EFI bytes; otherwise it keeps the system-disk report and says so",
+      "session-user.sh takes a per-boot directory as an atomic lock and writes coordinator_exit into the session record"
+    ],
+    "limits": [
+      "this is a reading of the scripts, not a run; only the target boot shows which configuration OpenCore applied",
+      "if the machine panicked before the boot-time restore, the USB could still hold the test config; reference-efi/config.optout-reference.plist and Restore-UHD770.ps1 are the Windows-side recovery"
+    ]
   }
 }
