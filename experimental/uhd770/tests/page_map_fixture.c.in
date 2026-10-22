@@ -13,6 +13,7 @@
  * registration/rollback accounting, not that a real mapping reaches the device.
  */
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -111,8 +112,11 @@ static void *kmalloc(size_t size, gfp_t flags)
     return p;
 }
 
-/* IOKit stand-ins: tokens only, so a leaked mapping is a nonzero counter. */
+/* IOKit stand-ins: tokens only, so a leaked mapping is a nonzero counter.
+ * fail_native_map makes each primitive fail as the real one does: no handle is
+ * stored and the caller gets NULL. */
 static int map_phys_calls, map_pages_calls, unmap_calls;
+static int fail_native_map;
 static uint64_t expect_phys_pa, expect_phys_size;
 static size_t expect_pages_count;
 static int unexpected_native_calls;
@@ -121,6 +125,9 @@ static void *nmx_xnu_map_phys(uint64_t pa, size_t size, int cache, void **handle
 {
     (void)cache;
     map_phys_calls++;
+    *handle = NULL;
+    if (fail_native_map)
+        return NULL;
     if (pa != expect_phys_pa || size != expect_phys_size) {
         unexpected_native_calls++;
         return NULL;
@@ -133,6 +140,9 @@ static void *nmx_xnu_map_pages(const uint64_t *pages, size_t npages, int cache, 
 {
     (void)cache;
     map_pages_calls++;
+    *handle = NULL;
+    if (fail_native_map)
+        return NULL;
     if (pages == NULL || npages != expect_pages_count) {
         unexpected_native_calls++;
         return NULL;
@@ -181,6 +191,7 @@ static void reset_counters(void)
     assert(live_typed == 0);
     kmalloc_budget = -1;
     kmalloc_calls = 0;
+    fail_native_map = 0;
     map_phys_calls = map_pages_calls = unmap_calls = 0;
     unexpected_native_calls = 0;
     expect_phys_pa = expect_phys_size = 0;
@@ -320,6 +331,64 @@ static void test_vmap_pfn_registration_failure(void)
     pass("refused pfn vmap registration unmaps through nmx_xnu_unmap");
 }
 
+static void test_staging_array_failure(void)
+{
+    struct page pages[2];
+    struct page *list[2];
+    void *addr;
+
+    pages[0].md.pat_mode = 0;
+    pages[1].md.pat_mode = 0;
+    list[0] = &pages[0];
+    list[1] = &pages[1];
+    reset_counters();
+    expect_pages_count = 2;
+    kmalloc_budget = 0;        /* the physical array itself fails */
+    addr = vmap(list, 2, 0, 0);
+    assert(addr == NULL);
+    assert(map_pages_calls == 0);  /* nothing was mapped, so nothing to release */
+    assert(unmap_calls == 0);
+    expect_all_released();
+    pass("a failed staging array maps and releases nothing");
+}
+
+static void test_vmap_native_mapping_failure(void)
+{
+    struct page pages[2];
+    struct page *list[2];
+    void *addr;
+
+    pages[0].md.pat_mode = 0;
+    pages[1].md.pat_mode = 0;
+    list[0] = &pages[0];
+    list[1] = &pages[1];
+    reset_counters();
+    expect_pages_count = 2;
+    fail_native_map = 1;
+    addr = vmap(list, 2, 0, 0);
+    assert(addr == NULL);
+    assert(map_pages_calls == 1);
+    assert(unmap_calls == 0);      /* no mapping was created to release */
+    expect_all_released();         /* the staging array was still freed */
+    pass("a failed native vmap mapping leaves nothing to release");
+}
+
+static void test_device_mapping_native_mapping_failure(void)
+{
+    void *addr;
+
+    reset_counters();
+    expect_phys_pa = 0xf3000000;
+    expect_phys_size = PAGE_SIZE;
+    fail_native_map = 1;
+    addr = _ioremap_attr(expect_phys_pa, expect_phys_size, 0);
+    assert(addr == NULL);
+    assert(map_phys_calls == 1);
+    assert(unmap_calls == 0);
+    expect_all_released();         /* pmap_mapdev_attr freed its own record */
+    pass("a failed native device map leaves no device record");
+}
+
 static void test_failure_does_not_poison_the_next_mapping(void)
 {
     void *failed, *addr;
@@ -365,6 +434,9 @@ int main(void)
     test_vmap_registration_failure();
     test_vmap_pfn_success();
     test_vmap_pfn_registration_failure();
+    test_staging_array_failure();
+    test_vmap_native_mapping_failure();
+    test_device_mapping_native_mapping_failure();
     test_failure_does_not_poison_the_next_mapping();
     test_unbalanced_release_is_not_silent();
     printf("Actual vmmap registration, rollback and native release accounting passed; "
