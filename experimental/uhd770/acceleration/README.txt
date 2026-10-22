@@ -52,6 +52,16 @@ close. Native fdrop decrements; Linux fput already decremented before _fdrop,
 which must perform final cleanup without subtracting a second time. The kernel
 job executes these actual functions with inert services before building a kext.
 
+The r14 hardware panic reached linux_file_close -> synchronize_rcu -> the
+thread registry spin lock (TLB/IPI timeout). The Darwin RCU override retains CK
+grace periods and callback order, using a shared epoch record per RCU type with
+short serialized begin/end updates. Readers can migrate/sleep without keeping
+interrupts disabled; waiters yield to XNU instead of using unimplemented BSD
+CPU binding. The registry masks local interrupts only while its lock is held.
+CK must retain multiprocessor atomics even without FreeBSD's SMP define. Native
+CI exercises the actual CK source, concurrent readers/waiters and deferred
+callbacks. These host checks do not establish real GPU/IRQ stability.
+
 The ordinary Metal buffer/texture/compute path uses ANV allocations. NMXAccel's
 inherited family GPUVA/VRAM callbacks still depend on NVIDIA RM and are not an
 Intel allocation implementation. Hardware resource pools, cross-process shared

@@ -195,6 +195,8 @@ def check_component(archive, entries, name, spec):
                 read("logs/nmx-drm-node-test.log"), "kernel: NMX node-identity interface evidence missing/failed")
         require("NMX native node lifecycle: actual open, logical inode, identity ioctl, deferred fput and failure cleanup passed" in
                 read("logs/nmx-node-open-test.log"), "kernel: native node-open lifecycle regression missing/failed")
+        require("NMX Darwin RCU: actual CK multiprocessor epochs, nested/migrating readers, grace periods, callbacks, wrap and IRQ-safe registry passed" in
+                read("logs/nmx-rcu-test.log"), "kernel: real CK/RCU concurrency regression missing/failed")
         metadata["nmx_node_info_ioctl"] = "0x40084e44"
         require("NMX framebuffer start identity/order/failure tests passed" in read("logs/nmx-fb-start-test.log"),
                 "kernel: framebuffer controller initialization regression check missing/failed")

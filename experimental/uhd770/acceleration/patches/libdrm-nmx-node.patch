@@ -438,3 +438,47 @@
      return drmGetDeviceNameFromFd(fd);
  #else
      struct stat      sbuf;
+--- a/xf86drm.c
++++ b/xf86drm.c
+@@ -4595,18 +4595,24 @@
+     char actual[PATH_MAX];
+     const char *stage = "open";
+     int ret = 0;
++    bool trace = getenv("NMX_DRM_DEBUG") != NULL;
++    if (trace) fprintf(stderr, "NMX DRM discovery path=%s phase=open.begin\n", path);
+     int fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
++    int open_error = fd < 0 ? errno : 0;
++    if (trace) fprintf(stderr, "NMX DRM discovery path=%s phase=open.end error=%d\n", path, open_error);
+     memset(info, 0, sizeof(*info));
+     memset(pci, 0, sizeof(*pci));
+     if (fd < 0) {
+-        ret = -errno;
++        ret = -open_error;
+         goto out;
+     }
+     stage = "NODE_INFO";
++    if (trace) fprintf(stderr, "NMX DRM discovery path=%s phase=NODE_INFO.begin\n", path);
+     if (drm_darwin_fd_node(fd, info)) {
+         ret = -errno;
+         goto close_fd;
+     }
++    if (trace) fprintf(stderr, "NMX DRM discovery path=%s phase=NODE_INFO.end type=%u index=%u\n", path, info->type, info->index);
+     stage = "logical-name";
+     ret = drm_darwin_fd_path(info, actual, sizeof(actual));
+     if (ret)
+@@ -4616,10 +4622,15 @@
+         goto close_fd;
+     }
+     stage = "PCIINFO";
++    if (trace) fprintf(stderr, "NMX DRM discovery path=%s phase=PCIINFO.begin\n", path);
+     if (drmIoctl(fd, DRM_IOCTL_GET_PCIINFO, pci))
+         ret = -errno;
+ close_fd:
++    /* Publish metadata before close: last-close may wait for kernel RCU. */
++    if (trace) fprintf(stderr, "NMX DRM discovery path=%s phase=close.begin stage=%s result=%d pci=%04x:%04x\n",
++                       path, stage, ret, pci->vendor_id, pci->device_id);
+     close(fd);
++    if (trace) fprintf(stderr, "NMX DRM discovery path=%s phase=close.end\n", path);
+ out:
+     if (getenv("NMX_DRM_DEBUG"))
+         fprintf(stderr, "NMX DRM discovery path=%s stage=%s result=%d type=%u index=%u "

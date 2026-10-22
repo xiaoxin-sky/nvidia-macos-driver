@@ -1,0 +1,203 @@
+/* Native pthread test of extracted Darwin RCU functions and actual CK epochs.
+ * Short native spin sections are modeled by mutexes plus explicit per-thread
+ * IRQ state. No GPU is opened; kernel IRQ delivery still needs hardware proof.
+ */
+#include <assert.h>
+#include <limits.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/queue.h>
+#include <ck_epoch.h>
+
+#ifdef CK_MD_UMP
+#error "CK atomics lost their multi-CPU LOCK prefixes"
+#endif
+#ifndef __aligned
+#define __aligned(n) __attribute__((aligned(n)))
+#endif
+#ifndef __unused
+#define __unused __attribute__((unused))
+#endif
+#define CACHE_LINE_SIZE 64
+#define RCU_TYPE_MAX 2
+#define RCU_TYPE_REGULAR 0
+#define RCU_TYPE_SLEEPABLE 1
+#define LINUX_KFREE_RCU_OFFSET_MAX 4096
+#define RCU_SKIP() false
+#define MPASS(x) assert(x)
+#define MTX_SPIN 1
+#define FALSE 0
+#define container_of(p, t, field) ((t *)((char *)(p) - offsetof(t, field)))
+typedef int boolean_t;
+static _Thread_local bool irqs_enabled = true;
+static _Thread_local unsigned held_spins, fixture_cpu;
+static atomic_uint pauses;
+static boolean_t ml_set_interrupts_enabled(boolean_t enable)
+{ boolean_t old = irqs_enabled; irqs_enabled = enable; return old; }
+struct mtx { pthread_mutex_t native; boolean_t saved; };
+static void mtx_init(struct mtx *m, const char *name, void *unused, int kind)
+{ (void)name; (void)unused; assert(kind == MTX_SPIN); assert(!pthread_mutex_init(&m->native, NULL)); }
+static void mtx_lock_spin(struct mtx *m)
+{
+    boolean_t old = ml_set_interrupts_enabled(false);
+    assert(!pthread_mutex_lock(&m->native)); m->saved = old; ++held_spins;
+}
+static void mtx_unlock_spin(struct mtx *m)
+{
+    boolean_t old = m->saved;
+    assert(held_spins); --held_spins;
+    assert(!pthread_mutex_unlock(&m->native)); ml_set_interrupts_enabled(old);
+}
+static void sleep_millis(unsigned ms)
+{
+    assert(irqs_enabled && held_spins == 0);
+    struct timespec delay = {ms / 1000, (long)(ms % 1000) * 1000000};
+    nanosleep(&delay, NULL);
+}
+static int fixture_pause(const char *name, int ticks)
+{ (void)name; assert(ticks > 0); atomic_fetch_add(&pauses, 1); sleep_millis(1); return 0; }
+#define pause(name, ticks) fixture_pause(name, ticks)
+static int nmx_in_critical(void) { return !irqs_enabled || held_spins != 0; }
+static void panic(const char *message, unsigned type)
+{ fprintf(stderr, message, type); abort(); }
+struct task_struct { int rcu_recurse[RCU_TYPE_MAX]; ck_epoch_section_t rcu_section[RCU_TYPE_MAX]; };
+static _Thread_local struct task_struct current_task;
+#define current (&current_task)
+#define curthread (&current_task)
+#define __current_unallocated(td) false
+
+struct llist_node { struct llist_node *next; };
+struct llist_head { _Atomic(struct llist_node *) first; };
+static void init_llist_head(struct llist_head *h) { atomic_init(&h->first, NULL); }
+static void llist_add(struct llist_node *n, struct llist_head *h)
+{
+    struct llist_node *old = atomic_load(&h->first);
+    do { n->next = old; } while (!atomic_compare_exchange_weak(&h->first, &old, n));
+}
+static struct llist_node *llist_del_all(struct llist_head *h) { return atomic_exchange(&h->first, NULL); }
+#define llist_for_each_safe(node, nextnode, firstnode) \
+    for ((node) = (firstnode); (node) && ((nextnode) = (node)->next, 1); (node) = (nextnode))
+struct rcu_head;
+typedef void (*rcu_callback_t)(struct rcu_head *);
+struct callback_head { union { STAILQ_ENTRY(callback_head) entry; struct llist_node node; }; rcu_callback_t func; };
+struct rcu_head { struct callback_head storage; };
+struct task { void (*fn)(void *, int); void *arg; atomic_uint pending; };
+#define TASK_INIT(t, pri, callback, ctx) do { (t)->fn = (callback); (t)->arg = (ctx); atomic_init(&(t)->pending, 0); } while (0)
+struct linux_epoch_head { struct llist_head cb_head; struct task task; };
+static ck_epoch_t linux_epoch[RCU_TYPE_MAX];
+static struct linux_epoch_head linux_epoch_head[RCU_TYPE_MAX];
+static void *linux_irq_work_tq;
+static void taskqueue_enqueue(void *q, struct task *t) { (void)q; atomic_fetch_add(&t->pending, 1); }
+#define kfree(p) free(p)
+static void linux_rcu_cleaner_func(void *, int);
+
+static pthread_mutex_t registry = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t *nmx_thread_lock = &registry;
+static void lck_spin_lock(pthread_mutex_t *p) { assert(!irqs_enabled); assert(!pthread_mutex_lock(p)); ++held_spins; }
+static void lck_spin_unlock(pthread_mutex_t *p) { assert(!irqs_enabled && held_spins); --held_spins; assert(!pthread_mutex_unlock(p)); }
+
+/* NMX_ACTUAL_RCU_IMPLEMENTATION */
+
+static atomic_uint entered, outer_release, leave_nested, sync_done, callbacks, stream_stop;
+static unsigned selected_type;
+static void wait_nonzero(atomic_uint *flag)
+{ while (!atomic_load(flag)) sleep_millis(1); }
+static void *reader(void *context)
+{
+    unsigned type = (unsigned)(uintptr_t)context;
+    fixture_cpu = 0;
+    assert(!linux_rcu_read_lock_held(type));
+    linux_rcu_read_lock(type); linux_rcu_read_lock(type);
+    assert(linux_rcu_read_lock_held(type) && irqs_enabled && held_spins == 0);
+    atomic_fetch_add(&entered, 1);
+    wait_nonzero(&leave_nested);
+    fixture_cpu = 7; /* a scheduling/migration boundary inside a reader */
+    linux_rcu_read_unlock(type);
+    assert(linux_rcu_read_lock_held(type));
+    wait_nonzero(&outer_release);
+    linux_rcu_read_unlock(type);
+    assert(!linux_rcu_read_lock_held(type) && irqs_enabled);
+    return NULL;
+}
+static void *synchronizer(void *context)
+{
+    unsigned type = (unsigned)(uintptr_t)context;
+    linux_synchronize_rcu(type);
+    atomic_store(&sync_done, 1);
+    return NULL;
+}
+static void *cleaner(void *context)
+{
+    struct task *t = context;
+    assert(atomic_exchange(&t->pending, 0));
+    t->fn(t->arg, 1);
+    return NULL;
+}
+static void callback(struct rcu_head *head)
+{ assert(head && irqs_enabled && held_spins == 0); atomic_fetch_add(&callbacks, 1); }
+static void test_readers(unsigned type)
+{
+    pthread_t readers[4], waiter, worker;
+    atomic_store(&entered, 0); atomic_store(&leave_nested, 0); atomic_store(&outer_release, 0);
+    atomic_store(&sync_done, 0); atomic_store(&callbacks, 0); atomic_store(&pauses, 0);
+    for (unsigned i = 0; i < 4; ++i) assert(!pthread_create(&readers[i], NULL, reader, (void *)(uintptr_t)type));
+    while (atomic_load(&entered) != 4) sleep_millis(1);
+    assert(!pthread_create(&waiter, NULL, synchronizer, (void *)(uintptr_t)type));
+    struct rcu_head first = {0}, second = {0};
+    linux_call_rcu(type, &first, callback); linux_call_rcu(type, &second, callback);
+    assert(!pthread_create(&worker, NULL, cleaner, &linux_epoch_head[type].task));
+    wait_nonzero(&pauses);
+    atomic_store(&leave_nested, 1); sleep_millis(10);
+    assert(!atomic_load(&sync_done) && !atomic_load(&callbacks));
+    /* A grace period for a separate RCU type must not wait on these readers. */
+    linux_synchronize_rcu(1 - type);
+    atomic_store(&outer_release, 1);
+    for (unsigned i = 0; i < 4; ++i) assert(!pthread_join(readers[i], NULL));
+    assert(!pthread_join(waiter, NULL) && !pthread_join(worker, NULL));
+    assert(atomic_load(&sync_done) && atomic_load(&callbacks) == 2);
+    assert(linux_epoch_record[type].epoch_record.active == 0);
+}
+static void *stream_reader(void *context)
+{
+    unsigned type = (unsigned)(uintptr_t)context;
+    while (!atomic_load(&stream_stop)) {
+        linux_rcu_read_lock(type);
+        boolean_t was = nmx_registry_lock();
+        nmx_registry_unlock(was);
+        sched_yield();
+        linux_rcu_read_unlock(type);
+    }
+    return NULL;
+}
+int main(void)
+{
+    alarm(20); /* fail a deadlocking regression instead of hanging the CI job */
+    linux_rcu_runtime_init(NULL);
+    boolean_t state = nmx_registry_lock();
+    assert(state && !irqs_enabled); nmx_registry_unlock(state); assert(irqs_enabled);
+    irqs_enabled = false; state = nmx_registry_lock(); nmx_registry_unlock(state); assert(!irqs_enabled); irqs_enabled = true;
+    for (selected_type = 0; selected_type < RCU_TYPE_MAX; ++selected_type) {
+        test_readers(selected_type);
+        ck_pr_store_uint(&linux_epoch[selected_type].epoch, UINT_MAX - 1);
+        test_readers(selected_type); /* real CK grace-period counter wrap */
+    }
+    pthread_t readers[6];
+    for (unsigned i = 0; i < 6; ++i) assert(!pthread_create(&readers[i], NULL, stream_reader, (void *)(uintptr_t)(i % 2)));
+    for (unsigned i = 0; i < 80; ++i) linux_synchronize_rcu(i % 2);
+    atomic_store(&stream_stop, 1);
+    for (unsigned i = 0; i < 6; ++i) assert(!pthread_join(readers[i], NULL));
+    for (unsigned i = 0; i < RCU_TYPE_MAX; ++i) {
+        assert(!linux_epoch_record[i].epoch_record.active);
+        assert(!pthread_mutex_destroy(&linux_epoch_record[i].lock.native));
+    }
+    puts("NMX Darwin RCU: actual CK multiprocessor epochs, nested/migrating readers, grace periods, callbacks, wrap and IRQ-safe registry passed; no GPU opened.");
+    return 0;
+}

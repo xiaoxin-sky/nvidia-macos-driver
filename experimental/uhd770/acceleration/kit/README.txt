@@ -47,6 +47,8 @@ Required evidence
   linkage preflight, plus the NMX node-identity kernel helper/ABI check.
   The native node open/identity/close fixture is also required, including a
   retained Linux file finalized by fput after its native descriptor was closed.
+  Require the real CK/RCU concurrency fixture too; earlier node-open fixtures
+  mocked synchronize_rcu and did not cover the r14 native-close panic path.
 - Userland: final real-ANV/probe build marker, ANV mapping fixture, clock boundary
   fixture and native CLOCK_UPTIME_RAW versus mach_absolute_time comparison.
   Earlier userland artifacts without native_clock_smoke.txt are rejected.
