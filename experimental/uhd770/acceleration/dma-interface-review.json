@@ -71,7 +71,7 @@
       "hardware_executed": false
     }
   },
-  "source_trace_update": "i915 page-table backing alloc_pt_dma -> i915_gem_object_create_internal -> i915_gem_object_get_pages_internal -> i915_gem_gtt_prepare_pages uses the same S/G DMA path, rather than necessarily the separate scalar pctrie mapping path. Root allocation/map_pt_dma and actual GPU page-table visibility remain review requirements.",
+  "source_trace_update": "i915 page-table backing alloc_pt_dma -> i915_gem_object_create_internal -> i915_gem_object_get_pages_internal -> i915_gem_gtt_prepare_pages uses the same S/G DMA path, rather than necessarily the separate scalar pctrie mapping path. The GGTT/HWSP address chain is now recorded in ggtt_hwsp_contract; root allocation/map_pt_dma and driver-side TLB invalidation remain review requirements.",
   "page_map_registration": {
     "status": "native macOS/ASan/kernel/KC passed on 358e6c1; device visibility unverified",
     "defect": "override/src/linux_page.c:vmmap_add wrote vm_size/vm_addr/vm_handle through kmalloc(sizeof(*vmmap), GFP_KERNEL) without checking it, and returned void, so a refused registration both dereferenced NULL and left the caller unable to unwind the device or IOKit mapping it had already created.",
@@ -111,5 +111,72 @@
       "result": "All 11 actual registration/rollback cases passed on macOS normally and under AddressSanitizer/UndefinedBehaviorSanitizer; the kernel extension build and native KC preflight passed in the same run",
       "hardware_executed": false
     }
+  },
+  "ggtt_hwsp_contract": {
+    "status": "source-verified address chain, breadcrumb command and cache-flush primitives; TLB effect and real completion unverified",
+    "question": "Does the GGTT address the GPU is told to write the completion seqno to reach the same bytes the CPU polls, and is the write command well formed on this port?",
+    "chain": [
+      "i915_ggtt_offset(hwsp vma) is the GGTT virtual address of the pinned status page",
+      "intel_timeline.hwsp_offset = that offset (or a shared offset) plus the in-page seqno slot; intel_timeline.c:75-99 keeps hwsp_offset < hwsp->size",
+      "GPU side: hwsp_offset(rq) = page_mask_bits(tl->hwsp_offset) + offset_in_page(rq->hwsp_seqno) (gen8_engine_cs.c:422-432)",
+      "CPU side: hwsp_seqno = pin_map(WB) + offset_in_page(timeline->hwsp_offset) (intel_timeline.c:57-73)",
+      "both sides therefore name the same in-page slot by construction, because the CPU pointer was built from the same offset the GPU command uses"
+    ],
+    "verified": [
+      {
+        "edge": "RCS0 breadcrumb selection for ADL",
+        "anchors": [
+          "drm: gt/intel_execlists_submission.c:3515-3521 rcs_submission_override, GRAPHICS_VER 12 -> emit_fini_breadcrumb = gen12_emit_fini_breadcrumb_rcs",
+          "drm: gt/gen8_engine_cs.c:812-853 gen12_emit_fini_breadcrumb_rcs emits PIPE_CONTROL (CS_STALL, TLB_INVALIDATE, TILE/RT/DEPTH flush, DC_FLUSH_ENABLE, FLUSH_ENABLE), adds FLUSH_L3 because IP_VER < 12.70, adds DEPTH_STALL for Wa_1409600907 because GRAPHICS_VER 12 and IP_VER < 12.55, then gen12_emit_ggtt_write_rcs(seqno, hwsp_offset(rq), 0, FLUSH_ENABLE|CS_STALL)",
+          "drm: gt/gen8_engine_cs.c:784-809 the gen12 tail adds MI_USER_INTERRUPT, the arb enable and the semaphore busywait"
+        ],
+        "finding": "ADL-S is graphics version 12 and IP version below 12.55, so the RCS breadcrumb is the gen12 variant with L3 flush and depth stall, not the gen8 or gen11 one. The write is a PIPE_CONTROL qword store, not an MI_FLUSH_DW."
+      },
+      {
+        "edge": "the write targets a global GTT address and must be 8-byte aligned",
+        "anchors": [
+          "drm: gt/gen8_engine_cs.h:104-115 gen12_emit_ggtt_write_rcs asserts IS_ALIGNED(gtt_offset, 8) and ORs PIPE_CONTROL_GLOBAL_GTT_IVB",
+          "drm: gt/gen8_engine_cs.h:128-140 gen8_emit_ggtt_write (the non-RCS path) asserts the same alignment and clears bit 5 because MI_FLUSH_DW uses that bit"
+        ],
+        "finding": "The seqno slot named by hwsp_offset is a global GTT address, so it resolves through the GGTT rather than the PPGTT. That is why the status page must be a GGTT vma; it also means the GGTT PTE for that page, reviewed on the DMA/PTE path, is what the GPU dereferences."
+      },
+      {
+        "edge": "CPU view of the seqno",
+        "anchors": [
+          "drm: gt/intel_timeline.c:64 pin_map is hardcoded I915_MAP_WB, not the per-platform coherent map type",
+          "drm: gt/intel_timeline.c:69-70 the slot is zeroed and then drm_clflush_virt_range is called so the GPU reads zeros",
+          "drm: gt/intel_engine_pm.c:85,88 reads it with READ_ONCE(*ce->timeline->hwsp_seqno)",
+          "drm: i915_request.h:611 i915_request_completed -> __i915_request_is_complete under rcu_read_lock, i.e. the completion decision is a plain seqno read of that mapping"
+        ],
+        "finding": "The CPU polls a write-back kernel mapping with no explicit cache invalidate on the completion path, so observing the GPU's store depends on the shared LLC (has_llc = 1 for ADL-S). That is upstream i915's assumption for this page, not something the port changed."
+      },
+      {
+        "edge": "cache-flush primitives actually execute on this port",
+        "anchors": [
+          "drm: drivers/gpu/drm/drm_cache.c:166-189 drm_clflush_virt_range takes the CONFIG_X86 branch: static_cpu_has(X86_FEATURE_CLFLUSH) then an mb()-fenced clflushopt loop with a final clflushopt(end-1), else wbinvd_on_all_cpus()",
+          "generated flags from experimental/uhd770/tools/gen_flags.py include -DCONFIG_X86, -DCONFIG_X86_64 and -DCONFIG_X86_PAT, so the CONFIG_X86 branch is the one compiled",
+          "freebsd: sys/compat/linuxkpi/common/include/asm/cpufeature.h:16-31 static_cpu_has(X86_FEATURE_CLFLUSH) tests cpu_feature & CPUID_CLFSH",
+          "port: override/include/linux/page.h:109-123 clflushopt becomes lkpi_clflushopt: CLFLUSHOPT when cpu_stdext_feature has it, else CLFLUSH, else pmap_invalidate_cache()",
+          "port: bsdcompat/include/machine/cpufunc.h:10-11 clflushopt and wbinvd are real instructions",
+          "port: override/src/linux_compat.c:2263,2325 boot_cpu_data.x86_clflush_size is set from cpu_clflush_line_size, so the loop stride is not zero",
+          "port: override/src/linux_compat.c:2033 linux_wbinvd_on_all_cpus is the rendezvous-based fallback"
+        ],
+        "finding": "The flush is not a stub: the compiled branch issues real cache-line flushes with the required barriers, the line size is initialised from the CPU, and both weaker fallbacks exist. A zero line size, which would divide the loop, is excluded by the initialisation path."
+      },
+      {
+        "edge": "the breadcrumb also carries a GPU-side TLB invalidate",
+        "anchors": [
+          "drm: gt/gen8_engine_cs.c:816-822 PIPE_CONTROL_TLB_INVALIDATE is part of the same flush before the seqno write"
+        ],
+        "finding": "The GPU invalidates its own TLB after the batch, so a stale PTE is not carried into the next submission by the GPU. The driver-side invalidation in intel_tlb.c is a separate path and is still open below."
+      }
+    ],
+    "open": [
+      "intel_tlb.c mmio_invalidate_full and its ADL workaround: forcewake, lock and wait context not yet read to the end; no evidence that the invalidation completes before the next PTE use",
+      "Parent PDE/root programming and the context root address (ASSIGN_CTX_PML4) still not traced against the actual allocated page-table objects",
+      "GGTT pin lifetime for ring, context state and HWSP: pin/offset validity across eviction is not yet reviewed",
+      "Whether the GPU actually performs the GTT lookup and writes the seqno is target-only"
+    ],
+    "hardware_executed": false
   }
 }

@@ -105,8 +105,8 @@
     {
       "id": "ggtt-hwsp-address",
       "edge": "HWSP and context GGTT offsets the descriptor names, versus the addresses the completion path reads",
-      "why": "Belongs to T3: the vma node offset, the GGTT PTE for that offset and the hwsp_offset used by the breadcrumb must agree. Not yet traced end to end.",
-      "proves": "source trace of i915_vma_pin/GGTT insert plus hwsp_offset, then a target run"
+      "why": "The seqno half is now traced and recorded in dma-interface-review.json ggtt_hwsp_contract: hwsp_offset(rq) is a global GTT address and names the same in-page slot the CPU polls through a write-back mapping. What remains is the page-table side: that the GGTT PTE for that offset really points at the status page's DMA address, and the parent PDE/root programming beneath it.",
+      "proves": "GGTT insert trace for the status-page vma, then a target run"
     },
     {
       "id": "gpu-consumption",
