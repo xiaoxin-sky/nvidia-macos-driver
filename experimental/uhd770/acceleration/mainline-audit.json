@@ -3,7 +3,7 @@
   "objective": "UHD 770 8086:4680 genuinely executes GPU compute, returns correct readback and exits normally; review the complete cross-OS call chain before requesting another hardware test",
   "started": "2026-10-22",
   "review_baseline": "35b42cc5c84f5d1d79b92d5ddc200a5eff8451a1",
-  "hardware_status": "NOT ACHIEVED: last real run was r14 and panicked during native device close/RCU; r15 host evidence is not hardware evidence",
+  "hardware_status": "NOT ACHIEVED: target GPU compute/readback/normal exit remains unverified; no new user reboot requested",
   "acceptance": [
     "Matched source and loaded binary identities for 8086:4680 on the target macOS boot",
     "Real Intel ANV physical/logical device and command queue, no software/no-hardware substitution",
@@ -43,7 +43,14 @@
         "linux_mm_dtor clears current process mm rather than locating the original mm owner",
         "Native MmTask stores task_t without an explicit retained reference; lifecycle and reachability need verification before a repair"
       ],
-      "repair": "Dedicated mm publication mutex, original-owner wrapper/final lock destruction, retained Mach task per registry/lookup/wire and fallible registration before publication"
+      "repair": "Dedicated mm publication mutex, original-owner wrapper/final lock destruction, retained Mach task per registry/lookup/wire and fallible registration before publication",
+      "native_mm_evidence": {
+        "source": "198b3e15e1eea141de0314a5f616d7713701ba9d",
+        "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39712116922",
+        "artifact_id": 12397562479,
+        "sha256": "282484b2aa1ad4e6681a408df1812b975f8896a445c29dcff59fd61051322051",
+        "result": "joined Linux/native mm fixture and kernel KC checks passed"
+      }
     },
     {
       "id": "submission",
@@ -57,7 +64,8 @@
       "status": "SLEEP/WAKE REPAIR COMPILED AND TESTED ON NATIVE MACOS; hardware pending",
       "remaining": "GPU IRQ/breadcrumb/fence delivery and other transitive dependencies still need review/target evidence",
       "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
-      "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018"
+      "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018",
+      "next_review": "Nested LinuxKPI spin_lock -> local_bh_disable -> sched_pin -> NMX interrupt masking, with sleepable MTX_DEF contention; inspect actual i915 callback/tasklet routes before selecting an adaptation"
     },
     {
       "id": "visibility",
@@ -76,7 +84,10 @@
         "mm final destruction does not explicitly destroy its allocated native mmap_sem sx lock"
       ],
       "mm_repair": "Final mm destructor now clears the original owner cache under the mm mutex and destroys its native mmap_sem; native task lookup/wire holds explicit references",
-      "thread_repair": "Registry + Linux task references retain native thread and thread metadata; task install/detach and referenced tid lookup serialized; device callbacks release only records they created"
+      "thread_repair": "Registry + Linux task references retain native thread and thread metadata; task install/detach and referenced tid lookup serialized; device callbacks release only records they created",
+      "pending_native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39714586056",
+      "pending_native_source": "501601084a451d21013566313e3b594de263dc2b",
+      "fixture_repair": "Darwin user_size_t typedef conflict corrected; compiler output now preserved. Previous failures did not produce a usable kernel."
     }
   ],
   "test_limit": "Existing fixtures are evidence only for their actual extracted code and exercised contracts. Kernel services or hardware replaced by host mocks are not verified by those mocks.",
