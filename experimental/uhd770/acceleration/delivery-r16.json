@@ -414,5 +414,27 @@
       "conclusion": "on this machine the collection installed by this script is the one that takes effect"
     },
     "hardware_executed": false
+  },
+  "shipped_artifact_checks": {
+    "method": "parsed the binaries that are actually inside the delivered package, rather than trusting the sources they were built from",
+    "spirv": {
+      "magic": "0x07230203, version 1.3",
+      "execution_mode": "LocalSize 64 1 1, matching layout(local_size_x = 64)",
+      "interface": "descriptor set 0 with binding 0 and binding 1, array stride 4, GlobalInvocationId builtin, push constant block named Parameters with members count and seed",
+      "conclusion": "the shipped SPIR-V is the compiled form of the reviewed verify.comp, including the binding numbers the CPU side binds"
+    },
+    "probe_binary": {
+      "cli": "the binary contains --loader, --icd, --shader, --device-id, --count, --iterations and --deadline",
+      "messages": [
+        "dispatch %u: seed=0x%08x words=%u groups=%u",
+        "mismatch[%u]: expected=%08x actual=%08x",
+        "Readback mismatch count=",
+        "iteration %u: verified=%u elapsed_ms=%.3f",
+        "COMPUTE_READBACK_VERIFIED: vendor=8086 device=%04x iterations=%u total_words=%llu",
+        "Scope: selected ANV compute/readback only. Metal, scanout and WindowServer are untested."
+      ],
+      "conclusion": "the shipped probe reports each dispatch's seed, each mismatching word with expected and actual values, and a per-iteration verified count, so a wrong result would come back diagnosable at word level rather than as a bare failure"
+    },
+    "limit": "this proves the artifacts contain the intended interfaces and messages; it does not prove they run"
   }
 }
