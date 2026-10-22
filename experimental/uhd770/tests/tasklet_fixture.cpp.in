@@ -144,6 +144,8 @@ static void linux_set_current(int) {}
 static int bh_depth;
 static void sched_pin() { ++bh_depth; }
 static void sched_unpin() { assert(bh_depth>0); --bh_depth; }
+static void nmx_linux_bh_disable() { ++bh_depth; }
+static void nmx_linux_bh_enable() { assert(bh_depth>0); --bh_depth; }
 static std::function<void()> on_pause;
 static unsigned waits;
 static void pause(const char *,int)

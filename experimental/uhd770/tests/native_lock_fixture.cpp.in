@@ -1,0 +1,228 @@
+/* Actual native mutex/BH/critical adapters and i915 CSB/uncore read code.
+ * Native locks, CPU identity, timer and MMIO are controlled host primitives.
+ * These checks diagnose illegal blocking contexts; they do not execute a GPU.
+ */
+#include <atomic>
+#include <cassert>
+#include <climits>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+#include <vector>
+#ifdef _MSC_VER
+#include <intrin.h>
+#pragma warning(disable: 4100 4505)
+/* The kernel's bounded CSB index is int; the Windows host reports ptrdiff_t
+ * narrowing where the original C driver does the same explicit assignment. */
+#pragma warning(disable: 4244)
+#define __builtin_expect(v,n) (v)
+#define __ATOMIC_RELAXED 0
+static uintptr_t host_owner_load(const volatile uintptr_t *p)
+{
+    return static_cast<uintptr_t>(_InterlockedCompareExchange64(reinterpret_cast<volatile long long *>(const_cast<volatile uintptr_t *>(p)),0,0));
+}
+static void host_owner_store(volatile uintptr_t *p,uintptr_t v)
+{
+    (void)_InterlockedExchange64(reinterpret_cast<volatile long long *>(p),static_cast<long long>(v));
+}
+#define __atomic_load_n(p,o) host_owner_load(p)
+#define __atomic_store_n(p,v,o) host_owner_store((p),(v))
+#endif
+#define NMXKPI 1
+#define FALSE false
+#define MAXCPU 2
+#define MTX_DEF 0
+#define MTX_SPIN 1
+#define MTX_RECURSE 4
+#define LO_INITIALIZED 1
+#define LO_RECURSABLE 2
+#define LO_SLEEPABLE 4
+#define NMX_LC_MTX 1
+#define NMX_LC_SPIN 2
+#define LCK_ATTR_NULL nullptr
+#define KASSERT(v,msg) do { if (!(v)) throw std::runtime_error(#v); } while (0)
+#define bzero(p,n) std::memset((p),0,(n))
+#define SPIN_SKIP() 0
+#define mtx_lock(m) nmx_mtx_lock(m)
+#define mtx_unlock(m) nmx_mtx_unlock(m)
+#define preempt_disable() nmx_critical_enter()
+#define preempt_enable() nmx_critical_exit()
+#define noinline
+#define READ_ONCE(v) (v)
+using boolean_t=bool;
+using u_int=unsigned;
+using u32=uint32_t;
+using u64=uint64_t;
+struct thread { uintptr_t td_xnu; };
+static std::atomic<uintptr_t> identities{0};
+static thread_local uintptr_t identity=++identities;
+static uintptr_t current_thread() { return identity; }
+#define CUR_XNU ((uintptr_t)current_thread())
+static thread_local bool irqs=true,hard_irq=false;
+static thread_local int host_cpu=0;
+static thread_local unsigned native_spins=0;
+static boolean_t ml_at_interrupt_context() { return hard_irq; }
+static boolean_t ml_set_interrupts_enabled(boolean_t state) { bool old=irqs;irqs=state;return old; }
+static int cpu_number() { return host_cpu; }
+static void panic(const char *s,...) { throw std::runtime_error(s); }
+static void *nmx_lck_grp=nullptr;
+struct lock_object { const char *lo_name;unsigned lo_class,lo_flags; };
+struct mtx { struct lock_object lock_object;void *mtx_lk;volatile uintptr_t mtx_owner;int mtx_recurse,mtx_saved_intr; };
+struct NativeLock { std::mutex value; };
+static std::function<void()> on_native_lock;
+static std::atomic<unsigned> blocking_entries{0};
+static void *lck_mtx_alloc_init(void *,void *) { return new NativeLock; }
+static void *lck_spin_alloc_init(void *,void *) { return new NativeLock; }
+static void lck_mtx_free(void *p,void *) { delete static_cast<NativeLock *>(p); }
+static void lck_spin_free(void *p,void *) { delete static_cast<NativeLock *>(p); }
+static void lck_mtx_lock(void *p)
+{
+    if (!irqs || native_spins) throw std::runtime_error("sleepable native mutex acquired with interrupts off/spin held");
+    ++blocking_entries;
+    if (on_native_lock) { auto f=std::move(on_native_lock);on_native_lock={};f(); }
+    static_cast<NativeLock *>(p)->value.lock();
+}
+static bool lck_mtx_try_lock(void *p) { return static_cast<NativeLock *>(p)->value.try_lock(); }
+static void lck_mtx_unlock(void *p) { static_cast<NativeLock *>(p)->value.unlock(); }
+static void lck_spin_lock(void *p) { assert(!irqs);static_cast<NativeLock *>(p)->value.lock();++native_spins; }
+static bool lck_spin_try_lock(void *p)
+{
+    assert(!irqs);
+    if (!static_cast<NativeLock *>(p)->value.try_lock()) return false;
+    ++native_spins; return true;
+}
+static void lck_spin_unlock(void *p) { assert(!irqs && native_spins);--native_spins;static_cast<NativeLock *>(p)->value.unlock(); }
+/* ACTUAL_NATIVE_LOCK_IMPLEMENTATION */
+
+using i915_reg_t=u32;
+enum forcewake_domains { FORCEWAKE_NONE=0 };
+struct intel_uncore { struct mtx lock;int rpm; };
+static std::atomic<unsigned> mmio_reads{0};
+static u32 last_mmio_offset;
+static bool unclaimed_reg_debug_header(intel_uncore *,i915_reg_t,bool) { return false; }
+static void unclaimed_reg_debug_footer(intel_uncore *,i915_reg_t,bool) {}
+static forcewake_domains __fwtable_reg_read_fw_domains(intel_uncore *,u32) { return FORCEWAKE_NONE; }
+static void __force_wake_auto(intel_uncore *,forcewake_domains) {}
+static u32 i915_mmio_reg_offset(i915_reg_t reg) { return reg; }
+static u64 __raw_uncore_read64(intel_uncore *,i915_reg_t reg)
+{
+    assert(irqs && nmx_linux_bh_depth()>=1);++mmio_reads;last_mmio_offset=reg;return 0x123456789abcdef0ULL;
+}
+#define assert_rpm_wakelock_held(p) do { (void)(p); } while (0)
+#define trace_i915_reg_rw(...) do {} while (0)
+/* ACTUAL_UNCORE_READ_MACROS */
+static u64 intel_uncore_read64(intel_uncore *u,i915_reg_t reg) { return fwtable_read64(u,reg,false); }
+struct intel_engine_cs { intel_uncore *uncore;u32 mmio_base;struct {u64 *csb_status;} execlists; };
+constexpr int GEN8_EXECLISTS_STATUS_BUF=0x370,GEN11_EXECLISTS_STATUS_BUF2=0x3a0;
+#define _MMIO(v) (v)
+template<class F> static int host_atomic_poll(F f,unsigned us)
+{
+    assert(!irqs && us==10);return f()?0:1;
+}
+#define wait_for_atomic_us(cond,us) host_atomic_poll([&] {return (cond);},(us))
+/* ACTUAL_CSB_FALLBACK */
+
+static void require(bool v,const char *message) { if(!v) throw std::runtime_error(message); }
+static void nested_spin_wait()
+{
+    struct mtx outer{},inner{};mtx_init(&outer,"outer",nullptr,MTX_DEF);mtx_init(&inner,"inner",nullptr,MTX_DEF);
+    std::atomic<bool> held{false},release{false};
+    std::thread holder([&] {
+        host_cpu=1;nmx_mtx_lock(&inner);held=true;
+        while(!release) std::this_thread::yield();
+        nmx_mtx_unlock(&inner);
+    });
+    while(!held) std::this_thread::yield();
+    spin_lock(&outer);
+    require(irqs && nmx_linux_bh_depth()==1,"outer spin disabled native interrupts");
+    on_native_lock=[&] { require(irqs && nmx_linux_bh_depth()==1,"nested mutex entered in wrong BH/IRQ context");release=true; };
+    spin_lock(&inner);
+    require(nmx_linux_bh_depth()==2 && nmx_mtx_owned(&inner),"nested spin ownership lost");
+    spin_unlock(&inner);spin_unlock(&outer);holder.join();
+    require(irqs && nmx_linux_bh_depth()==0,"nested lock BH state leaked");
+    mtx_destroy(&inner);mtx_destroy(&outer);
+}
+static void explicit_bh_migration()
+{
+    local_bh_disable();host_cpu=1;local_bh_disable();
+    require(irqs && !nmx_in_critical() && nmx_linux_bh_depth()==2,"BH nesting did not follow thread migration");
+    nmx_critical_enter();require(!irqs && nmx_in_critical() && nmx_linux_bh_depth()==2,"native critical protection was lost");
+    nmx_critical_enter();nmx_critical_exit();require(!irqs,"nested critical restored interrupts early");
+    nmx_critical_exit();require(irqs,"native critical failed to restore interrupts");
+    local_bh_enable();host_cpu=0;local_bh_enable();
+    require(nmx_linux_bh_depth()==0 && nmx_crit[0].nest==0 && nmx_crit[1].nest==0,"CPU or BH nesting leaked after migration");
+}
+static void true_critical_guard()
+{
+    struct mtx m{};mtx_init(&m,"critical-guard",nullptr,MTX_DEF);bool rejected=false;
+    nmx_critical_enter();
+    try { nmx_mtx_lock(&m); } catch(const std::runtime_error &) { rejected=true; }
+    nmx_critical_exit();require(rejected && irqs,"native CPU critical scope was silently made sleepable");mtx_destroy(&m);
+}
+static void csb_fallback()
+{
+    intel_uncore u{};mtx_init(&u.lock,"uncore",nullptr,MTX_DEF);
+    u64 csb[10]{};intel_engine_cs engine{&u,0x2000,{csb}};
+    csb[0]=17;unsigned before=mmio_reads;
+    require(wa_csb_read(&engine,csb)==17 && mmio_reads==before,"fresh CSB unnecessarily read MMIO");
+    for(unsigned idx:{0U,6U,9U}) {
+        csb[idx]=~u64(0);
+        require(wa_csb_read(&engine,csb+idx)==0x123456789abcdef0ULL,"stale CSB did not return actual MMIO value");
+        u32 offset=0x2000+(idx>=6?GEN11_EXECLISTS_STATUS_BUF2:GEN8_EXECLISTS_STATUS_BUF)+8*(idx>=6?idx-6:idx);
+        require(last_mmio_offset==offset,"CSB fallback MMIO offset changed");
+        require(irqs && nmx_linux_bh_depth()==0,"CSB fallback leaked critical/BH scope");
+    }
+    local_bh_disable();
+    require(wa_csb_read(&engine,csb)==0x123456789abcdef0ULL && nmx_linux_bh_depth()==1,
+        "CSB fallback failed inside the real inline-flush BH nesting");
+    local_bh_enable();
+    // Force native lock contention after the short critical poll has ended.
+    std::atomic<bool> held{false},release{false};
+    std::thread holder([&] { host_cpu=1;nmx_mtx_lock(&u.lock);held=true;while(!release) std::this_thread::yield();nmx_mtx_unlock(&u.lock); });
+    while(!held) std::this_thread::yield();
+    on_native_lock=[&] { require(irqs,"CSB fallback reached native lock with interrupts masked");release=true; };
+    require(wa_csb_read(&engine,csb)==0x123456789abcdef0ULL,"contended CSB fallback failed");holder.join();mtx_destroy(&u.lock);
+}
+static void concurrent_owner()
+{
+    struct mtx m{};mtx_init(&m,"parallel-owner",nullptr,MTX_DEF);int value=0;
+    std::vector<std::thread> workers;
+    for(int i=0;i<4;++i) workers.emplace_back([&] {
+        for(int n=0;n<1000;++n) { spin_lock(&m);require(nmx_mtx_owned(&m),"native owner identity lost");++value;spin_unlock(&m); }
+        require(nmx_linux_bh_depth()==0 && irqs,"worker BH state leaked");
+    });
+    for(auto &w:workers)w.join();require(value==4000,"native mutex failed to serialize writers");mtx_destroy(&m);
+}
+static void recursion_and_trylock()
+{
+    struct mtx m{};mtx_init(&m,"recursive",nullptr,MTX_DEF|MTX_RECURSE);
+    nmx_mtx_lock(&m);require(nmx_mtx_trylock(&m) && nmx_mtx_recursed(&m),"recursive native trylock failed");
+    nmx_mtx_unlock(&m);require(nmx_mtx_owned(&m) && !nmx_mtx_recursed(&m),"recursive unlock dropped native owner");
+    nmx_mtx_unlock(&m);require(!nmx_mtx_owned(&m),"native owner not cleared");mtx_destroy(&m);
+    mtx_init(&m,"spin",nullptr,MTX_SPIN);nmx_mtx_lock(&m);require(!irqs && nmx_in_critical(),"real MTX_SPIN did not report native atomic context");nmx_mtx_unlock(&m);require(irqs && !nmx_in_critical(),"MTX_SPIN failed to restore interrupts/context");mtx_destroy(&m);
+}
+static void bh_bounds()
+{
+    bool underflow=false,overflow=false,isr=false;
+    try { local_bh_enable(); } catch(const std::runtime_error &) { underflow=true; }
+    fixture_record.bh_depth=~0U;
+    try { local_bh_disable(); } catch(const std::runtime_error &) { overflow=true; }
+    fixture_record.bh_depth=0;hard_irq=true;
+    try { local_bh_disable(); } catch(const std::runtime_error &) { isr=true; }
+    hard_irq=false;
+    require(underflow && overflow && isr && nmx_linux_bh_depth()==0,"BH boundary checks failed");
+}
+int main()
+{
+    const std::pair<const char *,void(*)()> cases[]={
+        {"nested-native-contention",nested_spin_wait},{"BH-migration-and-critical",explicit_bh_migration},
+        {"true-critical-guard",true_critical_guard},{"actual-CSB-uncore-fallback",csb_fallback},
+        {"parallel-native-owner",concurrent_owner},{"recursion-and-spin",recursion_and_trylock},
+        {"BH-bounds",bh_bounds}};
+    for(auto &c:cases) { c.second();std::printf("PASS %s\n",c.first); }
+    std::puts("Actual native mutex/BH/critical/CSB contracts passed; native primitives/MMIO modeled; no GPU executed.");
+}

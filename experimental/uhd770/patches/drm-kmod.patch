@@ -400,3 +400,39 @@
  	return test_bit(TASKLET_STATE_SCHED, &t->state);
  #elif defined(__FreeBSD__)
  	return t->tasklet_state == 3;	/* BSDFIXME: Check if it's correct to use TASKLET_ST_LOOP */
+--- a/drivers/gpu/drm/i915/gt/intel_execlists_submission.c
++++ b/drivers/gpu/drm/i915/gt/intel_execlists_submission.c
+@@ -1749,6 +1749,7 @@
+ wa_csb_read(const struct intel_engine_cs *engine, u64 * const csb)
+ {
+ 	u64 entry;
++	int stale;
+ 
+ 	/*
+ 	 * Reading from the HWSP has one particular advantage: we can detect
+@@ -1760,7 +1761,14 @@
+ 	 * tgl,dg1:HSDES#22011327657
+ 	 */
+ 	preempt_disable();
+-	if (wait_for_atomic_us((entry = READ_ONCE(*csb)) != -1, 10)) {
++	stale = wait_for_atomic_us((entry = READ_ONCE(*csb)) != -1, 10);
++#ifdef NMXKPI
++    /* Darwin implements this short CPU-critical poll by masking interrupts.
++     * The fallback's real uncore mutex may block, so leave the CPU critical
++     * section before taking it. Keep the stale-entry test and MMIO fallback. */
++    preempt_enable();
++#endif
++	if (stale) {
+ 		int idx = csb - engine->execlists.csb_status;
+ 		int status;
+ 
+@@ -1774,7 +1782,9 @@
+ 		entry = intel_uncore_read64(engine->uncore,
+ 					    _MMIO(engine->mmio_base + status));
+ 	}
++#ifndef NMXKPI
+ 	preempt_enable();
++#endif
+ 
+ 	return entry;
+ }

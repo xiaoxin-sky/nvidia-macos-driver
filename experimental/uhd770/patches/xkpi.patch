@@ -5011,9 +5011,174 @@
 +int nmx_tasklet_is_pending(const struct tasklet_struct *);
 +int nmx_tasklet_enable(struct tasklet_struct *);
 +#endif
+--- a/bsdcompat/src/nmx_kernel.c
++++ b/bsdcompat/src/nmx_kernel.c
+@@ -77,6 +77,7 @@
+ struct nmx_thread_rec {
+     struct thread td;               /* first member: a struct thread * is a struct nmx_thread_rec * */
+     struct nmx_thread_rec *next;
++    unsigned bh_depth;             /* current native thread only; survives CPU migration */
+     int transient;
+     volatile unsigned refs;          /* registry + each Linux task that refers to td */
+     int linked;                      /* zero after syscall/worker detaches the record */
+@@ -184,6 +185,7 @@
+     if (__atomic_sub_fetch(&r->refs, 1, __ATOMIC_ACQ_REL) != 0)
+         return;
+     KASSERT(!r->linked && r->td.td_lkpi_task == NULL, ("freeing a published thread record"));
++    KASSERT(r->bh_depth == 0, ("freeing a thread with active Linux BH scopes"));
+     thread_deallocate(r->td.td_xnu);
+     __atomic_sub_fetch(&nmx_detached_threads, 1, __ATOMIC_ACQ_REL);
+     __atomic_sub_fetch(&nmx_thread_count, 1, __ATOMIC_ACQ_REL);
+@@ -323,6 +325,39 @@
+     return found;
+ }
+ 
++/* LinuxKPI bottom halves are threaded on this port: PCI handlers are
++ * IOInterruptEventSource actions and tasklets run on taskqueue threads. They
++ * cannot asynchronously reenter the interrupted LinuxKPI stack. Native mutexes
++ * serialize shared state and the tasklet RUN state serializes each callback.
++ *
++ * FreeBSD's sched_pin only prohibits migration; mapping it to interrupt masking
++ * made a nested MTX_DEF acquisition sleep with interrupts off. These BH scopes
++ * instead keep balanced per-thread nesting across native mutex waits/migration.
++ * Tasklet queue selection captures one permanent worker pointer and locks it;
++ * it does not require the caller to remain on that CPU. This is deliberately
++ * separate from critical_enter: CPU-local/FPU sections still require that
++ * stronger exclusion. A future hard-ISR LinuxKPI entry needs its own adapter. */
++void nmx_linux_bh_disable(void)
++{
++    if (ml_at_interrupt_context())
++        panic("NullMoth xkpi: Linux BH entered from a hard interrupt");
++    struct nmx_thread_rec *r = (struct nmx_thread_rec *)nmx_curthread();
++    KASSERT(r->bh_depth != ~0U, ("Linux BH nesting overflow"));
++    ++r->bh_depth;
++}
++
++void nmx_linux_bh_enable(void)
++{
++    struct nmx_thread_rec *r = (struct nmx_thread_rec *)nmx_curthread();
++    KASSERT(r->bh_depth != 0, ("unbalanced Linux BH enable"));
++    --r->bh_depth;
++}
++
++unsigned nmx_linux_bh_depth(void)
++{
++    return ((struct nmx_thread_rec *)nmx_curthread())->bh_depth;
++}
++
+ /* ---- preemption and CPU ------------------------------------------------------------------------------------------- */
+ 
+ /*
+@@ -343,13 +378,20 @@
+ void nmx_critical_exit(void)
+ {
+     int c = cpu_number();
++    KASSERT(nmx_crit[c].nest > 0, ("unbalanced native critical exit"));
+     if (--nmx_crit[c].nest == 0)
+         ml_set_interrupts_enabled(nmx_crit[c].saved);
+ }
+ 
+ int nmx_in_critical(void)
+ {
+-    return (ml_at_interrupt_context() || nmx_crit[cpu_number()].nest > 0) ? 1 : 0;
++    /* Sample this CPU before migration can occur, and include a native spin
++     * mutex's IRQ-off scope even when it did not use critical_enter. Threaded
++     * Linux BH nesting intentionally remains a sleepable native context. */
++    boolean_t was = ml_set_interrupts_enabled(FALSE);
++    int critical = !was || ml_at_interrupt_context() || nmx_crit[cpu_number()].nest > 0;
++    ml_set_interrupts_enabled(was);
++    return critical;
+ }
+ 
+ int nmx_curcpu(void)
+--- a/bsdcompat/src/nmx_lock.c
++++ b/bsdcompat/src/nmx_lock.c
+@@ -33,6 +33,10 @@
+ 
+ /* ---- mutex -------------------------------------------------------------------------------------------------------- */
+ 
++/* Owner probes run before acquiring the native lock (recursion/trylock). Use
++ * atomic identity loads/stores; volatile alone does not make those concurrent
++ * accesses valid. The native mutex still supplies data acquire/release order. */
++
+ void mtx_init(struct mtx *m, const char *name, const char *type, int opts)
+ {
+     bzero(m, sizeof(*m));
+@@ -68,7 +72,7 @@
+ void nmx_mtx_lock(struct mtx *m)
+ {
+     mtx_check(m);
+-    if (m->mtx_owner == CUR_XNU) {
++    if (__atomic_load_n(&m->mtx_owner, __ATOMIC_RELAXED) == CUR_XNU) {
+         if (!(m->lock_object.lo_flags & LO_RECURSABLE))
+             panic("NullMoth xkpi: recursion on non-recursive mutex %s", m->lock_object.lo_name);
+         m->mtx_recurse++;
+@@ -81,13 +85,13 @@
+     } else {
+         lck_mtx_lock(m->mtx_lk);
+     }
+-    m->mtx_owner = CUR_XNU;
++    __atomic_store_n(&m->mtx_owner, CUR_XNU, __ATOMIC_RELAXED);
+ }
+ 
+ int nmx_mtx_trylock(struct mtx *m)
+ {
+     mtx_check(m);
+-    if (m->mtx_owner == CUR_XNU) {
++    if (__atomic_load_n(&m->mtx_owner, __ATOMIC_RELAXED) == CUR_XNU) {
+         if (!(m->lock_object.lo_flags & LO_RECURSABLE))
+             return 0;
+         m->mtx_recurse++;
+@@ -103,7 +107,7 @@
+     } else if (!lck_mtx_try_lock(m->mtx_lk)) {
+         return 0;
+     }
+-    m->mtx_owner = CUR_XNU;
++    __atomic_store_n(&m->mtx_owner, CUR_XNU, __ATOMIC_RELAXED);
+     return 1;
+ }
+ 
+@@ -114,7 +118,7 @@
+         m->mtx_recurse--;
+         return;
+     }
+-    m->mtx_owner = 0;
++    __atomic_store_n(&m->mtx_owner, 0, __ATOMIC_RELAXED);
+     if (m->lock_object.lo_class == NMX_LC_SPIN) {
+         boolean_t was = (boolean_t)m->mtx_saved_intr;
+         lck_spin_unlock(m->mtx_lk);
+@@ -126,12 +130,12 @@
+ 
+ int nmx_mtx_owned(const struct mtx *m)
+ {
+-    return m->mtx_owner == CUR_XNU;
++    return __atomic_load_n(&m->mtx_owner, __ATOMIC_RELAXED) == CUR_XNU;
+ }
+ 
+ int nmx_mtx_recursed(const struct mtx *m)
+ {
+-    return m->mtx_owner == CUR_XNU && m->mtx_recurse > 0;
++    return __atomic_load_n(&m->mtx_owner, __ATOMIC_RELAXED) == CUR_XNU && m->mtx_recurse > 0;
+ }
+ 
+ void nmx_mtx_assert(const struct mtx *m, int what, const char *file, int line)
+--- a/bsdcompat/include/sys/sched.h
++++ b/bsdcompat/include/sys/sched.h
+@@ -8,6 +8,11 @@
+ #define critical_enter() nmx_critical_enter()
+ #define critical_exit() nmx_critical_exit()
+ int nmx_in_critical(void);
++/* Threaded LinuxKPI BH nesting; no CPU pin or native interrupt masking.
++ * Shared data still requires its LinuxKPI/native lock. Not a hard-ISR API. */
++void nmx_linux_bh_disable(void);
++void nmx_linux_bh_enable(void);
++unsigned nmx_linux_bh_depth(void);
+ void sched_pin(void);
+ void sched_unpin(void);
+ void sched_prio(struct thread *td, u_char prio);
 --- /dev/null
 +++ b/override/src/linux_tasklet.c
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,384 @@
 +/*-
 + * Copyright (c) 2017 Hans Petter Selasky
 + * All rights reserved.
@@ -5066,8 +5231,9 @@
 + * cannot disappear at tasklet_unlock. i915_tasklet.h uses the queries below
 + * rather than assuming FreeBSD's numeric states match Linux's state bits.
 + *
-+ * This does not change the port's BH/preemption policy. That lower contract
-+ * must be audited independently before target execution is requested. */
++ * BH nesting uses the threaded adapter in nmx_kernel.c; it does not keep
++ * interrupts masked while acquiring these worker/taskqueue mutexes. Native
++ * critical/FPU sections retain their independent CPU exclusion. */
 +
 +#define	TASKLET_ST_CMPSET(ts, old, new)	\
 +	atomic_cmpset_int((volatile u_int *)&(ts)->tasklet_state, old, new)
@@ -5273,13 +5439,13 @@
 +void
 +local_bh_enable(void)
 +{
-+	sched_unpin();
++	nmx_linux_bh_enable();
 +}
 +
 +void
 +local_bh_disable(void)
 +{
-+	sched_pin();
++	nmx_linux_bh_disable();
 +}
 +
 +void

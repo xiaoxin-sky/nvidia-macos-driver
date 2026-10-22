@@ -181,6 +181,21 @@ jobs:
             2>&1 | tee /tmp/nmx-tasklet-tsan-compile.log
           python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-tasklet-tsan"], timeout=60, check=True)' \
             2>&1 | tee /tmp/nmx-tasklet-tsan.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_native_lock_fixture.py" \
+            --port "$X" --freebsd "$S/kpi/freebsd-src" --drm "$S/kpi/drm-kmod" \
+            --template "$GITHUB_WORKSPACE/experimental/uhd770/tests/native_lock_fixture.cpp.in" \
+            --output /tmp/nmx-native-lock-test.cpp
+          c++ -std=c++17 -pthread -Wall -Wextra -Werror -Wno-unused-parameter \
+            -Wno-unused-function -Wno-sign-compare /tmp/nmx-native-lock-test.cpp -o /tmp/nmx-native-lock-test \
+            2>&1 | tee /tmp/nmx-native-lock-compile.log
+          python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-native-lock-test"], timeout=60, check=True)' \
+            2>&1 | tee /tmp/nmx-native-lock-test.log
+          c++ -std=c++17 -pthread -g -O1 -fsanitize=thread -Wall -Wextra -Werror \
+            -Wno-unused-parameter -Wno-unused-function -Wno-sign-compare \
+            /tmp/nmx-native-lock-test.cpp -o /tmp/nmx-native-lock-tsan \
+            2>&1 | tee /tmp/nmx-native-lock-tsan-compile.log
+          python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-native-lock-tsan"], timeout=60, check=True)' \
+            2>&1 | tee /tmp/nmx-native-lock-tsan.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_fb_start_fixture.py" \
             "$X/xnu/nmx_fb.cpp" "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_start_fixture.cpp.in" \
             /tmp/nmx-fb-start-test.cpp
@@ -381,6 +396,7 @@ jobs:
           cp /tmp/nmx-thread-test.cpp /tmp/nmx-thread-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-thread-compile.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-tasklet-test.cpp /tmp/nmx-tasklet*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-native-lock-test.cpp /tmp/nmx-native-lock*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-fb-start-test.cpp /tmp/nmx-fb-start-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-runtime-pm-test.c /tmp/nmx-runtime-pm-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/amd.flags" "$GITHUB_WORKSPACE/out/logs/amd.flags" 2>/dev/null || true
