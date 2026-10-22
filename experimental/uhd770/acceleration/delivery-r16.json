@@ -214,6 +214,31 @@
       "exit 2 with FAIL lines": "probe failed after starting; the last printed stage names the edge",
       "exit 0 with COMPUTE_READBACK_VERIFIED": "the compute/readback acceptance for this stage is met, subject to the system showing no panic/hang",
       "empty probe.log": "a kernel-level event interrupted the probe; judge from the panic backtrace and kernel-stream.txt"
+    },
+    "tool_surfaces": [
+      "manual session gpu_started and coordinator_exit",
+      "probe evidence phase/uid/macOS and the loaded kext UUID",
+      "the probe's first lines, its FAIL and mismatch lines",
+      "the port's own NMX DRM discovery lines, which say whether any DRM node could be opened",
+      "Vulkan loader severity=0x1000 errors",
+      "panic headline, panicked task and the first frames"
+    ],
+    "discovery_signature_20261021": {
+      "lines": [
+        "NMX DRM discovery path=/dev/dri/renderD128 stage=open result=-19 type=0 index=0 bdf=0000:00:00.0 pci=0000:0000",
+        "NMX DRM discovery path=/dev/dri/card0 stage=open result=-13 type=0 index=0 bdf=0000:00:00.0 pci=0000:0000",
+        "NMX DRM discovery devices=0 nodes=0",
+        "Vulkan Loader ERROR: setup_loader_term_phys_devs: Failed to detect any valid GPUs in the current config",
+        "FAIL: enumerate physical count: VkResult=-3"
+      ],
+      "decoded": {
+        "renderD128 open": "-19 is ENODEV: the render node exists but opening it failed inside the driver, not on permissions",
+        "card0 open": "-13 is EACCES: the primary node is intentionally root only (nmx_drm_os.c creates primary nodes 0600 and render/accel nodes 0666), and the probe runs as the ordinary user",
+        "bdf/pci 0000:0000": "no PCI identity was recovered for either node in that build",
+        "net effect": "the Vulkan loader found zero physical devices and returned VK_ERROR_INITIALIZATION_FAILED (-3), so no Vulkan device, submission, fence wait or readback happened at all"
+      },
+      "what_it_reframes": "the last target failure was not a compute or completion failure: the MVP is blocked at DRM node discovery/open, upstream of every step T2 to T7 reviewed",
+      "what_changed_afterwards": "the opened-fd identity and cross-node/minor identity work landed after those runs, so r16 may open the node; if the same -19 reappears the next step is the node open path, not compute"
     }
   }
 }
