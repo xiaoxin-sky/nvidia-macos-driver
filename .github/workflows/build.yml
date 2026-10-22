@@ -164,7 +164,8 @@ jobs:
             --port "$X" --template "$GITHUB_WORKSPACE/experimental/uhd770/tests/thread_lifetime.cpp.in" \
             --output /tmp/nmx-thread-test.cpp
           c++ -std=c++17 -Wall -Wextra -Werror -Wno-unused-parameter -pthread \
-            /tmp/nmx-thread-test.cpp -o /tmp/nmx-thread-test
+            /tmp/nmx-thread-test.cpp -o /tmp/nmx-thread-test \
+            2>&1 | tee /tmp/nmx-thread-compile.log
           /tmp/nmx-thread-test | tee /tmp/nmx-thread-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_fb_start_fixture.py" \
             "$X/xnu/nmx_fb.cpp" "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_start_fixture.cpp.in" \
@@ -364,6 +365,7 @@ jobs:
           cp /tmp/nmx-mm-fixture/mm-test.c "$GITHUB_WORKSPACE/out/logs/nmx-mm-test.c" 2>/dev/null || true
           cp /tmp/nmx-mm-fixture/native-mm-test.cpp "$GITHUB_WORKSPACE/out/logs/nmx-native-mm-test.cpp" 2>/dev/null || true
           cp /tmp/nmx-thread-test.cpp /tmp/nmx-thread-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-thread-compile.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-fb-start-test.cpp /tmp/nmx-fb-start-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-runtime-pm-test.c /tmp/nmx-runtime-pm-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/amd.flags" "$GITHUB_WORKSPACE/out/logs/amd.flags" 2>/dev/null || true
