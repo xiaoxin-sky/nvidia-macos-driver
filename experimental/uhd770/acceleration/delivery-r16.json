@@ -82,5 +82,15 @@
   "acceptance_for_this_package": {
     "success": "in one macOS session on the target: 8086:4680 with the recorded binaries, GPU executes the varying workloads, every output word compares, COMPUTE_READBACK_VERIFIED is printed before teardown, the process exits 0 and the system shows no panic, hang or GPU timeout",
     "failure": "collect the session report folder; the last recorded stage names the failing edge, and another package is prepared only after that edge is traced in source"
+  },
+  "recovery_entry_check": {
+    "checked_on": "2026-10-22",
+    "booting_efi_config_sha256": "22a185d96105258fc24b0d0ca842206dc36fc885fbb8b7d0559e58bf1ae2f6f9",
+    "booting_efi_boot_args_contain_nvoff": true,
+    "package_config_safe_equals_booting_efi": true,
+    "package_config_test_enables_driver": true,
+    "reference_optout_config_contains_nvoff": true,
+    "finding": "the machine currently boots with -nvoff, so the driver is disabled by the live boot configuration; the package's config.safe.plist is byte identical to that live config, config.test.plist drops -nvoff to enable the driver, and reference-efi/config.optout-reference.plist keeps a no-GPU reference for recovery. The delivery itself modified no boot file.",
+    "limits": "this verifies the files, not that OpenCore selects them on the next boot; only the target boot can show which configuration was actually applied"
   }
 }
