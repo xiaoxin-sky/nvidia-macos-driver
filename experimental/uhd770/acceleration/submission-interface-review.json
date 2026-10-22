@@ -48,10 +48,11 @@
       "edge": "execlists context descriptor -> RING_EXECLIST_SQ_CONTENTS / RING_EXECLIST_CONTROL",
       "anchors": [
         "drm: drivers/gpu/drm/i915/gt/intel_execlists_submission.c:3554-3566 HAS_LOGICAL_RING_ELSQ selects submit_reg = RING_EXECLIST_SQ_CONTENTS and ctrl_reg = RING_EXECLIST_CONTROL, and derives engine->fw_domain from the control register write domain",
+        "drm: drivers/gpu/drm/i915/i915_pci.c:674-680 adl_s_info is GEN12_FEATURES; that set carries .has_logical_ring_elsq = 1 (i915_pci.c:709) and .has_llc = 1 (i915_pci.c:707), and the platform sets .dma_mask_size = 39",
         "drm: gt/intel_execlists_submission.c:719-728 write_desc: with ctrl_reg, low word at submit_reg + port*2 and high word at +1; without it, high word then low word to submit_reg",
         "drm: gt/intel_execlists_submission.c:901-935 execlists_submit_ports writes one descriptor per pending port and then writel(EL_CTRL_LOAD, ctrl_reg)"
       ],
-      "contract": "Gen12/ADL has ELSQ, so submission is two 32-bit writes per port into the submit-queue contents followed by an explicit EL_CTRL_LOAD control write, under the forcewake domain that write needs (taken at gt/intel_execlists_submission.c:513-514). On this port both register types are uncached mappings, so the descriptor pair and the load write reach the device in program order without an extra fence.",
+      "contract": "Alder Lake-S is GEN12_FEATURES with has_logical_ring_elsq set, so submission is two 32-bit writes per port into the submit-queue contents followed by an explicit EL_CTRL_LOAD control write, under the forcewake domain that write needs (taken at gt/intel_execlists_submission.c:513-514). On this port both register types are uncached mappings, so the descriptor pair and the load write reach the device in program order without an extra fence.",
       "classification": "verified-source"
     },
     {
@@ -59,10 +60,11 @@
       "edge": "context image store -> wmb() -> uncached ELSP descriptor write",
       "anchors": [
         "drm: gt/intel_execlists_submission.c:700-713 writes ce->lrc_reg_state[CTX_RING_TAIL] and calls wmb() with a comment that the WC context write may not reach the HW before the UC register write",
+        "drm: i915_pci.c:674-680 adl_s_info = GEN12_FEATURES, which sets .has_llc = 1 (i915_pci.c:707); intel_gt_coherent_map_type therefore selects the write-back map type when the object is not always_coherent",
         "port: machine/atomic.h:75 wmb() = sfence",
         "port: bsdcompat/src/nmx_page.c:687-692 the port records cache attributes on pages and states system memory stays cached in the kernel's own view"
       ],
-      "contract": "SFENCE flushes write-combining buffers and orders earlier stores, so the context image is published before the descriptor that names it. The remaining dependency is that a write-back context image is actually coherent to the GPU, which here rests on the shared LLC of an integrated part, not on PCIe snooping; that is a platform property this review cannot prove in software.",
+      "contract": "SFENCE flushes write-combining buffers and orders earlier stores, so the context image is published before the descriptor that names it. The remaining dependency is that a write-back context image is actually coherent to the GPU. For ADL-S that rests on the shared LLC, which is a device feature (has_llc = 1) and not a PCIe snooping property, and which software cannot demonstrate without the part.",
       "classification": "verified-source; the coherence half is target-only"
     },
     {
