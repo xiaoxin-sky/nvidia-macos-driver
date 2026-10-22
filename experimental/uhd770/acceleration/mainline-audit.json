@@ -204,18 +204,19 @@
         }
       },
       "ggtt_hwsp_contract": {
-        "status": "source-verified GGTT/HWSP address chain, ADL breadcrumb selection and cache-flush primitives; TLB effect and real completion unverified",
+        "status": "source-verified GGTT/HWSP address chain, ADL breadcrumb selection, cache-flush primitives and driver-side TLB invalidation; parent PDE/root, pin lifetime and all hardware effects unverified",
         "detail": "experimental/uhd770/acceleration/dma-interface-review.json ggtt_hwsp_contract",
         "verified": [
           "ADL-S (graphics 12, IP < 12.55) binds gen12_emit_fini_breadcrumb_rcs: PIPE_CONTROL with L3 flush, depth stall, TLB invalidate, then a global-GTT qword store",
           "hwsp_offset(rq) is a global GTT address, 8-byte aligned by assertion, and names the same in-page slot the CPU polls",
           "the CPU polls a hardcoded WB mapping; observation depends on the shared LLC (has_llc = 1)",
-          "drm_clflush_virt_range compiles the CONFIG_X86 branch and issues real clflushopt with mb() fences; line size is initialised, so the loop cannot be degenerate"
+          "drm_clflush_virt_range compiles the CONFIG_X86 branch and issues real clflushopt with mb() fences; line size is initialised, so the loop cannot be degenerate",
+          "driver-side TLB invalidation is upstream code with the Wa_2207587034 adl-s workaround, forcewake held only across the writes, and the 100us/4ms ACK waits taken after both locks are released"
         ],
         "open": [
-          "intel_tlb.c mmio_invalidate_full, forcewake and wait context",
           "parent PDE/root and ASSIGN_CTX_PML4 against real page-table objects",
           "GGTT pin lifetime for ring/context/HWSP across eviction",
+          "hardware TLB ACK inside the 100us/4ms windows (target only)",
           "GPU-side GTT lookup and seqno write (target only)"
         ],
         "hardware_executed": false

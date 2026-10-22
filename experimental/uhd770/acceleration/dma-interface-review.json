@@ -169,10 +169,20 @@
           "drm: gt/gen8_engine_cs.c:816-822 PIPE_CONTROL_TLB_INVALIDATE is part of the same flush before the seqno write"
         ],
         "finding": "The GPU invalidates its own TLB after the batch, so a stale PTE is not carried into the next submission by the GPU. The driver-side invalidation in intel_tlb.c is a separate path and is still open below."
+      },
+      {
+        "edge": "driver-side full TLB invalidation before a page-table change becomes visible",
+        "anchors": [
+          "drm: gt/intel_tlb.c:121-158 intel_gt_invalidate_tlb_full takes the GT runtime pm reference, serialises on gt->tlb.invalidate_lock and skips when a full invalidate seqno already passed",
+          "drm: gt/intel_tlb.c:49-111 mmio_invalidate_full holds FORCEWAKE_ALL, takes intel_gt_mcr_lock and uncore->lock only around the register writes, writes tlb_inv.request for each awake engine, applies Wa_2207587034 for adl-s by writing GEN12_OA_TLB_INV_CR = 1, releases both locks, and only then waits for completion",
+          "drm: gt/intel_tlb.c:30-47 the wait uses TLB_INVAL_TIMEOUT_US = 100 and TLB_INVAL_TIMEOUT_MS = 4 (intel_tlb.c:22-23), i.e. a 100us atomic poll then a 4ms sleepable wait, both below the 20000us assertion in intel_uncore.c:2738",
+          "drm: intel_engine_cs.c:1232-1243 tlb_inv.mcr is set only for the xehp register layout, so ADL takes the non-MCR path through __intel_wait_for_register_fw"
+        ],
+        "finding": "The ADL-S workaround is present and the ACK waits are performed after both locks are dropped, so the 4ms sleepable wait is legal (might_sleep_if in intel_uncore.c:2737). The port only supplies the surfaces this path uses: uncached MMIO (verified above), usleep_range (linuxkpi delay.h:82), the audited spinlock, and the delayed-work put for forcewake. Whether the hardware clears the invalidate bit inside those windows is the target-only half."
       }
     ],
     "open": [
-      "intel_tlb.c mmio_invalidate_full and its ADL workaround: forcewake, lock and wait context not yet read to the end; no evidence that the invalidation completes before the next PTE use",
+      "whether the hardware completes the invalidation within the 100us/4ms windows is target-only",
       "Parent PDE/root programming and the context root address (ASSIGN_CTX_PML4) still not traced against the actual allocated page-table objects",
       "GGTT pin lifetime for ring, context state and HWSP: pin/offset validity across eviction is not yet reviewed",
       "Whether the GPU actually performs the GTT lookup and writes the seqno is target-only"
