@@ -18,7 +18,9 @@
     ],
     "limits": "Mach wait primitives, allocator/registry, intrusive-list storage and MMIO are host models. The baseline canceller is only a failure escape and never an accepted pass. Native clang uses the original GNU trylock macro; Windows changes only that expression wrapper. No GPU is executed.",
     "hardware_executed": false,
-    "new_hardware_test_requested": false
+    "new_hardware_test_requested": false,
+    "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928",
+    "native_source": "6cdabda3b73e87d40fef91e897f1e831e953b4b5"
   },
   "next": [
     "Native compiler/TSan/memory/KC verification",

@@ -156,7 +156,8 @@
         ],
         "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nPASS actual DMA -> Gen12 PTE insertion across 4K/table/directory boundaries and 64K/2M/fallback branches\nActual Linux/BSD/native DMA and PTE consumer contracts passed; IOKit/allocator/S-G/hierarchy/cache-flush primitives modeled; no GPU executed.\n",
         "limits": "Flat S/G linkage, page-table hierarchy/allocation and cache flush services are models. Native GPU VA allocation, root PDE programming, TLB invalidation, actual CPU/GPU cache coherence and device execution are not proved. Encoder RO/LM flags are interface tests, not advertised ADL hardware features.",
-        "hardware_executed": false
+        "hardware_executed": false,
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39735584845"
       }
     },
     {
@@ -182,7 +183,8 @@
         ],
         "limits": "Mach wait primitives, allocator/registry, intrusive-list storage and MMIO are host models. The baseline canceller is only a failure escape and never an accepted pass. Native clang uses the original GNU trylock macro; Windows changes only that expression wrapper. No GPU is executed.",
         "hardware_executed": false,
-        "new_hardware_test_requested": false
+        "new_hardware_test_requested": false,
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928"
       },
       "PTE_consumer_review": "Actual Gen12 encoding and 4K/64K/2M insert consumers joined to mapped DMA output; host-passed, native pending; allocation, parent/root programming and actual GPU execution are separate."
     },
@@ -190,7 +192,7 @@
       "id": "completion",
       "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
       "status": "THREADED BH/NATIVE MUTEX/CSB, MONOTONIC CLOCK AND PCODE RETRY PASSED NATIVE MACOS CHECKS; real IRQ/fence pending",
-      "remaining": "Finish remaining critical/IRQ-work and real GPU request/breadcrumb/fence delivery, with target evidence still absent",
+      "remaining": "Verify current WW/CV extension; join real GPU identity/HWSP completion and breadcrumb/irq_work/fence/syncobj paths rather than infer completion from isolated queue/wait tests. Target IRQ/fence proof remains absent.",
       "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
       "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018",
       "next_review": "Complete remaining critical-scope transitive audit and actual GPU context/memory/submission/visibility/cleanup contracts; no hardware request merely for a passing build",
@@ -279,8 +281,10 @@
         ],
         "limits": "Mach wait primitives, allocator/registry, intrusive-list storage and MMIO are host models. The baseline canceller is only a failure escape and never an accepted pass. Native clang uses the original GNU trylock macro; Windows changes only that expression wrapper. No GPU is executed.",
         "hardware_executed": false,
-        "new_hardware_test_requested": false
-      }
+        "new_hardware_test_requested": false,
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928"
+      },
+      "next_transitive_route": "Native PCI IOInterruptEventSource -> nmx_bus intr_trampoline -> Linux irq handler -> gen11 GT identity decode -> execlists tasklet/breadcrumb irq_work -> dma_fence callback -> real syncobj wait/sleepqueue. Worker queues and lower waits have separate fixtures, but this joined GPU completion path is not yet verified."
     },
     {
       "id": "visibility",
@@ -361,7 +365,7 @@
         "staged_match": "all patched source text identical after CRLF/LF normalization"
       }
     },
-    "current_native_ci_status": "WW source 6cdabda run 39734727928 live at last verified observation; expanded DMA/PTE fixture awaiting native dispatch",
+    "current_native_ci_status": "WW run 39734727928 and expanded DMA/PTE run 39735584845 are live at the last API observations; do not replace them solely because a wait expires",
     "new_user_test_requested": false,
     "usb_package_changed": false,
     "kernel_clock": {
@@ -466,7 +470,8 @@
       ],
       "limits": "Mach wait primitives, allocator/registry, intrusive-list storage and MMIO are host models. The baseline canceller is only a failure escape and never an accepted pass. Native clang uses the original GNU trylock macro; Windows changes only that expression wrapper. No GPU is executed.",
       "hardware_executed": false,
-      "new_hardware_test_requested": false
+      "new_hardware_test_requested": false,
+      "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928"
     },
     "PTE_consumer": {
       "status": "joined DMA-to-PTE source fixture host-passed; native macOS/ASan/UBSan pending",
@@ -493,7 +498,8 @@
       ],
       "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nPASS actual DMA -> Gen12 PTE insertion across 4K/table/directory boundaries and 64K/2M/fallback branches\nActual Linux/BSD/native DMA and PTE consumer contracts passed; IOKit/allocator/S-G/hierarchy/cache-flush primitives modeled; no GPU executed.\n",
       "limits": "Flat S/G linkage, page-table hierarchy/allocation and cache flush services are models. Native GPU VA allocation, root PDE programming, TLB invalidation, actual CPU/GPU cache coherence and device execution are not proved. Encoder RO/LM flags are interface tests, not advertised ADL hardware features.",
-      "hardware_executed": false
+      "hardware_executed": false,
+      "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39735584845"
     }
   }
 }

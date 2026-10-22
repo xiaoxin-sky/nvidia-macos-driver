@@ -59,7 +59,9 @@
     ],
     "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nPASS actual DMA -> Gen12 PTE insertion across 4K/table/directory boundaries and 64K/2M/fallback branches\nActual Linux/BSD/native DMA and PTE consumer contracts passed; IOKit/allocator/S-G/hierarchy/cache-flush primitives modeled; no GPU executed.\n",
     "limits": "Flat S/G linkage, page-table hierarchy/allocation and cache flush services are models. Native GPU VA allocation, root PDE programming, TLB invalidation, actual CPU/GPU cache coherence and device execution are not proved. Encoder RO/LM flags are interface tests, not advertised ADL hardware features.",
-    "hardware_executed": false
+    "hardware_executed": false,
+    "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39735584845",
+    "native_source": "98ce2cb8640919a19678c985854767f0ea25171d"
   },
   "source_trace_update": "i915 page-table backing alloc_pt_dma -> i915_gem_object_create_internal -> i915_gem_object_get_pages_internal -> i915_gem_gtt_prepare_pages uses the same S/G DMA path, rather than necessarily the separate scalar pctrie mapping path. Root allocation/map_pt_dma and actual GPU page-table visibility remain review requirements."
 }
