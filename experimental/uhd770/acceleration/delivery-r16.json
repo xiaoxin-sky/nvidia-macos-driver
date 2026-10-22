@@ -277,5 +277,22 @@
       ],
       "efi_after_this_update": "22a185d96105258fc24b0d0ca842206dc36fc885fbb8b7d0559e58bf1ae2f6f9 (unchanged)"
     }
+  },
+  "boot_flag_delivery_check": {
+    "question": "does the test boot actually receive nmxintel=1, or can NVRAM keep an older -nvoff",
+    "how_boot_args_reach_the_kernel": "OpenCore writes NVRAM under 7C436110-AB2A-4BBB-A880-FE41995C9F82. Its own log shows it comparing the existing value with the config value ('Not deleting NVRAM ... matches add', then 'ignored, exists'), which only happens because the config carries a Delete entry for boot-args",
+    "verified_in_both_configs": {
+      "delete_entry": [
+        "ForceDisplayRotationInEFI",
+        "csr-active-config",
+        "boot-args"
+      ],
+      "write_flash": true,
+      "safe_add": "-v debug=0x100 keepsyms=1 -igfxvesa alcid=11 amfi=0x80 ipc_control_port_options=0 -nvoff",
+      "test_add": "-v debug=0x100 keepsyms=1 -igfxvesa alcid=11 amfi=0x80 ipc_control_port_options=0 nmxintel=1 nmxdiagdelay=180"
+    },
+    "conclusion": "because boot-args is deleted and re-added with WriteFlash, switching the USB to the test config replaces the NVRAM value rather than being ignored, so the test boot should see nmxintel=1 and no -nvoff",
+    "why_it_mattered": "had the Delete entry been missing, OpenCore would have kept the existing -nvoff and session-user.sh would have refused with 'This is not the prepared Intel test boot', wasting the hardware round",
+    "limit": "this is the configuration's intent; the boot that runs is the only proof, and the session refuses rather than proceeding wrong if it is missing"
   }
 }
