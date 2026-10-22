@@ -56,6 +56,10 @@ Required evidence
   real dispatch/permission logic around an inert query-layout handler. It checks
   native ABI sizes, nested user pointers, output direction and error propagation;
   it does not execute a real i915 command or validate GPU submission.
+  The joined mm fixture compiles actual Linux ownership and native task/copy/wire
+  code in separate C/C++ units and checks concurrent creators, cached-owner
+  replacement, foreign-worker cleanup and allocation/prepare failures. IOKit
+  descriptor/task primitives are host models; real GPU visibility is unproven.
 - Userland: final real-ANV/probe build marker, ANV mapping fixture, clock boundary
   fixture and native CLOCK_UPTIME_RAW versus mach_absolute_time comparison.
   Earlier userland artifacts without native_clock_smoke.txt are rejected.

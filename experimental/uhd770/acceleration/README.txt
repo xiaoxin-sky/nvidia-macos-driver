@@ -70,6 +70,16 @@ Linux schedule/wake + native adapter fixture checks early signals, wake-before-
 block, real host deadlines and cleanup. None of these checks establish a GPU
 submission or authorize another target reboot by themselves.
 
+Shared mm publication/acquire/final-detach uses its own mutex because this
+port's PROC_LOCK only refreshes signals. An allocation wrapper remembers the
+original owner for final release from another worker, and destroys mmap_sem.
+The native mm registry retains a Mach task and each lookup owns a separate
+reference; a wired range owns its descriptor and task through unwire. Native
+registration errors are returned before publication. A combined C/C++ fixture
+joins the real Linux and native implementations with host primitive models.
+Syscall thread-record teardown remains a separate unresolved audit item; these
+mm fixes do not make that teardown safe by themselves.
+
 The ordinary Metal buffer/texture/compute path uses ANV allocations. NMXAccel's
 inherited family GPUVA/VRAM callbacks still depend on NVIDIA RM and are not an
 Intel allocation implementation. Hardware resource pools, cross-process shared

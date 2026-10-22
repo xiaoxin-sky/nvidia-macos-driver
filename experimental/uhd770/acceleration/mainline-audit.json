@@ -36,13 +36,14 @@
     {
       "id": "memory",
       "route": "GEM create -> backing pages -> DMA/IOMMU -> PPGTT/GGTT -> NMX mmap -> IOKit user map",
-      "status": "REVIEW IN PROGRESS",
-      "remaining": "page pinning and mapping fixtures exist; task/process lifetime, multi-thread mm ownership and native mapping boundaries need deeper review",
+      "status": "SHARED MM/NATIVE TASK OWNERSHIP REPAIRED; joined native CI pending",
+      "remaining": "Validate combined native fixture and kernel linkage; complete DMA/GPU VA/visibility review and thread-record lifetime repair before a new hardware request",
       "source_findings": [
         "PROC_LOCK only refreshes signals, so process p_lkpi_mm publication/acquisition lacks its expected lock",
         "linux_mm_dtor clears current process mm rather than locating the original mm owner",
         "Native MmTask stores task_t without an explicit retained reference; lifecycle and reachability need verification before a repair"
-      ]
+      ],
+      "repair": "Dedicated mm publication mutex, original-owner wrapper/final lock destruction, retained Mach task per registry/lookup/wire and fallible registration before publication"
     },
     {
       "id": "submission",
@@ -68,12 +69,13 @@
       "id": "cleanup",
       "route": "fence/context/BO destruction -> user unmap -> final file/MM/task release -> RCU callbacks",
       "status": "REVIEW IN PROGRESS",
-      "remaining": "file final-drop repaired; native task reference retention and mm lifecycle require review",
+      "remaining": "Thread record/task_thread ownership and syscall entry/exit integration remain unresolved; do not wire the old cleanup hook blindly",
       "source_findings": [
         "Device cdev callbacks never invoke the documented nmx_thread_enter/nmx_thread_leave path",
         "Wiring that path blindly can free struct thread while a retained task_struct still points to task_thread",
         "mm final destruction does not explicitly destroy its allocated native mmap_sem sx lock"
-      ]
+      ],
+      "mm_repair": "Final mm destructor now clears the original owner cache under the mm mutex and destroys its native mmap_sem; native task lookup/wire holds explicit references"
     }
   ],
   "test_limit": "Existing fixtures are evidence only for their actual extracted code and exercised contracts. Kernel services or hardware replaced by host mocks are not verified by those mocks.",

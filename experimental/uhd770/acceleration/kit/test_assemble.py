@@ -68,6 +68,7 @@ def fixtures(root, missing_clock=False, missing_changing_lookup=False):
         "logs/nmx-rcu-test.log": "NMX Darwin RCU: actual CK multiprocessor epochs, nested/migrating readers, grace periods, callbacks, wrap and IRQ-safe registry passed\n",
         "logs/nmx-sleep-test.log": "NMX fence wait chain: actual Linux schedule/wake and XNU adapter, IRQ reentry ordering, early signals, deadlines and cleanup passed\n",
         "logs/nmx-ioctl-test.log": "NMX ioctl chain: actual LinuxKPI transport and DRM dispatch, native ABI, nested copies, sizes, permissions and errors passed\n",
+        "logs/nmx-mm-test.log": "NMX mm/task lifecycle: actual Linux ownership joined to native task registry, concurrent creation, owner replacement, copy/wire references and failure cleanup passed\n",
         "logs/nmx-fb-start-test.log": "NMX framebuffer start identity/order/failure tests passed\n",
         "logs/nmx-fb-bridge-test.log": "Framebuffer bridge fixture passed: native activation\n",
         "logs/nmx-runtime-pm-test.log": "NMX runtime-PM policy: actual i915 conditional wakerefs retained; no GPU power test\n",
@@ -122,6 +123,7 @@ class AssemblerTests(unittest.TestCase):
                                    ("kernel", "logs/nmx-rcu-test.log"),
                                    ("kernel", "logs/nmx-sleep-test.log"),
                                    ("kernel", "logs/nmx-ioctl-test.log"),
+                                   ("kernel", "logs/nmx-mm-test.log"),
                                    ("kernel", "logs/nmx-runtime-pm-test.log"),
                                    ("userland", "logs/nmx-node-test.txt")):
             with self.subTest(component=component), tempfile.TemporaryDirectory() as temporary:

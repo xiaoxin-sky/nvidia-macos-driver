@@ -1,0 +1,155 @@
+/* Actual Linux shared-mm construction/destruction joined to the actual native
+ * MmTask registry in native_mm_lifetime.cpp.in. Primitive services are modeled;
+ * no GPU or native kernel task is accessed. */
+#include <assert.h>
+#include <errno.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#ifndef __unused
+#define __unused __attribute__((unused))
+#endif
+#define MPASS(v) assert(v)
+#ifndef __predict_false
+#define __predict_false(v) (v)
+#endif
+#define M_WAITOK 1
+#define M_NOWAIT 2
+#define M_USE_RESERVE 4
+#define M_ZERO 8
+#define TDP_ITHREAD 1
+#define THREAD_CAN_SLEEP() true
+#define TASK_RUNNING 0
+#define UMA_ALIGN_PTR 0
+#define atomic_thread_fence_seq_cst() atomic_thread_fence(memory_order_seq_cst)
+typedef struct { atomic_int value; } atomic_t;
+static void atomic_set(atomic_t *a,int v) { atomic_store(&a->value,v); }
+static void atomic_inc(atomic_t *a) { atomic_fetch_add(&a->value,1); }
+static bool atomic_dec_and_test(atomic_t *a) { int old=atomic_fetch_sub(&a->value,1); assert(old>0); return old==1; }
+static bool atomic_inc_not_zero(atomic_t *a)
+{ int n=atomic_load(&a->value); while(n && !atomic_compare_exchange_weak(&a->value,&n,n+1)){} return n!=0; }
+struct mtx { pthread_mutex_t native; };
+static void mtx_lock(struct mtx *m) { assert(!pthread_mutex_lock(&m->native)); }
+static void mtx_unlock(struct mtx *m) { assert(!pthread_mutex_unlock(&m->native)); }
+static struct mtx nmx_mm_mutex={PTHREAD_MUTEX_INITIALIZER};
+static atomic_uint rw_live;
+struct sx { bool initialized; };
+struct rw_semaphore { struct sx sx; };
+static void init_rwsem(struct rw_semaphore *r) { assert(!r->sx.initialized); r->sx.initialized=true; atomic_fetch_add(&rw_live,1); }
+static void sx_destroy(struct sx *s) { assert(s->initialized); s->initialized=false; assert(atomic_fetch_sub(&rw_live,1)>0); }
+struct mm_struct { atomic_t mm_count, mm_users; struct rw_semaphore mmap_sem; };
+struct proc { int pid; void *p_lkpi_mm; };
+struct task_struct;
+struct thread { struct proc *td_proc; struct task_struct *td_lkpi_task; int td_pflags,td_tid; char td_name[32]; };
+struct completion { unsigned done; };
+#define init_completion(c) ((c)->done=0)
+struct task_struct {
+    struct thread *task_thread; struct mm_struct *mm;
+    const char *comm; int pid;
+    struct task_struct *group_leader;
+    atomic_t kthread_flags,usage,state;
+    struct completion parked,exited;
+};
+struct zone { size_t size; atomic_uint live; };
+typedef struct zone *uma_zone_t;
+static uma_zone_t linux_current_zone,linux_mm_zone;
+static _Thread_local uma_zone_t fail_zone;
+static uma_zone_t uma_zcreate(const char *name,size_t size,void *a,void *b,void *c,void *d,int align,int flags)
+{ (void)name;(void)a;(void)b;(void)c;(void)d;(void)align;(void)flags;struct zone *z=calloc(1,sizeof(*z));assert(z);z->size=size;return z; }
+static void *uma_zalloc(uma_zone_t z,int flags)
+{ (void)flags;if(z==fail_zone){fail_zone=NULL;return NULL;}void *p=calloc(1,z->size);assert(p);atomic_fetch_add(&z->live,1);return p; }
+static void uma_zfree(uma_zone_t z,void *p)
+{ if(p){assert(atomic_fetch_sub(&z->live,1)>0);free(p);} }
+static void (*nmx_thread_release_hook)(struct thread *);
+static int (*lkpi_alloc_current)(struct thread *,int);
+void linux_mm_dtor(struct mm_struct *);
+void linux_free_current(struct task_struct *);
+int nmx_xnu_mm_note_task(void *);
+int nmx_xnu_mm_matches_current(void *);
+void nmx_xnu_mm_forget(void *);
+void test_set_task(unsigned);
+unsigned test_task_refs(unsigned);
+void test_fail_native_new(void);
+void test_native_mm_suite(void);
+
+/* NMX_ACTUAL_MM_IMPLEMENTATION */
+
+static void clean(struct proc *p)
+{
+    assert(!p->p_lkpi_mm && !atomic_load(&linux_current_zone->live) &&
+           !atomic_load(&linux_mm_zone->live) && !atomic_load(&rw_live));
+    for(unsigned i=0;i<4;++i)assert(test_task_refs(i)==1);
+}
+static atomic_uint ready,release_threads;
+static void *create_concurrently(void *arg)
+{
+    struct proc *p=arg;struct thread td={.td_proc=p};
+    test_set_task(1);assert(!linux_alloc_current(&td,M_WAITOK));
+    atomic_fetch_add(&ready,1);
+    while(!atomic_load(&release_threads))sched_yield();
+    test_set_task(3); /* final release may run outside the creating task */
+    linuxkpi_thread_dtor_hook(&td);return NULL;
+}
+int main(void)
+{
+    alarm(25);
+    test_native_mm_suite();
+    linux_current_init(NULL);
+    assert(nmx_thread_release_hook==linuxkpi_thread_dtor_hook && lkpi_alloc_current==linux_alloc_current);
+    struct proc owner={.pid=11};struct thread first={.td_proc=&owner},second={.td_proc=&owner};
+    test_set_task(1);
+    assert(!linux_alloc_current(&first,M_WAITOK));
+    struct mm_struct *original=first.td_lkpi_task->mm;
+    assert(!linux_alloc_current(&second,M_WAITOK) && second.td_lkpi_task->mm==original);
+    assert(atomic_load(&original->mm_users.value)==2 && test_task_refs(1)==2);
+    assert(mmget_not_zero(original));mmput(original);
+    struct mm_struct *held=linux_get_task_mm(first.td_lkpi_task);
+    assert(held==original && atomic_load(&held->mm_users.value)==3);mmput(held);
+    linuxkpi_thread_dtor_hook(&first);
+    test_set_task(3);linuxkpi_thread_dtor_hook(&second);clean(&owner);
+
+    /* A cache with zero mm_users may be replaced while mm_count still keeps
+     * its old allocation alive. Dropping old mm_count must not clear new mm. */
+    test_set_task(1);assert(!linux_alloc_current(&first,M_WAITOK));original=first.td_lkpi_task->mm;
+    mmgrab(original);linuxkpi_thread_dtor_hook(&first);
+    assert(atomic_load(&original->mm_users.value)==0 && owner.p_lkpi_mm==original);
+    assert(!linux_alloc_current(&second,M_WAITOK));
+    struct mm_struct *replacement=second.td_lkpi_task->mm;assert(replacement!=original);
+    test_set_task(3);mmdrop(original);assert(owner.p_lkpi_mm==replacement);
+    linuxkpi_thread_dtor_hook(&second);clean(&owner);
+
+    test_set_task(1);assert(!linux_alloc_current(&first,M_WAITOK));
+    struct task_struct *retained=first.td_lkpi_task;get_task_struct(retained);
+    linuxkpi_thread_dtor_hook(&first);assert(owner.p_lkpi_mm==retained->mm);
+    test_set_task(3);put_task_struct(retained);clean(&owner);
+
+    /* Reusing a native process key must not reuse another task's address space. */
+    test_set_task(1);assert(!linux_alloc_current(&first,M_WAITOK));original=first.td_lkpi_task->mm;
+    test_set_task(2);assert(!linux_alloc_current(&second,M_WAITOK));replacement=second.td_lkpi_task->mm;
+    assert(original!=replacement);linuxkpi_thread_dtor_hook(&first);assert(owner.p_lkpi_mm==replacement);
+    linuxkpi_thread_dtor_hook(&second);clean(&owner);
+
+    for(unsigned round=0;round<8;++round){
+        pthread_t workers[8];atomic_store(&ready,0);atomic_store(&release_threads,0);
+        for(unsigned i=0;i<8;++i)assert(!pthread_create(&workers[i],NULL,create_concurrently,&owner));
+        while(atomic_load(&ready)!=8)sched_yield();
+        assert(atomic_load(&((struct mm_struct *)owner.p_lkpi_mm)->mm_users.value)==8);
+        assert(atomic_load(&linux_mm_zone->live)==1 && test_task_refs(1)==2);
+        atomic_store(&release_threads,1);
+        for(unsigned i=0;i<8;++i)assert(!pthread_join(workers[i],NULL));clean(&owner);
+    }
+    test_set_task(1);
+    fail_zone=linux_current_zone;assert(linux_alloc_current(&first,M_WAITOK)==ENOMEM);clean(&owner);
+    fail_zone=linux_mm_zone;assert(linux_alloc_current(&first,M_WAITOK)==ENOMEM);clean(&owner);
+    test_fail_native_new();assert(linux_alloc_current(&first,M_WAITOK)==ENOMEM);assert(!first.td_lkpi_task);clean(&owner);
+    free(linux_current_zone);free(linux_mm_zone);
+    assert(!pthread_mutex_destroy(&nmx_mm_mutex.native));
+    puts("NMX mm/task lifecycle: actual Linux ownership joined to native task registry, concurrent creation, owner replacement, copy/wire references and failure cleanup passed; no GPU executed.");
+    return 0;
+}

@@ -1,0 +1,112 @@
+/* IOKit primitive model for the actual nmx_mm.cpp implementation. Descriptors
+ * deliberately do not retain task references, testing the adapter's explicit
+ * ownership. This never opens a real Mach task or GPU device. */
+#include <atomic>
+#include <cassert>
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <mutex>
+#include <new>
+#include <thread>
+
+struct Task { std::atomic<unsigned> refs{1}; unsigned char bytes[8192]{}; };
+using task_t=Task *;
+static Task tasks[4];
+static thread_local task_t selected=&tasks[0];
+static std::atomic<bool> fail_new{false},fail_lock{false};
+static std::atomic<int> descriptor_failure{0};
+static std::atomic<unsigned> objects{0},descriptors{0},prepared{0};
+static std::function<void()> prepare_hook;
+static task_t current_task(){return selected;}
+extern "C" void task_reference(task_t t){assert(t&&t->refs.fetch_add(1)>0);}
+extern "C" void task_deallocate(task_t t){assert(t&&t->refs.fetch_sub(1)>1);}
+extern "C" void test_set_task(unsigned i){assert(i<4);selected=&tasks[i];}
+extern "C" unsigned test_task_refs(unsigned i){return tasks[i].refs.load();}
+extern "C" void test_fail_native_new(){fail_new=true;}
+using IOLock=std::mutex;
+static IOLock *IOLockAlloc(){return fail_lock.exchange(false)?nullptr:new(std::nothrow) IOLock;}
+static void IOLockFree(IOLock *l){delete l;}
+static void IOLockLock(IOLock *l){assert(l);l->lock();}
+static void IOLockUnlock(IOLock *l){assert(l);l->unlock();}
+template<class T>static T *fixture_new(){if(fail_new.exchange(false))return nullptr;auto *p=new(std::nothrow) T;assert(p);++objects;return p;}
+template<class T>static void fixture_delete(T *p){assert(p&&objects.fetch_sub(1)>0);delete p;}
+#define IONew(T,n) fixture_new<T>()
+#define IODelete(p,T,n) fixture_delete(p)
+using IOByteCount=size_t;
+using mach_vm_address_t=uint64_t;
+using user_addr_t=uint64_t;
+using addr64_t=uint64_t;
+constexpr uint64_t PAGE_SIZE=4096,PAGE_MASK=4095;
+constexpr int kIODirectionOutIn=3,kIODirectionOut=2,kIOReturnSuccess=0,kIOMemoryMapperNone=0;
+static bool valid(user_addr_t a,size_t n){return a>=0x1000 && a-0x1000<=8192 && n<=8192-(a-0x1000);}
+static int copyin(user_addr_t a,void *b,size_t n){if(!valid(a,n))return EFAULT;std::memcpy(b,selected->bytes+(a-0x1000),n);return 0;}
+static int copyout(const void *b,user_addr_t a,size_t n){if(!valid(a,n))return EFAULT;std::memcpy(selected->bytes+(a-0x1000),b,n);return 0;}
+class IOMemoryDescriptor{
+    task_t owner;uint64_t address;size_t size;bool wired=false;
+public:
+    IOMemoryDescriptor(task_t t,uint64_t a,size_t n):owner(t),address(a),size(n){++descriptors;}
+    static IOMemoryDescriptor *withAddressRange(uint64_t a,size_t n,int direction,task_t t){
+        assert(t&&t->refs>1&&(direction==kIODirectionOutIn||direction==kIODirectionOut));
+        if(descriptor_failure==1)return nullptr;
+        return new IOMemoryDescriptor(t,a,n);
+    }
+    int prepare(){
+        assert(owner->refs>1&&!wired);
+        if(prepare_hook){auto h=std::move(prepare_hook);prepare_hook={};h();}
+        if(descriptor_failure==2||!valid(address,size))return 1;
+        wired=true;++prepared;return 0;
+    }
+    IOByteCount readBytes(size_t off,void *b,size_t n){assert(wired&&owner->refs>1&&off+n<=size);std::memcpy(b,owner->bytes+address-0x1000+off,n);return descriptor_failure==3?n-1:n;}
+    IOByteCount writeBytes(size_t off,const void *b,size_t n){assert(wired&&owner->refs>1&&off+n<=size);std::memcpy(owner->bytes+address-0x1000+off,b,n);return descriptor_failure==3?n-1:n;}
+    addr64_t getPhysicalSegment(size_t off,IOByteCount *length,int option){assert(wired&&owner->refs>1&&off<size&&option==0);*length=descriptor_failure==4?1:size-off;return 0x100000+off;}
+    void complete(){assert(wired&&prepared.fetch_sub(1)>0);wired=false;}
+    void release(){assert(!wired&&descriptors.fetch_sub(1)>0);delete this;}
+};
+
+/* NMX_ACTUAL_NATIVE_MM_IMPLEMENTATION */
+
+static void clean(){assert(!objects&&!descriptors&&!prepared&&gList==nullptr);for(auto &t:tasks)assert(t.refs==1);}
+extern "C" void test_native_mm_suite()
+{
+    int key=0;
+    test_set_task(1);
+    fail_lock=true;assert(nmx_xnu_mm_note_task(&key)==ENOMEM);clean();
+    fail_new=true;assert(nmx_xnu_mm_note_task(&key)==ENOMEM);clean();
+    assert(!nmx_xnu_mm_note_task(&key)&&tasks[1].refs==2);
+    assert(nmx_xnu_mm_note_task(&key)==EEXIST&&tasks[1].refs==2);
+    assert(nmx_xnu_mm_matches_current(&key));
+    uint32_t input=0x1234,output=0;
+    assert(!nmx_xnu_mm_copy(&key,0x1000,&input,sizeof(input),1));
+    assert(!nmx_xnu_mm_copy(&key,0x1000,&output,sizeof(output),0)&&input==output);
+    test_set_task(2);assert(!nmx_xnu_mm_matches_current(&key));
+    for(int failure:{1,2,3}){
+        descriptor_failure=failure;
+        assert(nmx_xnu_mm_copy(&key,0x1000,&output,sizeof(output),0)==(failure==1?ENOMEM:EFAULT));
+        assert(tasks[1].refs==2&&!descriptors&&!prepared);
+    }
+    descriptor_failure=0;
+    /* Forget the registry entry after lookup but before native prepare. The
+     * actual operation must retain its own task reference throughout. */
+    prepare_hook=[&]{nmx_xnu_mm_forget(&key);assert(tasks[1].refs==2);};
+    std::thread copier([&]{test_set_task(2);assert(!nmx_xnu_mm_copy(&key,0x1000,&output,sizeof(output),0));});
+    copier.join();assert(output==input);clean();
+    assert(nmx_xnu_mm_copy(&key,0x1000,&output,sizeof(output),0)==EFAULT);
+    test_set_task(1);assert(!nmx_xnu_mm_note_task(&key));test_set_task(2);
+    uint64_t physical[2];void *handle=nullptr;
+    for(int failure:{1,2,4}){
+        descriptor_failure=failure;
+        assert(nmx_xnu_user_wire(&key,0x1000,2,1,physical,&handle)==(failure==1?ENOMEM:EFAULT));
+        assert(!handle&&tasks[1].refs==2&&!descriptors&&!prepared);
+    }
+    descriptor_failure=0;fail_new=true;
+    assert(nmx_xnu_user_wire(&key,0x1000,2,1,physical,&handle)==ENOMEM&&!handle&&tasks[1].refs==2);
+    assert(nmx_xnu_user_wire(&key,UINT64_MAX-PAGE_MASK,2,1,physical,&handle)==EINVAL);
+    assert(!nmx_xnu_user_wire(&key,0x1000,2,1,physical,&handle)&&handle&&tasks[1].refs==3);
+    nmx_xnu_mm_forget(&key);assert(tasks[1].refs==2);
+    nmx_xnu_user_unwire(handle);clean();
+    assert(!nmx_xnu_user_wire(nullptr,0x1000,1,0,physical,&handle)&&tasks[2].refs==2);
+    nmx_xnu_user_unwire(handle);clean();
+}

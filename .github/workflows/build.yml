@@ -152,6 +152,14 @@ jobs:
           cc -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter \
             /tmp/nmx-ioctl-test.c -o /tmp/nmx-ioctl-test
           /tmp/nmx-ioctl-test | tee /tmp/nmx-ioctl-test.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_mm_fixture.py" \
+            --port "$X" --freebsd "$S/kpi/freebsd-src" \
+            --templates "$GITHUB_WORKSPACE/experimental/uhd770/tests" --output /tmp/nmx-mm-fixture
+          cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -pthread \
+            -c /tmp/nmx-mm-fixture/mm-test.c -o /tmp/nmx-mm-test.o
+          c++ -std=c++17 -Wall -Wextra -Werror -pthread \
+            /tmp/nmx-mm-fixture/native-mm-test.cpp /tmp/nmx-mm-test.o -o /tmp/nmx-mm-test
+          /tmp/nmx-mm-test | tee /tmp/nmx-mm-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_fb_start_fixture.py" \
             "$X/xnu/nmx_fb.cpp" "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_start_fixture.cpp.in" \
             /tmp/nmx-fb-start-test.cpp
@@ -346,6 +354,9 @@ jobs:
           cp /tmp/nmx-rcu-fixture/rcu-test.c "$GITHUB_WORKSPACE/out/logs/nmx-rcu-test.c" 2>/dev/null || true
           cp /tmp/nmx-sleep-test.cpp /tmp/nmx-sleep-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-ioctl-test.c /tmp/nmx-ioctl-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-mm-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-mm-fixture/mm-test.c "$GITHUB_WORKSPACE/out/logs/nmx-mm-test.c" 2>/dev/null || true
+          cp /tmp/nmx-mm-fixture/native-mm-test.cpp "$GITHUB_WORKSPACE/out/logs/nmx-native-mm-test.cpp" 2>/dev/null || true
           cp /tmp/nmx-fb-start-test.cpp /tmp/nmx-fb-start-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-runtime-pm-test.c /tmp/nmx-runtime-pm-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/amd.flags" "$GITHUB_WORKSPACE/out/logs/amd.flags" 2>/dev/null || true

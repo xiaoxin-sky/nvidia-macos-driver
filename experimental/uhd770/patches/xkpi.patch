@@ -4119,3 +4119,475 @@
      return result_to_errno(wr);
  }
  
+--- a/override/src/linux_current.c
++++ b/override/src/linux_current.c
+@@ -40,6 +40,7 @@
+ #include <sys/kernel.h>
+ #include <sys/eventhandler.h>
+ #include <sys/malloc.h>
++#include <sys/mutex.h>
+ #include <sys/sysctl.h>
+ #include <vm/uma.h>
+ 
+@@ -51,8 +52,20 @@
+ static uma_zone_t linux_current_zone;
+ static uma_zone_t linux_mm_zone;
+ 
++/* p_lkpi_mm is a weak cache, not a reference. Serialize publication, acquire-
++ * if-live and final detachment with this mutex. PROC_LOCK in this port only
++ * refreshes signals, so it cannot protect this ownership protocol. */
++static struct mtx nmx_mm_mutex;
++MTX_SYSINIT(nmx_mm_mutex, &nmx_mm_mutex, "nmx shared mm", MTX_DEF);
++
++struct nmx_mm_owner {
++    struct mm_struct mm; /* first: Linux sees the normal pinned mm_struct ABI */
++    struct proc *owner;  /* port process records remain registered until unload */
++};
++
+ /* macOS port: the mm -> Mach task record (nmx_mm.cpp), declared here because this file sees no IOKit headers */
+-void nmx_xnu_mm_note_task(void *mm);
++int nmx_xnu_mm_note_task(void *mm);
++int nmx_xnu_mm_matches_current(void *mm);
+ void nmx_xnu_mm_forget(void *mm);
+ 
+ /*
+@@ -65,7 +78,10 @@
+ 	struct mm_struct *mm;
+ 
+ 	mm = p->p_lkpi_mm;
+-	if (mm != NULL && atomic_inc_not_zero(&mm->mm_users))
++	/* A native proc_t address may be reused after process exit. The retained
++	 * Mach task is the address-space identity, even if a registry key repeats. */
++	if (mm != NULL && nmx_xnu_mm_matches_current(mm) &&
++	    atomic_inc_not_zero(&mm->mm_users))
+ 		return (mm);
+ 	return (NULL);
+ }
+@@ -102,31 +118,37 @@
+ 
+ 	proc = td->td_proc;
+ 
+-	PROC_LOCK(proc);
++	mtx_lock(&nmx_mm_mutex);
+ 	mm_other = find_other_mm(proc);
+ 
+ 	/* use allocated mm_struct as a fallback */
+ 	if (mm_other == NULL) {
+-		PROC_UNLOCK(proc);
++		mtx_unlock(&nmx_mm_mutex);
+ 		mm = uma_zalloc(linux_mm_zone, flags | M_ZERO);
+ 		if (mm == NULL) {
+ 			uma_zfree(linux_current_zone, ts);
+ 			return (ENOMEM);
+ 		}
+ 
+-		PROC_LOCK(proc);
++		mtx_lock(&nmx_mm_mutex);
+ 		mm_other = find_other_mm(proc);
+ 		if (mm_other == NULL) {
+ 			/* setup new mm_struct */
+ 			init_rwsem(&mm->mmap_sem);
+ 			atomic_set(&mm->mm_count, 1);
+ 			atomic_set(&mm->mm_users, 1);
+-			/* set mm_struct pointer */
++			((struct nmx_mm_owner *)mm)->owner = proc;
++			/* Publish only after the native address-space reference exists. */
++			int err = nmx_xnu_mm_note_task(mm);
++			if (err != 0) {
++				mtx_unlock(&nmx_mm_mutex);
++				sx_destroy(&mm->mmap_sem.sx);
++				uma_zfree(linux_mm_zone, mm);
++				uma_zfree(linux_current_zone, ts);
++				return (err);
++			}
+ 			ts->mm = mm;
+-			/* macOS port: later threads of this process share it */
+ 			proc->p_lkpi_mm = mm;
+-			/* macOS port: remember the Mach task, for driver workers that copy to this process */
+-			nmx_xnu_mm_note_task(mm);
+ 			/* clear pointer to not free memory */
+ 			mm = NULL;
+ 		} else {
+@@ -138,7 +160,7 @@
+ 
+ 	/* store pointer to task struct */
+ 	td->td_lkpi_task = ts;
+-	PROC_UNLOCK(proc);
++	mtx_unlock(&nmx_mm_mutex);
+ 
+ 	/* free mm_struct pointer, if any */
+ 	uma_zfree(linux_mm_zone, mm);
+@@ -162,12 +184,14 @@
+ void
+ linux_mm_dtor(struct mm_struct *mm)
+ {
+-	/* macOS port: forget the process's shared mm before it goes */
+-	struct proc *p = curthread->td_proc;
+-
++	/* Final mmput/mmdrop may run on a worker from another process. */
++	struct proc *p = ((struct nmx_mm_owner *)mm)->owner;
++	mtx_lock(&nmx_mm_mutex);
+ 	if (p != NULL && p->p_lkpi_mm == mm)
+ 		p->p_lkpi_mm = NULL;
++	mtx_unlock(&nmx_mm_mutex);
+ 	nmx_xnu_mm_forget(mm);
++	sx_destroy(&mm->mmap_sem.sx);
+ 	uma_zfree(linux_mm_zone, mm);
+ }
+ 
+@@ -250,7 +274,7 @@
+ 	    sizeof(struct task_struct), NULL, NULL, NULL, NULL,
+ 	    UMA_ALIGN_PTR, 0);
+ 	linux_mm_zone = uma_zcreate("lkpimm",
+-	    sizeof(struct mm_struct), NULL, NULL, NULL, NULL,
++	    sizeof(struct nmx_mm_owner), NULL, NULL, NULL, NULL,
+ 	    UMA_ALIGN_PTR, 0);
+ 
+ 	atomic_thread_fence_seq_cst();
+--- a/xnu/nmx_mm.cpp
++++ b/xnu/nmx_mm.cpp
+@@ -1,11 +1,9 @@
+ /*
+- * Reading and writing another process's memory from a driver thread. Compiled with Apple's headers only.
+- *
+- * Linux drivers do this with kthread_use_mm() followed by copy_to_user(): the worker borrows the process's address
+- * space. xnu has no such borrowing for a kext, so the port remembers each mm's Mach task (recorded on the process's
+- * own thread when the mm is created) and copies through an IOMemoryDescriptor over the user range in that task,
+- * which wires the pages for the duration of the copy. When the caller is already that process, plain copyin/copyout
+- * is used.
++ * Linux mm -> retained Mach task, shared by native copy and page-wire calls.
++ * Publication owns one task reference. Each lookup obtains a separate reference
++ * under the registry mutex, so forget/process exit cannot invalidate an in-flight
++ * operation. A successful wire owns both its prepared descriptor and task until
++ * unwire. This file is compiled with Apple's types only.
+  */
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <IOKit/IOLib.h>
+@@ -13,132 +11,203 @@
+ #include <sys/systm.h>
+ #include "nmx_xnu.h"
+ 
++extern "C" {
++void task_reference(task_t task);
++void task_deallocate(task_t task);
++}
++
+ namespace {
+-struct MmTask {
+-    void *mm;
+-    task_t task;
+-    MmTask *next;
+-};
++struct MmTask { void *mm; task_t task; MmTask *next; };
++struct UserWire { IOMemoryDescriptor *descriptor; task_t task; };
+ MmTask *gList;
+ IOLock *gLock;
+ 
+ IOLock *lock()
+ {
+-    if (gLock == nullptr) {
+-        IOLock *l = IOLockAlloc();
+-        if (!OSCompareAndSwapPtr(nullptr, l, (void * volatile *)&gLock))
+-            IOLockFree(l);
+-    }
+-    return gLock;
+-}
+-
+-task_t find(void *mm)
+-{
+-    for (MmTask *e = gList; e != nullptr; e = e->next)
+-        if (e->mm == mm)
+-            return e->task;
+-    return nullptr;
+-}
+-}
+-
+-extern "C" void nmx_xnu_mm_note_task(void *mm)
+-{
+-    MmTask *e = IONew(MmTask, 1);
+-    if (e == nullptr)
+-        return;     /* the copy helpers then report EFAULT for this process: nothing is written blindly */
+-    e->mm = mm;
+-    e->task = current_task();
+-    IOLockLock(lock());
+-    e->next = gList;
+-    gList = e;
+-    IOLockUnlock(gLock);
++    IOLock *value = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE);
++    if (value != nullptr)
++        return value;
++    IOLock *created = IOLockAlloc();
++    if (created == nullptr)
++        return nullptr;
++    IOLock *expected = nullptr;
++    if (!__atomic_compare_exchange_n(&gLock, &expected, created, false,
++                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++        IOLockFree(created);
++        return expected;
++    }
++    return created;
++}
++
++task_t acquire_task(void *mm)
++{
++    IOLock *mutex = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE);
++    if (mutex == nullptr)
++        return nullptr;
++    task_t task = nullptr;
++    IOLockLock(mutex);
++    for (MmTask *e = gList; e != nullptr; e = e->next) {
++        if (e->mm == mm) {
++            task = e->task;
++            task_reference(task);
++            break;
++        }
++    }
++    IOLockUnlock(mutex);
++    return task;
++}
++}
++
++extern "C" int nmx_xnu_mm_note_task(void *mm)
++{
++    if (mm == nullptr)
++        return EINVAL;
++    IOLock *mutex = lock();
++    if (mutex == nullptr)
++        return ENOMEM;
++    MmTask *entry = IONew(MmTask, 1);
++    if (entry == nullptr)
++        return ENOMEM;
++    entry->mm = mm;
++    entry->task = current_task();
++    if (entry->task == nullptr) {
++        IODelete(entry, MmTask, 1);
++        return EFAULT;
++    }
++    task_reference(entry->task);
++    IOLockLock(mutex);
++    for (MmTask *e = gList; e != nullptr; e = e->next) {
++        if (e->mm == mm) {
++            IOLockUnlock(mutex);
++            task_deallocate(entry->task);
++            IODelete(entry, MmTask, 1);
++            return EEXIST;
++        }
++    }
++    entry->next = gList;
++    gList = entry;
++    IOLockUnlock(mutex);
++    return 0;
++}
++
++extern "C" int nmx_xnu_mm_matches_current(void *mm)
++{
++    task_t task = acquire_task(mm);
++    if (task == nullptr)
++        return 0;
++    int same = task == current_task();
++    task_deallocate(task);
++    return same;
+ }
+ 
+ extern "C" void nmx_xnu_mm_forget(void *mm)
+ {
+-    IOLockLock(lock());
+-    for (MmTask **pp = &gList; *pp != nullptr; pp = &(*pp)->next) {
+-        if ((*pp)->mm == mm) {
+-            MmTask *e = *pp;
+-            *pp = e->next;
+-            IOLockUnlock(gLock);
+-            IODelete(e, MmTask, 1);
+-            return;
+-        }
+-    }
+-    IOLockUnlock(gLock);
++    IOLock *mutex = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE);
++    if (mutex == nullptr)
++        return;
++    MmTask *removed = nullptr;
++    IOLockLock(mutex);
++    for (MmTask **p = &gList; *p != nullptr; p = &(*p)->next) {
++        if ((*p)->mm == mm) {
++            removed = *p;
++            *p = removed->next;
++            break;
++        }
++    }
++    IOLockUnlock(mutex);
++    if (removed != nullptr) {
++        task_deallocate(removed->task);
++        IODelete(removed, MmTask, 1);
++    }
+ }
+ 
+ extern "C" int nmx_xnu_mm_copy(void *mm, uint64_t uaddr, void *kbuf, size_t len, int to_user)
+ {
+     if (len == 0)
+         return 0;
+-    IOLockLock(lock());
+-    task_t task = find(mm);
+-    IOLockUnlock(gLock);
++    if (kbuf == nullptr || uaddr > UINT64_MAX - (len - 1))
++        return EFAULT;
++    task_t task = acquire_task(mm);
+     if (task == nullptr)
+         return EFAULT;
+-
+-    if (task == current_task())
+-        return to_user ? copyout(kbuf, (user_addr_t)uaddr, len) : copyin((user_addr_t)uaddr, kbuf, len);
+-
++    if (task == current_task()) {
++        int err = to_user ? copyout(kbuf, (user_addr_t)uaddr, len) : copyin((user_addr_t)uaddr, kbuf, len);
++        task_deallocate(task);
++        return err;
++    }
+     IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)uaddr, len,
+-                                                                  kIODirectionOutIn, task);
+-    if (md == nullptr)
+-        return ENOMEM;
+-    if (md->prepare() != kIOReturnSuccess) {
+-        md->release();
+-        return EFAULT;
+-    }
+-    IOByteCount done = to_user ? md->writeBytes(0, kbuf, len) : md->readBytes(0, kbuf, len);
+-    md->complete();
++                                                                kIODirectionOutIn, task);
++    if (md == nullptr) {
++        task_deallocate(task);
++        return ENOMEM;
++    }
++    int err = EFAULT;
++    if (md->prepare() == kIOReturnSuccess) {
++        IOByteCount done = to_user ? md->writeBytes(0, kbuf, len) : md->readBytes(0, kbuf, len);
++        md->complete();
++        err = done == len ? 0 : EFAULT;
++    }
+     md->release();
+-    return done == len ? 0 : EFAULT;
++    task_deallocate(task);
++    return err;
+ }
+ 
+ extern "C" int nmx_xnu_user_wire(void *mm, uint64_t uaddr, size_t npages, int write, uint64_t *phys, void **handle)
+ {
++    if (handle == nullptr)
++        return EINVAL;
+     *handle = nullptr;
+     if (npages == 0)
+         return 0;
+-    if ((uaddr & PAGE_MASK) != 0)
++    if (phys == nullptr || (uaddr & PAGE_MASK) != 0 || npages > SIZE_MAX / PAGE_SIZE ||
++        uaddr > UINT64_MAX - (npages * PAGE_SIZE - 1))
+         return EINVAL;
+-    task_t task = current_task();
+-    if (mm != nullptr) {
+-        IOLockLock(lock());
+-        task = find(mm);
+-        IOLockUnlock(gLock);
+-        if (task == nullptr)
+-            return EFAULT;
+-    }
+-    /* the device writes the pages when the mapping is writable (kIODirectionIn), and always reads them */
++    task_t task = mm != nullptr ? acquire_task(mm) : current_task();
++    if (task == nullptr)
++        return EFAULT;
++    if (mm == nullptr)
++        task_reference(task);
+     IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)uaddr, npages * PAGE_SIZE,
+-                                                                  write ? kIODirectionOutIn : kIODirectionOut, task);
+-    if (md == nullptr)
+-        return ENOMEM;
++                                                                write ? kIODirectionOutIn : kIODirectionOut, task);
++    if (md == nullptr) {
++        task_deallocate(task);
++        return ENOMEM;
++    }
+     if (md->prepare() != kIOReturnSuccess) {
+         md->release();
+-        return EFAULT;
+-    }
++        task_deallocate(task);
++        return EFAULT;
++    }
++    int err = 0;
+     for (size_t i = 0; i < npages; i++) {
+         IOByteCount len = 0;
+         addr64_t pa = md->getPhysicalSegment(i * PAGE_SIZE, &len, kIOMemoryMapperNone);
+-        if (pa == 0) {
+-            md->complete();
+-            md->release();
+-            return EFAULT;
++        if (pa == 0 || (pa & PAGE_MASK) != 0 || len < PAGE_SIZE) {
++            err = EFAULT;
++            break;
+         }
+         phys[i] = pa;
+     }
+-    *handle = md;
++    UserWire *wire = err ? nullptr : IONew(UserWire, 1);
++    if (wire == nullptr) {
++        md->complete();
++        md->release();
++        task_deallocate(task);
++        return err ? err : ENOMEM;
++    }
++    wire->descriptor = md;
++    wire->task = task;
++    *handle = wire;
+     return 0;
+ }
+ 
+ extern "C" void nmx_xnu_user_unwire(void *handle)
+ {
+-    IOMemoryDescriptor *md = (IOMemoryDescriptor *)handle;
+-    if (md == nullptr)
++    UserWire *wire = (UserWire *)handle;
++    if (wire == nullptr)
+         return;
+-    md->complete();
+-    md->release();
+-}
++    wire->descriptor->complete();
++    wire->descriptor->release();
++    task_deallocate(wire->task);
++    IODelete(wire, UserWire, 1);
++}
+--- a/bsdcompat/include/nmx_xnu.h
++++ b/bsdcompat/include/nmx_xnu.h
+@@ -42,9 +42,14 @@
+  * The port keeps one Linux mm_struct per process. These record which Mach task an mm belongs to (called from the
+  * process's own thread when its mm is created, and when the mm is freed), so a driver worker thread can later read
+  * or write that process's memory (Linux: kthread_use_mm + copy_to_user). The caller must hold an mm_users reference
+- * (mmget_not_zero), which keeps a thread of the process, and so its task, alive for the copy.
++ * (mmget_not_zero). The native registry separately retains the Mach task; a
++ * lookup takes its own reference before dropping the registry lock. Registration
++ * must succeed before the Linux mm is published. Matches-current rejects reuse
++ * of a native proc address by a different Mach task. Keep both header copies and
++ * override/src/linux_current.c synchronized with this ABI.
+  */
+-void nmx_xnu_mm_note_task(void *mm);
++int nmx_xnu_mm_note_task(void *mm);
++int nmx_xnu_mm_matches_current(void *mm);
+ void nmx_xnu_mm_forget(void *mm);
+ /* copies len bytes between kbuf and uaddr in mm's process; to_user != 0 writes it. Returns 0 or an errno. */
+ int nmx_xnu_mm_copy(void *mm, uint64_t uaddr, void *kbuf, size_t len, int to_user);
+--- a/bsdcompat/include/nmxxnu/nmx_xnu.h
++++ b/bsdcompat/include/nmxxnu/nmx_xnu.h
+@@ -42,9 +42,14 @@
+  * The port keeps one Linux mm_struct per process. These record which Mach task an mm belongs to (called from the
+  * process's own thread when its mm is created, and when the mm is freed), so a driver worker thread can later read
+  * or write that process's memory (Linux: kthread_use_mm + copy_to_user). The caller must hold an mm_users reference
+- * (mmget_not_zero), which keeps a thread of the process, and so its task, alive for the copy.
++ * (mmget_not_zero). The native registry separately retains the Mach task; a
++ * lookup takes its own reference before dropping the registry lock. Registration
++ * must succeed before the Linux mm is published. Matches-current rejects reuse
++ * of a native proc address by a different Mach task. Keep both header copies and
++ * override/src/linux_current.c synchronized with this ABI.
+  */
+-void nmx_xnu_mm_note_task(void *mm);
++int nmx_xnu_mm_note_task(void *mm);
++int nmx_xnu_mm_matches_current(void *mm);
+ void nmx_xnu_mm_forget(void *mm);
+ /* copies len bytes between kbuf and uaddr in mm's process; to_user != 0 writes it. Returns 0 or an errno. */
+ int nmx_xnu_mm_copy(void *mm, uint64_t uaddr, void *kbuf, size_t len, int to_user);
