@@ -135,5 +135,17 @@
     "that a userland package built for an earlier commit is ABI compatible is recorded separately; no component was rebuilt here because none changed"
   ],
   "hardware_executed": false,
-  "new_hardware_test_requested": false
+  "new_hardware_test_requested": false,
+  "local_regression_on_head": {
+    "head": "5c37ca59a623e5d81f26192ca4ffed6b41d7dfa2",
+    "date": "2026-10-22",
+    "what_was_rerun": [
+      "check_patch_inputs.py against the clean pinned port, drm-kmod and freebsd trees: patch application, shared C ABI headers, python syntax and preparation of both new fixtures passed",
+      "the vmmap registration/rollback fixture, generated from the patched port tree and executed locally: 11 cases, summary line printed, exit 0",
+      "the ring space/wrap fixture, generated from the pinned i915 sources and executed locally: 8 cases, summary line printed, exit 0"
+    ],
+    "toolchain": "MSVC on the Windows host with a local-only adaptation for pthread and GNU void* arithmetic; this is auxiliary evidence, not the macOS CI compiler",
+    "why": "confirms the committed generators and fixtures still work on the current HEAD after the later record-only commits",
+    "hardware_executed": false
+  }
 }
