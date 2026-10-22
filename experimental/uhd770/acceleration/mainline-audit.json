@@ -68,14 +68,15 @@
     {
       "id": "cleanup",
       "route": "fence/context/BO destruction -> user unmap -> final file/MM/task release -> RCU callbacks",
-      "status": "REVIEW IN PROGRESS",
-      "remaining": "Thread record/task_thread ownership and syscall entry/exit integration remain unresolved; do not wire the old cleanup hook blindly",
+      "status": "TASK-RETAINED THREAD RECORDS AND SCOPED DEVICE ENTRY IMPLEMENTED; native tests pending",
+      "remaining": "Verify combined mm and actual native callback/thread fixtures; review non-referenced lookup assumptions, other IRQ entry points and remaining GPU teardown path",
       "source_findings": [
         "Device cdev callbacks never invoke the documented nmx_thread_enter/nmx_thread_leave path",
         "Wiring that path blindly can free struct thread while a retained task_struct still points to task_thread",
         "mm final destruction does not explicitly destroy its allocated native mmap_sem sx lock"
       ],
-      "mm_repair": "Final mm destructor now clears the original owner cache under the mm mutex and destroys its native mmap_sem; native task lookup/wire holds explicit references"
+      "mm_repair": "Final mm destructor now clears the original owner cache under the mm mutex and destroys its native mmap_sem; native task lookup/wire holds explicit references",
+      "thread_repair": "Registry + Linux task references retain native thread and thread metadata; task install/detach and referenced tid lookup serialized; device callbacks release only records they created"
     }
   ],
   "test_limit": "Existing fixtures are evidence only for their actual extracted code and exercised contracts. Kernel services or hardware replaced by host mocks are not verified by those mocks.",

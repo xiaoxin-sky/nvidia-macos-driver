@@ -46,7 +46,7 @@ static void sx_destroy(struct sx *s) { assert(s->initialized); s->initialized=fa
 struct mm_struct { atomic_t mm_count, mm_users; struct rw_semaphore mmap_sem; };
 struct proc { int pid; void *p_lkpi_mm; };
 struct task_struct;
-struct thread { struct proc *td_proc; struct task_struct *td_lkpi_task; int td_pflags,td_tid; char td_name[32]; };
+struct thread { struct proc *td_proc; struct task_struct *td_lkpi_task; int td_pflags,td_tid; char td_name[32]; unsigned retained; };
 struct completion { unsigned done; };
 #define init_completion(c) ((c)->done=0)
 struct task_struct {
@@ -68,6 +68,13 @@ static void uma_zfree(uma_zone_t z,void *p)
 { if(p){assert(atomic_fetch_sub(&z->live,1)>0);free(p);} }
 static void (*nmx_thread_release_hook)(struct thread *);
 static int (*lkpi_alloc_current)(struct thread *,int);
+static pthread_mutex_t task_registry=PTHREAD_MUTEX_INITIALIZER;
+static void nmx_thread_hold(struct thread *t) { ++t->retained; }
+static void nmx_thread_put(struct thread *t) { assert(t->retained); --t->retained; }
+static int nmx_thread_install_task(struct thread *t,struct task_struct *task)
+{ assert(!pthread_mutex_lock(&task_registry));int err=t->td_lkpi_task?EEXIST:0;if(!err)t->td_lkpi_task=task;assert(!pthread_mutex_unlock(&task_registry));return err; }
+static struct task_struct *nmx_thread_detach_task(struct thread *t)
+{ assert(!pthread_mutex_lock(&task_registry));struct task_struct *task=t->td_lkpi_task;t->td_lkpi_task=NULL;assert(!pthread_mutex_unlock(&task_registry));return task; }
 void linux_mm_dtor(struct mm_struct *);
 void linux_free_current(struct task_struct *);
 int nmx_xnu_mm_note_task(void *);
@@ -94,7 +101,7 @@ static void *create_concurrently(void *arg)
     atomic_fetch_add(&ready,1);
     while(!atomic_load(&release_threads))sched_yield();
     test_set_task(3); /* final release may run outside the creating task */
-    linuxkpi_thread_dtor_hook(&td);return NULL;
+    linuxkpi_thread_dtor_hook(&td);assert(!td.retained);return NULL;
 }
 int main(void)
 {
@@ -148,6 +155,7 @@ int main(void)
     fail_zone=linux_current_zone;assert(linux_alloc_current(&first,M_WAITOK)==ENOMEM);clean(&owner);
     fail_zone=linux_mm_zone;assert(linux_alloc_current(&first,M_WAITOK)==ENOMEM);clean(&owner);
     test_fail_native_new();assert(linux_alloc_current(&first,M_WAITOK)==ENOMEM);assert(!first.td_lkpi_task);clean(&owner);
+    assert(!first.retained&&!second.retained);
     free(linux_current_zone);free(linux_mm_zone);
     assert(!pthread_mutex_destroy(&nmx_mm_mutex.native));
     puts("NMX mm/task lifecycle: actual Linux ownership joined to native task registry, concurrent creation, owner replacement, copy/wire references and failure cleanup passed; no GPU executed.");

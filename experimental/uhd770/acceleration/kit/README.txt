@@ -60,6 +60,10 @@ Required evidence
   code in separate C/C++ units and checks concurrent creators, cached-owner
   replacement, foreign-worker cleanup and allocation/prepare failures. IOKit
   descriptor/task primitives are host models; real GPU visibility is unproven.
+  The thread fixture exercises actual native callbacks and registry/refcounts
+  for retained tasks, nested calls, early errors and concurrent cleanup. Its
+  task destructor is modeled; actual Linux task/mm teardown has the joined mm
+  fixture. This is not a native hardware interrupt or module-unload test.
 - Userland: final real-ANV/probe build marker, ANV mapping fixture, clock boundary
   fixture and native CLOCK_UPTIME_RAW versus mach_absolute_time comparison.
   Earlier userland artifacts without native_clock_smoke.txt are rejected.

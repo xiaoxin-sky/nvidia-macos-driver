@@ -1,0 +1,148 @@
+/* Production native device callbacks + thread-record registry/reference logic.
+ * Native thread and Linux task primitives are controlled host models; the mm
+ * fixture separately joins real Linux task/mm destructors to native mm code. */
+#include <atomic>
+#include <cassert>
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
+#include <vector>
+#include <sys/types.h>
+#include <unistd.h>
+using boolean_t=bool;
+using lwpid_t=int;
+using fixture_dev_t=int;
+using user_addr_t=uint64_t;
+using user_size_t=size_t;
+using IOLock=std::mutex;
+struct NativeThread { std::atomic<unsigned> refs{1}; uint64_t tid; };
+using thread_t=NativeThread *;
+struct proc { int p_pid; };
+struct task_struct;
+struct thread {
+    thread_t td_xnu;proc *td_proc;int td_tid,td_priority,td_base_pri,td_intr_nesting_level;
+    task_struct *td_lkpi_task;
+};
+struct task_struct { thread *task_thread;std::atomic<unsigned> refs{1}; };
+static proc process{17};
+static thread_local thread_t fixture_thread;
+static thread_local bool irqs=true;
+static std::mutex registry_mutex,native_mutex;
+static std::mutex *nmx_thread_lock=&registry_mutex,*g_lock=&native_mutex;
+static std::atomic<unsigned> records_allocated{0},tasks_allocated{0};
+static thread_local bool fail_cookie=false,fail_callback=false,nest_callback=false,retain_task=false;
+static thread_local task_struct *held_task=nullptr;
+constexpr int NMX_THREAD_BUCKETS=256,NODE_MINORS=256,OPEN_MINOR_MAX=65536,PZERO=100;
+static uint16_t g_open_node[OPEN_MINOR_MAX];
+#define KASSERT(v,msg) assert(v)
+#define FALSE false
+#ifndef FREAD
+#define FREAD 1
+#endif
+#ifndef FWRITE
+#define FWRITE 2
+#endif
+#ifndef IO_NDELAY
+#define IO_NDELAY 4
+#endif
+#ifdef minor
+#undef minor
+#endif
+#define minor(v) (v)
+static thread_t current_thread(){assert(fixture_thread);return fixture_thread;}
+static proc *nmx_curproc(){return &process;}
+static uint64_t thread_tid(thread_t t){return t->tid;}
+static boolean_t ml_at_interrupt_context(){return !irqs;}
+static boolean_t ml_set_interrupts_enabled(boolean_t state){bool old=irqs;irqs=state;return old;}
+static void lck_spin_lock(std::mutex *m){assert(!irqs);m->lock();}
+static void lck_spin_unlock(std::mutex *m){assert(!irqs);m->unlock();}
+static void IOLockLock(IOLock *m){m->lock();}
+static void IOLockUnlock(IOLock *m){m->unlock();}
+static void *IOMallocZero(size_t size){void *p=std::calloc(1,size);assert(p);++records_allocated;return p;}
+static void IOFree(void *p,size_t){assert(p&&records_allocated.fetch_sub(1)>0);std::free(p);}
+void thread_reference(thread_t t){assert(t->refs.fetch_add(1)>0);}
+void thread_deallocate(thread_t t){assert(t->refs.fetch_sub(1)>1);}
+static void panic(const char *s){std::fprintf(stderr,"%s\n",s);std::abort();}
+void nmx_thread_hold(thread *);
+void nmx_thread_put(thread *);
+task_struct *nmx_thread_detach_task(thread *);
+static void put_task(task_struct *t){if(t->refs.fetch_sub(1)==1){thread *td=t->task_thread;delete t;--tasks_allocated;nmx_thread_put(td);}}
+void nmx_task_get(task_struct *t){assert(t&&t->refs.fetch_add(1)>0);}
+static void release_task(thread *td){if(auto *t=nmx_thread_detach_task(td))put_task(t);}
+static void (*nmx_thread_release_hook)(thread *)=release_task;
+static void *cookie_for_open(int,int *){return fail_cookie?nullptr:&process;}
+static int nmx_cdev_open(void *,int,int);
+static int nmx_cdev_close(int,int);
+static int nmx_cdev_ioctl(int,unsigned long,void *,int);
+static int nmx_cdev_read(int,uint64_t,size_t,size_t *,int);
+static int nmx_cdev_poll(int,int);
+struct uio { size_t left;bool user; };
+static size_t uio_resid(uio *p){return p->left;}
+static bool uio_isuserspace(uio *p){return p->user;}
+static uint64_t uio_curriovbase(uio *){return 0x1000;}
+static size_t uio_curriovlen(uio *p){return p->left;}
+static void uio_update(uio *p,size_t n){assert(n<=p->left);p->left-=n;}
+
+/* NMX_ACTUAL_THREAD_IMPLEMENTATION */
+
+static thread *prepare_task()
+{
+    thread *td=nmx_curthread();
+    if(!td->td_lkpi_task){
+        auto *task=new task_struct;task->task_thread=td;++tasks_allocated;
+        nmx_thread_hold(td);assert(!nmx_thread_install_task(td,task));
+    }
+    return td;
+}
+static int nmx_cdev_open(void *,int,int){prepare_task();return fail_callback?EIO:0;}
+static int nmx_cdev_close(int,int){prepare_task();return fail_callback?EIO:0;}
+static int nmx_cdev_ioctl(int,unsigned long,void *,int)
+{
+    thread *td=prepare_task();
+    if(nest_callback){nest_callback=false;assert(nmx_select(300,FREAD,nullptr,nullptr)==1);assert(nmx_curthread()==td&&td->td_lkpi_task);}
+    if(retain_task){assert(!held_task);held_task=nmx_task_for_tid(td->td_tid,true);assert(held_task==td->td_lkpi_task);}
+    return fail_callback?EIO:0;
+}
+static int nmx_cdev_read(int,uint64_t,size_t n,size_t *done,int){prepare_task();*done=fail_callback?0:n;return fail_callback?EIO:0;}
+static int nmx_cdev_poll(int,int){prepare_task();return 1;}
+static void clean(thread_t t)
+{assert(t->refs==1&&irqs);assert(!nmx_thread_records()&&!nmx_detached_thread_records()&&!records_allocated&&!tasks_allocated);}
+int main()
+{
+    alarm(25);
+    NativeThread native;native.tid=70001;fixture_thread=&native;
+    assert(!nmx_open(300,FREAD|FWRITE,0,nullptr));clean(&native);
+    assert(!nmx_close(300,0,0,nullptr));clean(&native);
+    nest_callback=true;assert(!nmx_ioctl(300,0,nullptr,0,nullptr));clean(&native);
+    uio buffer{64,true};assert(!nmx_read(300,&buffer,0)&&!buffer.left);clean(&native);
+    buffer={64,false};assert(nmx_read(300,&buffer,0)==EFAULT);clean(&native);
+    buffer={0,true};assert(!nmx_read(300,&buffer,0));clean(&native);
+    fail_cookie=true;assert(nmx_open(300,0,0,nullptr)==ENXIO);fail_cookie=false;clean(&native);
+    fail_callback=true;assert(nmx_open(300,0,0,nullptr)==EIO);assert(nmx_close(300,0,0,nullptr)==EIO);
+    assert(nmx_ioctl(300,0,nullptr,0,nullptr)==EIO);buffer={8,true};assert(nmx_read(300,&buffer,0)==EIO);
+    fail_callback=false;clean(&native);
+
+    retain_task=true;assert(!nmx_ioctl(300,0,nullptr,0,nullptr));retain_task=false;
+    assert(held_task&&held_task->task_thread->td_tid==70001&&native.refs==2);
+    assert(nmx_thread_records()==1&&nmx_detached_thread_records()==1&&!nmx_task_for_tid(70001,true));
+    assert(!nmx_open(301,FREAD,0,nullptr));assert(native.refs==2&&nmx_detached_thread_records()==1);
+    put_task(held_task);held_task=nullptr;clean(&native);
+
+    /* An existing worker's registry reference survives nested device scopes. */
+    thread *worker=nmx_curthread();assert(native.refs==2);
+    assert(!nmx_ioctl(300,0,nullptr,0,nullptr));assert(nmx_curthread()==worker&&worker->td_lkpi_task);
+    nmx_thread_exit_cleanup();clean(&native);
+
+    std::vector<std::thread> workers;
+    NativeThread natives[8];
+    for(unsigned i=0;i<8;++i){natives[i].tid=80000+i;workers.emplace_back([&,i]{
+        fixture_thread=&natives[i];
+        for(unsigned j=0;j<50;++j){assert(!nmx_open(300+i,0,0,nullptr));assert(!nmx_ioctl(300+i,0,nullptr,0,nullptr));assert(!nmx_close(300+i,0,0,nullptr));}
+        assert(natives[i].refs==1);
+    });}
+    for(auto &t:workers)t.join();clean(&native);
+    std::puts("NMX native thread lifetime: actual device scopes and registry ownership, retained tasks, nested callbacks, failures and concurrent cleanup passed; no GPU executed.");
+}

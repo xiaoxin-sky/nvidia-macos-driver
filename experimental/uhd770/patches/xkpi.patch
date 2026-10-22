@@ -4591,3 +4591,409 @@
  void nmx_xnu_mm_forget(void *mm);
  /* copies len bytes between kbuf and uaddr in mm's process; to_user != 0 writes it. Returns 0 or an errno. */
  int nmx_xnu_mm_copy(void *mm, uint64_t uaddr, void *kbuf, size_t len, int to_user);
+--- a/bsdcompat/src/nmx_kernel.c
++++ b/bsdcompat/src/nmx_kernel.c
+@@ -77,11 +77,15 @@
+ struct nmx_thread_rec {
+     struct thread td;               /* first member: a struct thread * is a struct nmx_thread_rec * */
+     struct nmx_thread_rec *next;
+-    int transient;                  /* created by a system-call entry; freed when that entry returns */
++    int transient;
++    volatile unsigned refs;          /* registry + each Linux task that refers to td */
++    int linked;                      /* zero after syscall/worker detaches the record */
+ };
+ static struct nmx_thread_rec *nmx_threads[NMX_THREAD_BUCKETS];
+ static lck_spin_t *nmx_thread_lock;
+ static volatile int nmx_thread_count;
++static volatile int nmx_detached_threads;
++extern void thread_reference(thread_t thread);
+ 
+ /* curthread is reachable from both process and interrupt contexts. Mask local
+  * interrupts before acquiring the registry spin lock, and restore the caller's
+@@ -122,10 +126,11 @@
+     boolean_t registry_irqs;
+     if (xnu == NULL)
+         return nmx_kernproc;
++    int pid = proc_pid(xnu);
+     unsigned b = bucket_of(xnu, NMX_PROC_BUCKETS);
+     registry_irqs = nmx_registry_lock();
+     for (struct nmx_proc_rec *r = nmx_procs[b]; r; r = r->next)
+-        if (r->xnu == xnu) { nmx_registry_unlock(registry_irqs); return &r->p; }
++        if (r->xnu == xnu && r->p.p_pid == pid) { nmx_registry_unlock(registry_irqs); return &r->p; }
+     nmx_registry_unlock(registry_irqs);
+ 
+     struct nmx_proc_rec *nr = IOMallocZero(sizeof(*nr));
+@@ -133,12 +138,12 @@
+         return nmx_kernproc;
+     nr->xnu = xnu;
+     nr->p.nmx_xnu = xnu;
+-    nr->p.p_pid = proc_pid(xnu);
++    nr->p.p_pid = pid;
+     proc_name(nr->p.p_pid, nr->p.p_comm, sizeof(nr->p.p_comm));
+ 
+     registry_irqs = nmx_registry_lock();
+     for (struct nmx_proc_rec *r = nmx_procs[b]; r; r = r->next)
+-        if (r->xnu == xnu) { nmx_registry_unlock(registry_irqs); IOFree(nr, sizeof(*nr)); return &r->p; }
++        if (r->xnu == xnu && r->p.p_pid == pid) { nmx_registry_unlock(registry_irqs); IOFree(nr, sizeof(*nr)); return &r->p; }
+     nr->next = nmx_procs[b];
+     nmx_procs[b] = nr;
+     nmx_registry_unlock(registry_irqs);
+@@ -162,6 +167,46 @@
+         if (r->td.td_xnu == xt)
+             return r;
+     return NULL;
++}
++
++/* A task may outlive the syscall which created it. Its thread metadata and
++ * native thread reference are released only with the task's final reference. */
++void nmx_thread_hold(struct thread *td)
++{
++    struct nmx_thread_rec *r = (struct nmx_thread_rec *)td;
++    unsigned previous = __atomic_fetch_add(&r->refs, 1, __ATOMIC_ACQ_REL);
++    KASSERT(previous != 0, ("retaining a dead thread record"));
++}
++
++void nmx_thread_put(struct thread *td)
++{
++    struct nmx_thread_rec *r = (struct nmx_thread_rec *)td;
++    if (__atomic_sub_fetch(&r->refs, 1, __ATOMIC_ACQ_REL) != 0)
++        return;
++    KASSERT(!r->linked && r->td.td_lkpi_task == NULL, ("freeing a published thread record"));
++    thread_deallocate(r->td.td_xnu);
++    __atomic_sub_fetch(&nmx_detached_threads, 1, __ATOMIC_ACQ_REL);
++    __atomic_sub_fetch(&nmx_thread_count, 1, __ATOMIC_ACQ_REL);
++    IOFree(r, sizeof(*r));
++}
++
++int nmx_thread_install_task(struct thread *td, struct task_struct *task)
++{
++    boolean_t was = nmx_registry_lock();
++    int err = td->td_lkpi_task != NULL ? EEXIST : 0;
++    if (!err)
++        td->td_lkpi_task = task;
++    nmx_registry_unlock(was);
++    return err;
++}
++
++struct task_struct *nmx_thread_detach_task(struct thread *td)
++{
++    boolean_t was = nmx_registry_lock();
++    struct task_struct *task = td->td_lkpi_task;
++    td->td_lkpi_task = NULL;
++    nmx_registry_unlock(was);
++    return task; /* moves the thread's existing task reference to the caller */
+ }
+ 
+ /* the record for the calling thread, created on first use; 'transient' marks one made by a system-call entry */
+@@ -179,6 +224,8 @@
+     struct nmx_thread_rec *nr = IOMallocZero(sizeof(*nr));
+     if (nr == NULL)
+         panic("NullMoth xkpi: no memory for a thread record");
++    nr->refs = 1;
++    thread_reference(xt);
+     nr->td.td_xnu = xt;
+     nr->td.td_proc = nmx_curproc();
+     nr->td.td_tid = (int)(thread_tid(xt) & 0x7fffffff);
+@@ -192,14 +239,17 @@
+         unsigned b = bucket_of(xt, NMX_THREAD_BUCKETS);
+         nr->next = nmx_threads[b];
+         nmx_threads[b] = nr;
+-        nmx_thread_count++;
++        nr->linked = 1;
++        __atomic_add_fetch(&nmx_thread_count, 1, __ATOMIC_ACQ_REL);
+         r = nr;
+         nr = NULL;
+         *created = 1;
+     }
+     nmx_registry_unlock(registry_irqs);
+-    if (nr)
++    if (nr) {
++        thread_deallocate(nr->td.td_xnu);
+         IOFree(nr, sizeof(*nr));
++    }
+     return &r->td;
+ }
+ 
+@@ -211,7 +261,7 @@
+     return td;
+ }
+ 
+-/* removes and frees the calling thread's record; LinuxKPI's task_struct must already be released by the caller */
++/* Detach registry ownership; retained Linux tasks may still own the record. */
+ static void nmx_thread_drop_current(void)
+ {
+     boolean_t registry_irqs;
+@@ -223,13 +273,14 @@
+         if ((*pp)->td.td_xnu == xt) {
+             found = *pp;
+             *pp = found->next;
+-            nmx_thread_count--;
++            found->linked = 0;
++            __atomic_add_fetch(&nmx_detached_threads, 1, __ATOMIC_ACQ_REL);
+             break;
+         }
+     }
+     nmx_registry_unlock(registry_irqs);
+     if (found)
+-        IOFree(found, sizeof(*found));
++        nmx_thread_put(&found->td);
+ }
+ 
+ /*
+@@ -504,7 +555,14 @@
+     if (nmx_thread_lock) {
+         for (unsigned b = 0; b < NMX_THREAD_BUCKETS; b++) {
+             struct nmx_thread_rec *r = nmx_threads[b];
+-            while (r) { struct nmx_thread_rec *n = r->next; IOFree(r, sizeof(*r)); r = n; }
++            while (r) {
++                struct nmx_thread_rec *n = r->next;
++                KASSERT(r->td.td_lkpi_task == NULL, ("thread task still live during unload"));
++                r->linked = 0;
++                __atomic_add_fetch(&nmx_detached_threads, 1, __ATOMIC_ACQ_REL);
++                nmx_thread_put(&r->td);
++                r = n;
++            }
+             nmx_threads[b] = NULL;
+         }
+         for (unsigned b = 0; b < NMX_PROC_BUCKETS; b++) {
+@@ -534,7 +592,12 @@
+ 
+ int nmx_thread_records(void)
+ {
+-    return nmx_thread_count;
++    return __atomic_load_n(&nmx_thread_count, __ATOMIC_ACQUIRE);
++}
++
++int nmx_detached_thread_records(void)
++{
++    return __atomic_load_n(&nmx_detached_threads, __ATOMIC_ACQUIRE);
+ }
+ 
+ /* ---- signals: LinuxKPI reads pending signals right after PROC_LOCK, which refreshes them from xnu ------------------ */
+@@ -624,10 +687,28 @@
+         registry_irqs = nmx_registry_lock();
+         for (unsigned b = 0; b < NMX_THREAD_BUCKETS && td == NULL; b++)
+             for (struct nmx_thread_rec *r = nmx_threads[b]; r; r = r->next)
+-                if (r->td.td_lkpi_task != NULL) { td = &r->td; break; }
++                if (r->td.td_lkpi_task != NULL) { td = &r->td; nmx_thread_hold(td); break; }
+         nmx_registry_unlock(registry_irqs);
+         if (td == NULL)
+             return;
+-        release(td);            /* clears td_lkpi_task */
+-    }
+-}
++        release(td);            /* atomically detaches td_lkpi_task */
++        nmx_thread_put(td);
++    }
++}
++
++/* Referenced PID lookups must acquire the task before dropping registry lock. */
++struct task_struct *nmx_task_for_tid(lwpid_t tid, bool get)
++{
++    extern void nmx_task_get(struct task_struct *task);
++    struct task_struct *task = NULL;
++    boolean_t was = nmx_registry_lock();
++    for (unsigned b = 0; b < NMX_THREAD_BUCKETS && task == NULL; ++b)
++        for (struct nmx_thread_rec *r = nmx_threads[b]; r; r = r->next)
++            if (r->td.td_tid == tid && r->td.td_lkpi_task != NULL) {
++                task = r->td.td_lkpi_task;
++                if (get) nmx_task_get(task);
++                break;
++            }
++    nmx_registry_unlock(was);
++    return task;
++}
+--- a/bsdcompat/include/sys/proc.h
++++ b/bsdcompat/include/sys/proc.h
+@@ -87,6 +87,14 @@
+ bool nmx_proc_exiting(struct proc *p);
+ struct task_struct *nmx_proc_any_task(struct proc *p, bool get);
+ void nmx_threads_release_all(void (*release)(struct thread *));
++/* Registry/task ownership is serialized by nmx_kernel.c. Each published Linux
++ * task retains its task_thread independently of syscall registry membership. */
++void nmx_thread_hold(struct thread *td);
++void nmx_thread_put(struct thread *td);
++int nmx_thread_install_task(struct thread *td, struct task_struct *task);
++struct task_struct *nmx_thread_detach_task(struct thread *td);
++struct task_struct *nmx_task_for_tid(lwpid_t tid, bool get);
++int nmx_detached_thread_records(void);
+ extern void (*nmx_thread_release_hook)(struct thread *td);
+ extern struct proc *nmx_kernproc;
+ struct proc *nmx_curproc(void);
+--- a/override/src/linux_current.c
++++ b/override/src/linux_current.c
+@@ -158,9 +158,17 @@
+ 		ts->mm = mm_other;
+ 	}
+ 
+-	/* store pointer to task struct */
+-	td->td_lkpi_task = ts;
++	/* The task owns its thread record independently of syscall lifetime. */
++	nmx_thread_hold(td);
++	int installed = nmx_thread_install_task(td, ts);
+ 	mtx_unlock(&nmx_mm_mutex);
++	if (installed != 0) {
++		/* Nested initialization may have installed a task while allocation
++		 * ran outside locks. Keep the winner and balance the spare state. */
++		mmput(ts->mm);
++		nmx_thread_put(td);
++		uma_zfree(linux_current_zone, ts);
++	}
+ 
+ 	/* free mm_struct pointer, if any */
+ 	uma_zfree(linux_mm_zone, mm);
+@@ -198,8 +206,10 @@
+ void
+ linux_free_current(struct task_struct *ts)
+ {
++	struct thread *td = ts->task_thread;
+ 	mmput(ts->mm);
+ 	uma_zfree(linux_current_zone, ts);
++	nmx_thread_put(td);
+ }
+ 
+ static void
+@@ -207,31 +217,19 @@
+ {
+ 	struct task_struct *ts;
+ 
+-	ts = td->td_lkpi_task;
+-	if (ts == NULL)
+-		return;
+-
+-	td->td_lkpi_task = NULL;
+-	put_task_struct(ts);
++	ts = nmx_thread_detach_task(td);
++	if (ts != NULL)
++		put_task_struct(ts);
+ }
+ 
+ /* macOS port: threads and processes are found through the port's records (nmx_kernel.c) */
+ static struct task_struct *
+ linux_get_pid_task_int(pid_t pid, const bool do_get)
+ {
+-	struct thread *td;
+-	struct task_struct *ts;
+ 	struct proc *p;
+ 
+-	if (pid > PID_MAX) {
+-		td = tdfind(pid, -1);
+-		if (td == NULL)
+-			return (NULL);
+-		ts = td->td_lkpi_task;
+-		if (do_get && ts != NULL)
+-			get_task_struct(ts);
+-		return (ts);
+-	}
++	if (pid > PID_MAX)
++		return (nmx_task_for_tid(pid, do_get));
+ 	p = nmx_proc_find(pid);
+ 	if (p == NULL)
+ 		return (NULL);
+@@ -254,11 +252,7 @@
+ bool
+ linux_task_exiting(struct task_struct *task)
+ {
+-	struct thread *td;
+-	struct proc *p;
+-
+-	td = tdfind(task->pid, -1);
+-	p = (td != NULL) ? td->td_proc : nmx_proc_find(task->pid);
++	struct proc *p = task->task_thread->td_proc;
+ 	return (p != NULL && nmx_proc_exiting(p));
+ }
+ 
+--- a/xnu/nmx_devfs.cpp
++++ b/xnu/nmx_devfs.cpp
+@@ -80,10 +80,23 @@
+     return cookie;
+ }
+ 
++/* Scope only the native device callback. A nested callback or owned worker
++ * reuses its existing record; the outer creator releases registry ownership.
++ * Retained Linux tasks keep their separate thread-record references. */
++class NmxThreadScope {
++    int created;
++public:
++    NmxThreadScope() : created(nmx_thread_enter()) {}
++    ~NmxThreadScope() { nmx_thread_leave(created); }
++    NmxThreadScope(const NmxThreadScope &) = delete;
++    NmxThreadScope &operator=(const NmxThreadScope &) = delete;
++};
++
+ /* ---- entry points ------------------------------------------------------------------------------------------------- */
+ 
+ static int nmx_open(dev_t dev, int flags, int devtype, struct proc *p)
+ {
++    NmxThreadScope scope;
+     int m = minor(dev);
+     void *cookie = cookie_for_open(m, nullptr);
+     if (cookie == nullptr)
+@@ -99,6 +112,7 @@
+ 
+ static int nmx_close(dev_t dev, int flags, int devtype, struct proc *p)
+ {
++    NmxThreadScope scope;
+     int m = minor(dev);
+     int err = nmx_cdev_close(m, flags);
+     IOLockLock(g_lock);
+@@ -110,6 +124,7 @@
+ 
+ static int nmx_ioctl(dev_t dev, u_long cmd, caddr_t data, int fflag, struct proc *p)
+ {
++    NmxThreadScope scope;
+     return nmx_cdev_ioctl(minor(dev), cmd, data, fflag);
+ }
+ 
+@@ -120,6 +135,7 @@
+  */
+ static int nmx_read(dev_t dev, struct uio *uio, int ioflag)
+ {
++    NmxThreadScope scope;
+     if (uio_resid(uio) <= 0)
+         return 0;
+     if (!uio_isuserspace(uio))
+@@ -139,6 +155,7 @@
+  */
+ static int nmx_select(dev_t dev, int which, void *wql, struct proc *p)
+ {
++    NmxThreadScope scope;
+     int events = which == FREAD ? 0x0001 /* POLLIN */ : which == FWRITE ? 0x0004 /* POLLOUT */ : 0x0002 /* POLLPRI */;
+     return nmx_cdev_poll(minor(dev), events) != 0;
+ }
+--- a/bsdcompat/include/nmx_xnu.h
++++ b/bsdcompat/include/nmx_xnu.h
+@@ -161,6 +161,9 @@
+ 
+ /* ---- device nodes (nmx_devfs.cpp) --------------------------------------------------------------------------------- */
+ 
++/* Device callback scope: leave only releases ownership created by enter. */
++int nmx_thread_enter(void);
++void nmx_thread_leave(int created);
+ int nmx_xnu_devfs_init(void);
+ void nmx_xnu_devfs_fini(void);
+ /* opens still outstanding (unload must wait for zero) */
+--- a/bsdcompat/include/nmxxnu/nmx_xnu.h
++++ b/bsdcompat/include/nmxxnu/nmx_xnu.h
+@@ -161,6 +161,9 @@
+ 
+ /* ---- device nodes (nmx_devfs.cpp) --------------------------------------------------------------------------------- */
+ 
++/* Device callback scope: leave only releases ownership created by enter. */
++int nmx_thread_enter(void);
++void nmx_thread_leave(int created);
+ int nmx_xnu_devfs_init(void);
+ void nmx_xnu_devfs_fini(void);
+ /* opens still outstanding (unload must wait for zero) */
+--- a/bsdcompat/src/nmx_port.c
++++ b/bsdcompat/src/nmx_port.c
+@@ -70,7 +70,8 @@
+ 
+ int nmx_port_busy(void)
+ {
+-    return nmx_xnu_devfs_busy();
++    extern int nmx_detached_thread_records(void);
++    return nmx_xnu_devfs_busy() + nmx_detached_thread_records();
+ }
+ 
+ static void *attach_on(void *iopci, const char *busclass, int display);

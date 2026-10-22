@@ -203,6 +203,8 @@ def check_component(archive, entries, name, spec):
                 read("logs/nmx-ioctl-test.log"), "kernel: native ioctl transport/dispatch regression missing/failed")
         require("NMX mm/task lifecycle: actual Linux ownership joined to native task registry, concurrent creation, owner replacement, copy/wire references and failure cleanup passed" in
                 read("logs/nmx-mm-test.log"), "kernel: joined Linux/native mm ownership regression missing/failed")
+        require("NMX native thread lifetime: actual device scopes and registry ownership, retained tasks, nested callbacks, failures and concurrent cleanup passed" in
+                read("logs/nmx-thread-test.log"), "kernel: native callback/thread ownership regression missing/failed")
         metadata["nmx_node_info_ioctl"] = "0x40084e44"
         require("NMX framebuffer start identity/order/failure tests passed" in read("logs/nmx-fb-start-test.log"),
                 "kernel: framebuffer controller initialization regression check missing/failed")

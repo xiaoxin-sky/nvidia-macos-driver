@@ -77,8 +77,15 @@ The native mm registry retains a Mach task and each lookup owns a separate
 reference; a wired range owns its descriptor and task through unwire. Native
 registration errors are returned before publication. A combined C/C++ fixture
 joins the real Linux and native implementations with host primitive models.
-Syscall thread-record teardown remains a separate unresolved audit item; these
-mm fixes do not make that teardown safe by themselves.
+Native device callbacks now enter/leave a scoped thread record. The registry
+owns one record reference; every Linux task owns another until its final free.
+A retained task therefore keeps task_thread and the native thread reference
+alive after syscall exit. Task install/detach and referenced registry lookup
+are serialized. Nested callbacks preserve the outer record, and owned worker
+records survive device callbacks until their worker exit cleanup. Separate
+fixtures join actual callback scopes to the actual registry/refcount code,
+and actual Linux task/mm teardown to native mm/task code. Other IRQ contexts,
+non-referenced task lookups and module unload ordering remain review items.
 
 The ordinary Metal buffer/texture/compute path uses ANV allocations. NMXAccel's
 inherited family GPUVA/VRAM callbacks still depend on NVIDIA RM and are not an
