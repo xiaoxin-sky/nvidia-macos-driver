@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "objective": "UHD 770 8086:4680 genuinely executes GPU compute, returns correct readback and exits normally; review the complete cross-OS call chain before requesting another hardware test",
+  "started": "2026-10-22",
+  "review_baseline": "35b42cc5c84f5d1d79b92d5ddc200a5eff8451a1",
+  "hardware_status": "NOT ACHIEVED: last real run was r14 and panicked during native device close/RCU; r15 host evidence is not hardware evidence",
+  "acceptance": [
+    "Matched source and loaded binary identities for 8086:4680 on the target macOS boot",
+    "Real Intel ANV physical/logical device and command queue, no software/no-hardware substitution",
+    "Valid CPU/GPU mappings with page residency and bounds throughout actual submission",
+    "Real varying GPU compute workloads submitted, completed and every output word compared",
+    "Verified completion followed by normal process exit and balanced resource release",
+    "No kernel panic, hang or GPU timeout during execution and cleanup",
+    "Reviewed cross-OS interfaces and transitive dependencies; host mocks explicitly identified"
+  ],
+  "contracts": [
+    {
+      "id": "discovery",
+      "route": "libdrm canonical open -> NODE_INFO/PCIINFO -> linux_file_close -> CK RCU",
+      "status": "r13/r14 defects repaired; actual CK and compiled atomics verified in r15; target pending"
+    },
+    {
+      "id": "ioctl",
+      "route": "Darwin cdev ioctl -> linux_file_ioctl_sub -> synthetic top-level user pointer -> DRM dispatch -> nested user pointers",
+      "status": "REVIEW IN PROGRESS",
+      "remaining": "actual dispatcher tests for direction/size/nested-pointer copy, context restoration and errno transport"
+    },
+    {
+      "id": "identity_context",
+      "route": "ANV Intel QUERY/GETPARAM -> i915 capabilities, VM/context and engine setup",
+      "status": "REVIEW IN PROGRESS",
+      "remaining": "trace mandatory calls to kernel implementations and unsupported branches; no fallback around required features"
+    },
+    {
+      "id": "memory",
+      "route": "GEM create -> backing pages -> DMA/IOMMU -> PPGTT/GGTT -> NMX mmap -> IOKit user map",
+      "status": "REVIEW IN PROGRESS",
+      "remaining": "page pinning and mapping fixtures exist; task/process lifetime, multi-thread mm ownership and native mapping boundaries need deeper review"
+    },
+    {
+      "id": "submission",
+      "route": "ANV batch construction -> EXECBUFFER2 -> i915 request/engine scheduling -> real device",
+      "status": "NOT FULLY REVIEWED",
+      "remaining": "nested ioctl data, object address/length/pinning and fence lifetime; actual execution requires UHD770"
+    },
+    {
+      "id": "completion",
+      "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
+      "status": "SLEEP/WAKE SOURCE DEFECTS REPAIRED; native CI pending",
+      "remaining": "GPU IRQ/breadcrumb/fence delivery and other transitive dependencies still need review/target evidence",
+      "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified"
+    },
+    {
+      "id": "visibility",
+      "route": "GPU writes -> completion -> cache/barrier handling -> host readback",
+      "status": "NOT FULLY REVIEWED",
+      "remaining": "trace coherency assumptions and WC/WB mapping options; host tests cannot validate real cache visibility"
+    },
+    {
+      "id": "cleanup",
+      "route": "fence/context/BO destruction -> user unmap -> final file/MM/task release -> RCU callbacks",
+      "status": "REVIEW IN PROGRESS",
+      "remaining": "file final-drop repaired; native task reference retention and mm lifecycle require review"
+    }
+  ],
+  "test_limit": "Existing fixtures are evidence only for their actual extracted code and exercised contracts. Kernel services or hardware replaced by host mocks are not verified by those mocks.",
+  "next_hardware_request": "Do not request another reboot solely because a new build or isolated fixture passes. Complete the source/interface review and consolidate known defects first.",
+  "completion_limit": "Windows/CI cannot prove target GPU execution. Keep the goal active until actual target execution/readback/clean exit evidence is available."
+}

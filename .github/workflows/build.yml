@@ -138,6 +138,13 @@ jobs:
             -I/tmp/nmx-rcu-fixture/include /tmp/nmx-rcu-fixture/rcu-test.c \
             /tmp/nmx-rcu-fixture/ck_epoch.c -pthread -o /tmp/nmx-rcu-test
           /tmp/nmx-rcu-test | tee /tmp/nmx-rcu-test.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_sleep_fixture.py" \
+            --port "$X" --schedule "$S/kpi/freebsd-src/sys/compat/linuxkpi/common/src/linux_schedule.c" \
+            --template "$GITHUB_WORKSPACE/experimental/uhd770/tests/sleep_fixture.cpp.in" \
+            --output /tmp/nmx-sleep-test.cpp
+          c++ -std=c++17 -Wall -Wextra -Werror -Wno-unused-parameter -pthread \
+            /tmp/nmx-sleep-test.cpp -o /tmp/nmx-sleep-test
+          /tmp/nmx-sleep-test | tee /tmp/nmx-sleep-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_fb_start_fixture.py" \
             "$X/xnu/nmx_fb.cpp" "$GITHUB_WORKSPACE/experimental/uhd770/tests/fb_start_fixture.cpp.in" \
             /tmp/nmx-fb-start-test.cpp
@@ -330,6 +337,7 @@ jobs:
           cp /tmp/nmx-node-open-test.c /tmp/nmx-node-open-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-rcu-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-rcu-fixture/rcu-test.c "$GITHUB_WORKSPACE/out/logs/nmx-rcu-test.c" 2>/dev/null || true
+          cp /tmp/nmx-sleep-test.cpp /tmp/nmx-sleep-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-fb-start-test.cpp /tmp/nmx-fb-start-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-runtime-pm-test.c /tmp/nmx-runtime-pm-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/amd.flags" "$GITHUB_WORKSPACE/out/logs/amd.flags" 2>/dev/null || true

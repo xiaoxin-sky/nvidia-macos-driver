@@ -62,6 +62,14 @@ CK must retain multiprocessor atomics even without FreeBSD's SMP define. Native
 CI exercises the actual CK source, concurrent readers/waiters and deferred
 callbacks. These host checks do not establish real GPU/IRQ stability.
 
+mainline-audit.json tracks the full compute/readback/clean-exit objective and
+remaining cross-OS contracts. Below dma_fence waits, the native sleepqueue now
+masks local interrupts before taking the chain lock, restores their prior state
+before blocking, and preserves immediate Mach wait results. The extracted
+Linux schedule/wake + native adapter fixture checks early signals, wake-before-
+block, real host deadlines and cleanup. None of these checks establish a GPU
+submission or authorize another target reboot by themselves.
+
 The ordinary Metal buffer/texture/compute path uses ANV allocations. NMXAccel's
 inherited family GPUVA/VRAM callbacks still depend on NVIDIA RM and are not an
 Intel allocation implementation. Hardware resource pools, cross-process shared

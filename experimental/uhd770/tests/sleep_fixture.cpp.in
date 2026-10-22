@@ -1,0 +1,222 @@
+/* End-to-end software wait contract: actual Linux schedule/wake -> actual
+ * sleepqueue/condition wait -> deterministic host equivalents of Mach waits.
+ * Interrupt delivery is injected at re-enable boundaries; no GPU is accessed.
+ */
+#include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <climits>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
+#include <mutex>
+#include <thread>
+#include <vector>
+#include <cerrno>
+
+using Clock = std::chrono::steady_clock;
+using boolean_t = bool;
+using wait_result_t = int;
+using wait_interrupt_t = int;
+using event_t = const void *;
+using sbintime_t = int64_t;
+using u_int = unsigned;
+constexpr int THREAD_WAITING=1, THREAD_AWAKENED=2, THREAD_TIMED_OUT=3, THREAD_INTERRUPTED=4, THREAD_RESTART=5;
+constexpr int THREAD_ABORTSAFE=1, THREAD_UNINT=0, THREAD_CONTINUE_NULL=0;
+constexpr int PCATCH=1, PDROP=2, C_ABSOLUTE=1, C_CATCH=2;
+constexpr int SLEEPQ_SLEEP=1, SLEEPQ_INTERRUPTIBLE=2, MAXCPU=256;
+constexpr int TASK_RUNNING=0, TASK_INTERRUPTIBLE=1, TASK_UNINTERRUPTIBLE=2, TASK_NORMAL=3, TASK_PARKED=4, TASK_WAKING=8;
+constexpr int ERESTARTSYS=512;
+#ifndef ERESTART
+#define ERESTART 85
+#endif
+#define FALSE false
+#define TRUE true
+#define MPASS(value) assert(value)
+#define DROP_GIANT() do {
+#define PICKUP_GIANT() } while (0)
+#define MAX_SCHEDULE_TIMEOUT INT64_MAX
+constexpr uint64_t NSEC_PER_SEC=1000000000ULL;
+static int hz=1000;
+static thread_local bool irq_enabled=true;
+static thread_local unsigned held_spins=0, cpu_id=0;
+static thread_local int immediate_result=THREAD_WAITING;
+static thread_local std::function<void()> pending_interrupt;
+static std::atomic<unsigned> block_calls{0}, irq_deliveries{0};
+
+struct lock_object { bool held=true; unsigned released=0, reacquired=0; };
+struct cv { unsigned cv_waiters=0; };
+struct task_struct { std::atomic<int> state{TASK_RUNNING}; int saved_signal=0; };
+static thread_local task_struct fixture_task;
+#define current (&fixture_task)
+static int atomic_read(const std::atomic<int> *v) { return v->load(); }
+static void set_task_state(task_struct *t,int state) { t->state.store(state); }
+static void linux_schedule_save_interrupt_value(task_struct *t,int err) { t->saved_signal=err; }
+
+static uint64_t mach_absolute_time() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
+static void clock_interval_to_deadline(uint32_t ticks,uint64_t scale,uint64_t *out) { *out=mach_absolute_time()+ticks*scale; }
+static void nanoseconds_to_absolutetime(uint64_t value,uint64_t *out) { *out=value; }
+static int64_t sbttons(sbintime_t value) { return (value>>32)*1000000000LL+((uint64_t(value)&0xffffffffULL)*1000000000ULL>>32); }
+static sbintime_t sbinuptime() { auto ns=mach_absolute_time(); return sbintime_t((ns/1000000000ULL)<<32)+sbintime_t((ns%1000000000ULL)*(1ULL<<32)/1000000000ULL); }
+static unsigned cpu_number() { return cpu_id; }
+static uintptr_t nmx_lock_release(lock_object *l) { assert(l && l->held); l->held=false; ++l->released; return 17; }
+static void nmx_lock_reacquire(lock_object *l,uintptr_t how) { assert(l && !l->held && how==17); l->held=true; ++l->reacquired; }
+using lck_spin_t=std::mutex;
+static void *nmx_lck_grp=nullptr;
+#define LCK_ATTR_NULL nullptr
+static lck_spin_t *lck_spin_alloc_init(void *,void *) { return new lck_spin_t; }
+static void lck_spin_free(lck_spin_t *p,void *) { delete p; }
+static void lck_spin_lock(lck_spin_t *p)
+{
+    if (irq_enabled) {
+        std::fputs("FAIL: sleepqueue lock acquired before local interrupts were masked\n",stderr);
+        std::exit(3);
+    }
+    p->lock(); ++held_spins;
+}
+static void lck_spin_unlock(lck_spin_t *p) { assert(!irq_enabled && held_spins); --held_spins; p->unlock(); }
+static boolean_t ml_set_interrupts_enabled(boolean_t next)
+{
+    bool old=irq_enabled; irq_enabled=next;
+    if (next && !held_spins && pending_interrupt) {
+        auto callback=std::move(pending_interrupt); pending_interrupt={};
+        irq_enabled=false; ++irq_deliveries; callback(); assert(!irq_enabled); irq_enabled=true;
+    }
+    return old;
+}
+#ifdef _MSC_VER
+#pragma warning(disable: 4100 4505)
+#define __ATOMIC_RELAXED 0
+#define __atomic_fetch_add(p,v,o) (*(p)+=(v))
+#define __atomic_fetch_sub(p,v,o) (*(p)-=(v))
+#define __atomic_load_n(p,o) (*(p))
+#endif
+
+struct Wait {
+    event_t channel=nullptr;
+    int result=THREAD_WAITING;
+    uint64_t deadline=0;
+    bool registered=false;
+    std::condition_variable condition;
+};
+static thread_local Wait wait_record;
+static std::mutex wait_lock;
+static std::vector<Wait *> waiters;
+static std::atomic<unsigned> registrations{0};
+static int assert_wait_deadline(event_t event,int mode,uint64_t deadline)
+{
+    (void)mode;
+    std::lock_guard<std::mutex> guard(wait_lock);
+    assert(!wait_record.registered);
+    if (immediate_result!=THREAD_WAITING) return immediate_result;
+    wait_record.channel=event; wait_record.result=THREAD_WAITING;
+    wait_record.deadline=deadline; wait_record.registered=true;
+    waiters.push_back(&wait_record); ++registrations;
+    return THREAD_WAITING;
+}
+static int assert_wait(event_t event,int mode) { return assert_wait_deadline(event,mode,0); }
+static int thread_block(int)
+{
+    assert(irq_enabled && held_spins==0);
+    ++block_calls;
+    std::unique_lock<std::mutex> guard(wait_lock);
+    assert(wait_record.registered);
+    const auto ready=[] { return wait_record.result!=THREAD_WAITING; };
+    if (wait_record.deadline) {
+        if (!wait_record.condition.wait_until(guard,Clock::time_point(std::chrono::nanoseconds(wait_record.deadline)),ready))
+            wait_record.result=THREAD_TIMED_OUT;
+    } else {
+        assert(wait_record.condition.wait_for(guard,std::chrono::seconds(3),ready));
+    }
+    waiters.erase(std::find(waiters.begin(),waiters.end(),&wait_record));
+    wait_record.registered=false;
+    return wait_record.result;
+}
+static void thread_wakeup_prim(event_t event,bool one,int result)
+{
+    std::lock_guard<std::mutex> guard(wait_lock);
+    for (auto *w:waiters) if (w->channel==event && w->result==THREAD_WAITING) {
+        w->result=result; w->condition.notify_one(); if (one) break;
+    }
+}
+static int64_t fixture_ticks() { return int64_t(mach_absolute_time()/1000000ULL); }
+#define jiffies fixture_ticks()
+#define sleepq_set_timeout(channel,ticks) sleepq_set_timeout_sbt((channel),(int64_t(ticks)*(1LL<<32))/hz,0,0)
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4244) /* pinned LP64 helper clamps to INT_MAX before returning int */
+#endif
+/* NMX_ACTUAL_SLEEP_IMPLEMENTATION */
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+static void check_clean()
+{
+    assert(irq_enabled && !held_spins && !wait_record.registered);
+    std::lock_guard<std::mutex> guard(wait_lock); assert(waiters.empty());
+}
+int main()
+{
+    assert(nmx_sleepq_init()==0);
+    static int channel;
+    irq_enabled=false; sleepq_lock(&channel); sleepq_release(&channel); assert(!irq_enabled); irq_enabled=true;
+
+    /* Deferred same-CPU interrupt arrives exactly after wait registration and
+     * chain unlock, before thread_block. It must neither deadlock nor be lost. */
+    set_task_state(current,TASK_UNINTERRUPTIBLE);
+    pending_interrupt=[] { assert(wake_up_task(current,TASK_NORMAL)==1); };
+    auto remainder=linux_schedule_timeout(100);
+    assert(remainder>0 && irq_deliveries==1 && atomic_read(&current->state)==TASK_RUNNING);
+    check_clean();
+
+    /* An immediate signal never enters a wait and must not call thread_block. */
+    for (int outcome:{THREAD_INTERRUPTED,THREAD_RESTART}) {
+        immediate_result=outcome;
+        auto before=block_calls.load();
+        set_task_state(current,TASK_INTERRUPTIBLE);
+        assert(linux_schedule_timeout(100)>0);
+        assert(block_calls==before && current->saved_signal==(outcome==THREAD_INTERRUPTED?-EINTR:-ERESTART));
+        lock_object lock;
+        assert(nmx_sleep(&channel,&lock,PCATCH,"test",10)==(outcome==THREAD_INTERRUPTED?EINTR:ERESTART));
+        assert(lock.held && lock.released==1 && lock.reacquired==1 && block_calls==before);
+        cv condition;
+        assert(cv_wait_common(&condition,&lock,1,0,1)==(outcome==THREAD_INTERRUPTED?EINTR:ERESTART));
+        assert(condition.cv_waiters==0 && block_calls==before);
+        assert(pause_sbt("test",1LL<<25,0,C_CATCH)==(outcome==THREAD_INTERRUPTED?EINTR:ERESTART));
+        assert(block_calls==before);
+        check_clean();
+    }
+    immediate_result=THREAD_WAITING;
+    set_task_state(current,TASK_UNINTERRUPTIBLE);
+    assert(linux_schedule_timeout(5)==0);
+    check_clean();
+
+    /* Cross-thread completion while sleeping, repeat to exercise cleanup and
+     * alternate host CPU identities. The upper Linux state machine is real. */
+    for (unsigned pass=0;pass<32;++pass) {
+        unsigned baseline=registrations.load();
+        task_struct *target=current;
+        set_task_state(target,TASK_INTERRUPTIBLE);
+        std::thread completer([=] {
+            cpu_id=5;
+            while (registrations.load()==baseline) std::this_thread::yield();
+            irq_enabled=false; assert(wake_up_task(target,TASK_NORMAL)==1); assert(!irq_enabled); irq_enabled=true;
+        });
+        assert(linux_schedule_timeout(1000)>0);
+        completer.join(); check_clean();
+    }
+    /* PDROP and immediate outcomes must still honor the caller's lock mode. */
+    immediate_result=THREAD_INTERRUPTED;
+    lock_object drop;
+    assert(nmx_sleep(&channel,&drop,PCATCH|PDROP,"drop",1)==EINTR);
+    assert(!drop.held && drop.released==1 && drop.reacquired==0);
+    immediate_result=THREAD_WAITING;
+    check_clean();
+    nmx_sleepq_fini();
+    std::puts("NMX fence wait chain: actual Linux schedule/wake and XNU adapter, IRQ reentry ordering, early signals, deadlines and cleanup passed; no GPU executed.");
+}

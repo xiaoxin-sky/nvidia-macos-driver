@@ -3993,3 +3993,129 @@
 +{
 +	linux_rcu_barrier(RCU_TYPE_SLEEPABLE);
 +}
+--- a/bsdcompat/src/nmx_sleep.c
++++ b/bsdcompat/src/nmx_sleep.c
+@@ -24,6 +24,7 @@
+ extern void _disable_preemption(void);
+ extern void _enable_preemption(void);
+ extern int cpu_number(void);
++extern boolean_t ml_set_interrupts_enabled(boolean_t enable);
+ 
+ static int result_to_errno(wait_result_t wr)
+ {
+@@ -65,14 +66,14 @@
+     uint64_t deadline = ticks_deadline(timo);
+     event_t ev = (event_t)(uintptr_t)(chan ? chan : (const void *)&ev);   /* NULL channel: sleep until timeout */
+ 
+-    if (deadline)
+-        assert_wait_deadline(ev, intr, deadline);
+-    else
+-        assert_wait(ev, intr);
++    wait_result_t wr = deadline ? assert_wait_deadline(ev, intr, deadline) : assert_wait(ev, intr);
+     uintptr_t how = 0;
+     if (lock)
+         how = nmx_lock_release(lock);
+-    wait_result_t wr = thread_block(THREAD_CONTINUE_NULL);
++    /* An abort can be reported before the thread joins the wait queue.
++     * Do not overwrite that result by blocking a runnable thread. */
++    if (wr == THREAD_WAITING)
++        wr = thread_block(THREAD_CONTINUE_NULL);
+     if (lock && !(pri & PDROP))
+         nmx_lock_reacquire(lock, how);
+     return result_to_errno(wr);
+@@ -97,8 +98,9 @@
+     event_t ev = (event_t)&deadline;
+     if (deadline == 0)
+         return 0;
+-    assert_wait_deadline(ev, (flags & C_CATCH) ? THREAD_ABORTSAFE : THREAD_UNINT, deadline);
+-    wait_result_t wr = thread_block(THREAD_CONTINUE_NULL);
++    wait_result_t wr = assert_wait_deadline(ev, (flags & C_CATCH) ? THREAD_ABORTSAFE : THREAD_UNINT, deadline);
++    if (wr == THREAD_WAITING)
++        wr = thread_block(THREAD_CONTINUE_NULL);
+     return wr == THREAD_TIMED_OUT ? 0 : result_to_errno(wr);
+ }
+ 
+@@ -127,12 +129,12 @@
+ static int cv_wait_common(struct cv *cvp, struct lock_object *lock, int intr, uint64_t deadline, int relock)
+ {
+     __atomic_fetch_add(&cvp->cv_waiters, 1, __ATOMIC_RELAXED);
+-    if (deadline)
+-        assert_wait_deadline((event_t)cvp, intr ? THREAD_ABORTSAFE : THREAD_UNINT, deadline);
+-    else
++    wait_result_t wr = deadline ?
++        assert_wait_deadline((event_t)cvp, intr ? THREAD_ABORTSAFE : THREAD_UNINT, deadline) :
+         assert_wait((event_t)cvp, intr ? THREAD_ABORTSAFE : THREAD_UNINT);
+     uintptr_t how = nmx_lock_release(lock);
+-    wait_result_t wr = thread_block(THREAD_CONTINUE_NULL);
++    if (wr == THREAD_WAITING)
++        wr = thread_block(THREAD_CONTINUE_NULL);
+     __atomic_fetch_sub(&cvp->cv_waiters, 1, __ATOMIC_RELAXED);
+     if (relock)
+         nmx_lock_reacquire(lock, how);
+@@ -181,12 +183,16 @@
+ /*
+  * Chains: a spin lock per hash bucket guards "about to sleep / waking" for every channel in it, plus a count of the
+  * waiters per channel for sleepq_sleepcnt. Between sleepq_add and the wait call the thread holds the chain lock with
+- * preemption disabled, so its pending wait (channel, flags, deadline) is kept in a per-CPU slot.
++ * interrupts disabled, so its pending wait (channel, flags, deadline) is kept in a per-CPU slot.
++ * GPU completion may wake a task from an interrupt. The chain lock therefore
++ * masks local interrupts before acquisition and restores the saved state only
++ * after release; thread_block must run after that release.
+  */
+ #define SC_TABLESIZE 256
+ #define SC_WAITERS 8
+ struct sleepq_chain {
+     lck_spin_t *lock;
++    boolean_t saved_intr;
+     struct { const void *wchan; u_int count; } waiters[SC_WAITERS];
+ };
+ static struct sleepq_chain sc_table[SC_TABLESIZE];
+@@ -225,12 +231,18 @@
+ 
+ void sleepq_lock(const void *wchan)
+ {
+-    lck_spin_lock(sc_lookup(wchan)->lock);
++    struct sleepq_chain *sc = sc_lookup(wchan);
++    boolean_t was = ml_set_interrupts_enabled(FALSE);
++    lck_spin_lock(sc->lock);
++    sc->saved_intr = was;
+ }
+ 
+ void sleepq_release(const void *wchan)
+ {
+-    lck_spin_unlock(sc_lookup(wchan)->lock);
++    struct sleepq_chain *sc = sc_lookup(wchan);
++    boolean_t was = sc->saved_intr;
++    lck_spin_unlock(sc->lock);
++    ml_set_interrupts_enabled(was);
+ }
+ 
+ static void sc_count(struct sleepq_chain *sc, const void *wchan, int delta)
+@@ -272,16 +284,18 @@
+     struct sleepq_pending p = sq_pending[cpu_number()];
+     wait_interrupt_t intr = (p.flags & SLEEPQ_INTERRUPTIBLE) ? THREAD_ABORTSAFE : THREAD_UNINT;
+ 
+-    if (want_timeout && p.deadline)
+-        assert_wait_deadline((event_t)(uintptr_t)wchan, intr, p.deadline);
+-    else
++    wait_result_t wr = want_timeout && p.deadline ?
++        assert_wait_deadline((event_t)(uintptr_t)wchan, intr, p.deadline) :
+         assert_wait((event_t)(uintptr_t)wchan, intr);
+-    sc_count(sc, wchan, 1);
+-    lck_spin_unlock(sc->lock);
+-    wait_result_t wr = thread_block(THREAD_CONTINUE_NULL);
+-    lck_spin_lock(sc->lock);
+-    sc_count(sc, wchan, -1);
+-    lck_spin_unlock(sc->lock);
++    if (wr == THREAD_WAITING)
++        sc_count(sc, wchan, 1);
++    sleepq_release(wchan);
++    if (wr == THREAD_WAITING) {
++        wr = thread_block(THREAD_CONTINUE_NULL);
++        sleepq_lock(wchan);
++        sc_count(sc, wchan, -1);
++        sleepq_release(wchan);
++    }
+     return result_to_errno(wr);
+ }
+ 

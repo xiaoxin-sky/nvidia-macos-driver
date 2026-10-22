@@ -49,6 +49,9 @@ Required evidence
   retained Linux file finalized by fput after its native descriptor was closed.
   Require the real CK/RCU concurrency fixture too; earlier node-open fixtures
   mocked synchronize_rcu and did not cover the r14 native-close panic path.
+  The transitive fence-wait fixture now includes the actual Linux schedule/wake
+  functions and actual native sleepqueue/condition adapter, with Mach primitives
+  supplied by a host event model. Hardware IRQ delivery remains unverified.
 - Userland: final real-ANV/probe build marker, ANV mapping fixture, clock boundary
   fixture and native CLOCK_UPTIME_RAW versus mach_absolute_time comparison.
   Earlier userland artifacts without native_clock_smoke.txt are rejected.
