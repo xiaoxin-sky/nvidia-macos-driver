@@ -3,7 +3,9 @@
  * These checks diagnose illegal blocking contexts; they do not execute a GPU.
  */
 #include <atomic>
+#include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <climits>
 #include <condition_variable>
 #include <cstddef>
@@ -12,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <list>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -47,6 +50,7 @@ static int host_counter_add(volatile int *p,int v)
 #endif
 #define NMXKPI 1
 #define FALSE false
+#define TRUE true
 #define MAXCPU 2
 #define LCK_RW_TYPE_SHARED 0
 #define LCK_RW_TYPE_EXCLUSIVE 1
@@ -61,6 +65,7 @@ static int host_counter_add(volatile int *p,int v)
 #define preempt_enable() nmx_critical_exit()
 #define noinline
 #define READ_ONCE(v) (v)
+#define unlikely(v) (v)
 #define curthread nmx_curthread()
 /* Every extracted generic lock entry uses its leading lock_object member.
  * Resolve offsetof through a template type to avoid MSVC confusing the C
@@ -159,8 +164,86 @@ static void lck_rw_lock_exclusive_to_shared(void *p)
     auto *r=static_cast<NativeRW *>(p);std::lock_guard<std::mutex> g(r->guard);
     assert(r->writer && !r->readers);r->writer=false;r->readers=1;r->ready.notify_all();
 }
+/* Mach wait registration is modeled separately from blocking. The actual
+ * native CV adapter below must release/reacquire the real extracted lock and
+ * preserve early wake/interrupt results across these two primitives. */
+using wait_result_t=int;
+using wait_interrupt_t=int;
+using event_t=const void *;
+constexpr int THREAD_WAITING=1,THREAD_AWAKENED=2,THREAD_TIMED_OUT=3,THREAD_INTERRUPTED=4,THREAD_RESTART=5;
+constexpr int THREAD_ABORTSAFE=1,THREAD_UNINT=0,THREAD_CONTINUE_NULL=0;
+#ifndef ERESTART
+#define ERESTART 85
+#endif
+struct HostWait {
+    event_t event=nullptr;
+    wait_result_t result=THREAD_WAITING;
+    int mode=THREAD_UNINT;
+    uint64_t deadline=0;
+    bool linked=false;
+    std::condition_variable ready;
+};
+static std::mutex wait_mutex;
+static std::vector<HostWait *> waits;
+static thread_local HostWait host_wait;
+static thread_local bool immediate_interrupt=false;
+static thread_local std::function<void()> before_host_block;
+static std::atomic<bool> cancel_interruptible_waits{false};
+static std::atomic<unsigned> host_blocks{0};
+static wait_result_t assert_wait_deadline(event_t event,int mode,uint64_t deadline)
+{
+    std::lock_guard<std::mutex> g(wait_mutex);assert(!host_wait.linked);
+    if(mode==THREAD_ABORTSAFE && (immediate_interrupt || cancel_interruptible_waits)) return THREAD_INTERRUPTED;
+    host_wait.event=event;host_wait.result=THREAD_WAITING;host_wait.mode=mode;host_wait.deadline=deadline;host_wait.linked=true;
+    waits.push_back(&host_wait);return THREAD_WAITING;
+}
+static wait_result_t assert_wait(event_t event,int mode) { return assert_wait_deadline(event,mode,0); }
+static wait_result_t thread_block(int)
+{
+    assert(irqs && !native_spins);
+    if(before_host_block) { auto f=std::move(before_host_block);before_host_block={};f(); }
+    ++host_blocks;std::unique_lock<std::mutex> g(wait_mutex);assert(host_wait.linked);
+    bool woke=host_wait.ready.wait_for(g,std::chrono::seconds(4),[] { return host_wait.result!=THREAD_WAITING; });
+    if(!woke) host_wait.result=THREAD_TIMED_OUT;
+    auto found=std::find(waits.begin(),waits.end(),&host_wait);assert(found!=waits.end());waits.erase(found);host_wait.linked=false;
+    return host_wait.result;
+}
+static void thread_wakeup_prim(event_t event,bool one,int result)
+{
+    std::lock_guard<std::mutex> g(wait_mutex);
+    for(auto *w:waits) if(w->event==event && w->result==THREAD_WAITING) {
+        w->result=result;w->ready.notify_one();if(one) break;
+    }
+}
+static void interrupt_host_waiters()
+{
+    cancel_interruptible_waits=true;
+    std::lock_guard<std::mutex> g(wait_mutex);
+    for(auto *w:waits) if(w->mode==THREAD_ABORTSAFE && w->result==THREAD_WAITING) {
+        w->result=THREAD_INTERRUPTED;w->ready.notify_one();
+    }
+}
 /* ACTUAL_NATIVE_LOCK_IMPLEMENTATION */
 /* ACTUAL_LINUX_SHARED_LOCK_ACCESSORS */
+
+/* Intrusive list storage and the per-current Linux task are model services;
+ * WW queue lifetime, graph checks and CV calls are actual source bodies. */
+#define MUTEX_SKIP() 0
+#define LINUXKPI_VERSION 61400
+#ifndef __unused
+#define __unused
+#endif
+#define TAILQ_ENTRY(t) struct { struct t *next;struct t **previous; }
+#define TAILQ_HEAD(name,t) std::list<struct t *>
+#define TAILQ_INIT(h) (h)->clear()
+#define TAILQ_INSERT_TAIL(h,p,field) (h)->push_back(p)
+#define TAILQ_REMOVE(h,p,field) do { auto at=std::find((h)->begin(),(h)->end(),(p));assert(at!=(h)->end());(h)->erase(at); } while(0)
+#define TAILQ_FOREACH(p,h,field) for(auto at=(h)->begin();at!=(h)->end()?((p)=*at,true):((p)=nullptr,false);++at)
+struct task_struct { int bsd_interrupt_value=0; };
+static thread_local task_struct fixture_ww_task;
+#define current (&fixture_ww_task)
+/* ACTUAL_WW_WAIT_PATH */
+#undef current
 
 using spinlock_t=struct mtx;
 using gfp_t=unsigned;
@@ -450,8 +533,127 @@ static void idr_parallel_preloads()
     });for(auto &w:workers)w.join();
     require(!idr_live_allocations,"parallel IDR caches leaked native allocations");
 }
+template<class F> static void until_test(F condition,const char *message)
+{
+    const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+    while(!condition()) { require(std::chrono::steady_clock::now()<end,message);std::this_thread::yield(); }
+}
+static bool wait_registered(event_t event)
+{
+    std::lock_guard<std::mutex> g(wait_mutex);
+    return std::any_of(waits.begin(),waits.end(),[&](HostWait *w) { return w->event==event && w->result==THREAD_WAITING; });
+}
+static void ww_clean()
+{
+    linux_ww_lock();bool empty=ww_mutex_head.empty();linux_ww_unlock();
+    require(empty,"WW wait queue retained a stack entry");
+    std::lock_guard<std::mutex> g(wait_mutex);require(waits.empty(),"native CV retained a wait registration");
+}
+static void ww_context_lifetime()
+{
+    ww_class klass{"WW-context"};ww_mutex lock{};ww_acquire_ctx one{},two{};
+    lock.ctx=reinterpret_cast<ww_acquire_ctx *>(uintptr_t(1));ww_mutex_init(&lock,&klass);
+    require(lock.ctx==nullptr,"new WW mutex retained uninitialized context");
+    require(ww_mutex_trylock(&lock,&one)==1 && lock.ctx==&one,"WW trylock lost its acquisition context");
+    std::thread other([&] { require(ww_mutex_trylock(&lock,&two)==0,"WW trylock stole another owner"); });other.join();
+    require(lock.ctx==&one && ww_mutex_lock(&lock,&one)==-EALREADY,"WW failed/recursive acquisition changed context");
+    ww_mutex_unlock(&lock);require(lock.ctx==nullptr,"WW unlock retained acquisition context");
+    require(ww_mutex_trylock(&lock,nullptr)==1 && lock.ctx==nullptr,"context-free WW trylock retained stale context");
+    ww_mutex_unlock(&lock);ww_mutex_destroy(&lock);ww_clean();
+}
+static void ww_handoff(bool early)
+{
+    ww_class klass{"WW-handoff"};ww_mutex lock{};ww_acquire_ctx owner{},next{};ww_mutex_init(&lock,&klass);
+    require(ww_mutex_lock(&lock,&owner)==0,"WW initial ownership failed");
+    std::atomic<bool> before{false},released{false};int result=INT_MIN;
+    unsigned blocked=host_blocks;
+    std::thread waiter([&] {
+        if(early) before_host_block=[&] { before=true;while(!released) std::this_thread::yield(); };
+        result=ww_mutex_lock(&lock,&next);
+        require(result==0 && lock.ctx==&next,"WW wait/reacquire did not transfer real ownership");
+        ww_mutex_unlock(&lock);
+    });
+    until_test([&] { return early?before.load():wait_registered(&lock.condvar); },"WW waiter did not register native wait");
+    ww_mutex_unlock(&lock);released=true;waiter.join();
+    require(result==0 && host_blocks>blocked && lock.condvar.cv_waiters==0,"WW handoff did not block/clean native CV");
+    ww_mutex_destroy(&lock);ww_clean();
+}
+static void ww_native_handoff() { ww_handoff(false); }
+static void ww_native_early_wake() { ww_handoff(true); }
+static void ww_interrupted_wait()
+{
+    ww_class klass{"WW-interrupt"};ww_mutex lock{};ww_acquire_ctx owner{},next{};ww_mutex_init(&lock,&klass);
+    require(ww_mutex_lock(&lock,&owner)==0,"WW interrupt fixture initial acquire failed");
+    int result=0,saved=0;
+    std::thread waiter([&] {
+        immediate_interrupt=true;result=ww_mutex_lock_interruptible(&lock,&next);
+        saved=fixture_ww_task.bsd_interrupt_value;immediate_interrupt=false;
+    });waiter.join();
+    require(result==-EINTR && saved==-EINTR && lock.ctx==&owner && sx_xholder(&lock.base.sx)==curthread,
+        "WW interruption stole ownership, lost errno or changed incumbent context");
+    require(lock.condvar.cv_waiters==0,"interrupted WW wait leaked CV reference");
+    ww_mutex_unlock(&lock);ww_mutex_destroy(&lock);ww_clean();
+}
+static void ww_cycle(unsigned count)
+{
+    ww_class klass{"WW-cycle"};std::vector<ww_mutex> locks(count);std::vector<ww_acquire_ctx> contexts(count);
+    for(auto &lock:locks) ww_mutex_init(&lock,&klass);
+    std::atomic<unsigned> ready{0};std::atomic<bool> go{false},finished{false},cancelled{false};
+    std::vector<int> results(count,INT_MIN);std::vector<std::thread> workers;
+    cancel_interruptible_waits=false;
+    for(unsigned i=0;i<count;++i) workers.emplace_back([&,i] {
+        require(ww_mutex_lock(&locks[i],&contexts[i])==0,"WW cycle initial acquire failed");
+        ++ready;while(!go) std::this_thread::yield();
+        const unsigned next=(i+1)%count;
+        results[i]=ww_mutex_lock_interruptible(&locks[next],&contexts[i]);
+        if(results[i]==0) ww_mutex_unlock(&locks[next]);
+        ww_mutex_unlock(&locks[i]);
+    });
+    until_test([&] { return ready==count; },"WW cycle owners did not arrive");
+    // Cancellation is a test failure escape, never an accepted deadlock result.
+    std::thread guard([&] {
+        const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+        while(!finished && std::chrono::steady_clock::now()<end) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if(!finished) { cancelled=true;interrupt_host_waiters(); }
+    });
+    go=true;for(auto &w:workers) w.join();finished=true;guard.join();
+    unsigned deadlocks=0;
+    for(int r:results) { if(r==-EDEADLK) ++deadlocks;else require(r==0 || (cancelled && r==-EINTR),"WW cycle returned unexpected error"); }
+    for(auto &lock:locks) { require(!lock.ctx && !sx_xholder(&lock.base.sx) && lock.condvar.cv_waiters==0,"WW cycle left live ownership");ww_mutex_destroy(&lock); }
+    ww_clean();cancel_interruptible_waits=false;
+    require(!cancelled && deadlocks>0,"WW cycle required forced cancellation instead of returning EDEADLK");
+}
+static void ww_cycle_two() { ww_cycle(2); }
+static void ww_cycle_three() { ww_cycle(3); }
+static void ww_cycle_four() { ww_cycle(4); }
+static void ww_cycle_eight() { ww_cycle(8); }
+static void ww_acyclic_chain()
+{
+    constexpr unsigned count=6;
+    ww_class klass{"WW-acyclic"};std::vector<ww_mutex> locks(count);std::vector<ww_acquire_ctx> contexts(count);
+    for(auto &lock:locks) ww_mutex_init(&lock,&klass);
+    require(ww_mutex_lock(&locks[0],&contexts[0])==0,"acyclic WW anchor failed");
+    std::atomic<unsigned> ready{0},done{0};std::atomic<bool> go{false};
+    std::vector<int> results(count,INT_MIN);std::vector<std::thread> workers;
+    for(unsigned i=1;i<count;++i) workers.emplace_back([&,i] {
+        require(ww_mutex_lock(&locks[i],&contexts[i])==0,"acyclic WW owner failed");
+        ++ready;while(!go)std::this_thread::yield();
+        results[i]=ww_mutex_lock(&locks[i-1],&contexts[i]);
+        if(results[i]==0)ww_mutex_unlock(&locks[i-1]);
+        ww_mutex_unlock(&locks[i]);++done;
+    });
+    until_test([&] { return ready==count-1; },"acyclic WW owners missing");go=true;
+    until_test([&] {
+        std::lock_guard<std::mutex> g(wait_mutex);return waits.size()==count-1 || done>0;
+    },"acyclic WW wait chain did not register");
+    ww_mutex_unlock(&locks[0]);for(auto &w:workers)w.join();
+    bool valid=true;for(unsigned i=1;i<count;++i)valid=valid && results[i]==0;
+    for(auto &lock:locks) { require(!lock.ctx && !sx_xholder(&lock.base.sx),"acyclic WW chain retained owner");ww_mutex_destroy(&lock); }
+    ww_clean();require(valid,"WW graph incorrectly rejected an acyclic chain");
+}
 int main()
 {
+    linux_ww_init(nullptr);unsigned failed=0;
     const std::pair<const char *,void(*)()> cases[]={
         {"nested-native-contention",nested_spin_wait},{"BH-migration-and-critical",explicit_bh_migration},
         {"true-critical-guard",true_critical_guard},{"actual-CSB-uncore-fallback",csb_fallback},
@@ -461,7 +663,16 @@ int main()
         {"exclusive-sleep-recursion",exclusive_sleep_recursion},
         {"downgrade-shared-sleep",downgrade_and_shared_sleep},{"other-owner-trylocks",other_owner_trylocks},
         {"IDR-thread-cache-migration",idr_threaded_preload},{"IDR-partial-prefill",idr_partial_preload},
-        {"IDR-parallel-preloads",idr_parallel_preloads}};
-    for(auto &c:cases) { c.second();std::printf("PASS %s\n",c.first); }
-    std::puts("Actual Linux/native locking, IDR/BH/critical/CSB contracts passed; native primitives/allocator/MMIO modeled; no GPU executed.");
+        {"IDR-parallel-preloads",idr_parallel_preloads},{"WW-context-lifetime",ww_context_lifetime},
+        {"WW-native-CV-handoff",ww_native_handoff},{"WW-native-CV-early-wake",ww_native_early_wake},
+        {"WW-interrupted-wait",ww_interrupted_wait},{"WW-cycle-two",ww_cycle_two},
+        {"WW-cycle-three",ww_cycle_three},{"WW-cycle-four",ww_cycle_four},{"WW-cycle-eight",ww_cycle_eight},
+        {"WW-acyclic-chain",ww_acyclic_chain}};
+    for(auto &c:cases) {
+        try { c.second();std::printf("PASS %s\n",c.first); }
+        catch(const std::exception &e) { std::printf("FAIL %s: %s\n",c.first,e.what());++failed;break; }
+    }
+    linux_ww_uninit(nullptr);
+    if(!failed) std::puts("Actual Linux/native locking, WW/CV, IDR/BH/critical/CSB contracts passed; Mach/allocator/list/MMIO primitives modeled; no GPU executed.");
+    return failed?1:0;
 }

@@ -1,9 +1,10 @@
-"""Join actual Linux mutex/rwsem/IDR and native locking to the i915 CSB fallback.
+"""Join Linux mutex/rwsem/WW/IDR and native CV/locking to the i915 CSB fallback.
 
 The harness models Mach/IOKit mutex primitives, CPU identity, MMIO and the
 bounded polling timer. Native owner bookkeeping, BH nesting, critical scopes,
-Linux lock accessors, IDR preload, CSB fallback and uncore lock macros are
-production source. C allocation conversions are made explicit for C++ only.
+Linux lock/WW/CV paths, IDR preload, CSB fallback and uncore lock macros are
+production source. C allocation casts and the Windows GNU-expression wrapper
+are representation changes only; native clang keeps the original GNU macro.
 This checks context/lifetime contracts and never claims GPU execution.
 """
 import argparse
@@ -42,6 +43,8 @@ def prepare(port, freebsd, drm, template, output):
     Shared/exclusive locks preserve atomic downgrade in the primitive model.
     IDR radix-tree operations are not simulated: the changed preload/get/free
     ownership path is extracted; full tree compilation remains a kernel check.
+    WW waits run through the actual CV adapter and actual generic release/
+    reacquire, using host Mach wait primitives and intrusive-list storage.
     """
     kernel = (port / 'bsdcompat/src/nmx_kernel.c').read_text(encoding='utf-8')
     locks = (port / 'bsdcompat/src/nmx_lock.c').read_text(encoding='utf-8')
@@ -58,6 +61,11 @@ def prepare(port, freebsd, drm, template, output):
     lock_h = (port / 'bsdcompat/include/sys/lock.h').read_text(encoding='utf-8')
     mtx_h = (port / 'bsdcompat/include/sys/_mutex.h').read_text(encoding='utf-8')
     mtx_api = (port / 'bsdcompat/include/sys/mutex.h').read_text(encoding='utf-8')
+    condvar = (port / 'bsdcompat/include/sys/condvar.h').read_text(encoding='utf-8')
+    sleep = (port / 'bsdcompat/src/nmx_sleep.c').read_text(encoding='utf-8')
+    ww_h = (freebsd / 'sys/compat/linuxkpi/common/include/linux/ww_mutex.h').read_text(encoding='utf-8')
+    ww_c = (freebsd / 'sys/compat/linuxkpi/common/src/linux_lock.c').read_text(encoding='utf-8')
+    sched_h = (freebsd / 'sys/compat/linuxkpi/common/include/linux/sched.h').read_text(encoding='utf-8')
     record = re.findall(r'^struct nmx_thread_rec \{\n.*?^\};', kernel, re.M | re.S)
     critical = re.findall(r'^static struct \{ int nest; boolean_t saved; \} nmx_crit\[MAXCPU\];', kernel, re.M)
     if len(record) != 1 or len(critical) != 1:
@@ -69,6 +77,10 @@ def prepare(port, freebsd, drm, template, output):
         if len(found) != 1:
             raise ValueError(f'native shared-lock layout drift: {name}')
         pieces.append(found[0])
+    found = re.findall(r'^struct cv \{\n.*?^\};', condvar, re.M | re.S)
+    if len(found) != 1:
+        raise ValueError('native CV layout drift')
+    pieces.append(found[0])
     pieces += [definition(sx, 'nmx_sx_owner'), definition(rw, 'nmx_rw_owner')]
     pieces += [definition(kernel, n) for n in ['nmx_linux_bh_disable', 'nmx_linux_bh_enable',
                'nmx_linux_bh_depth', 'nmx_critical_enter', 'nmx_critical_exit', 'nmx_in_critical',
@@ -87,6 +99,8 @@ def prepare(port, freebsd, drm, template, output):
                'nmx_rw_unlock']]
     pieces += [macro(locks, 'HOW_SHARED'), definition(locks, 'nmx_lock_release'),
                definition(locks, 'nmx_lock_reacquire')]
+    pieces += [definition(sleep, n) for n in ['result_to_errno', 'cv_init', 'cv_destroy',
+               'cv_wait_common', '_cv_wait', '_cv_wait_sig', 'cv_signal']]
     pieces += [macro(spin, n) for n in ['spin_lock', 'spin_unlock', 'spin_lock_irqsave',
                                       'spin_unlock_irqrestore']]
     values = {'/* ACTUAL_NATIVE_LOCK_IMPLEMENTATION */': '\n\n'.join(pieces)}
@@ -117,6 +131,35 @@ def prepare(port, freebsd, drm, template, output):
     upper += [macro(rwsem, n) for n in ['down_write', 'up_write', 'down_read', 'up_read',
               'down_read_trylock', 'down_write_trylock', 'downgrade_write']]
     values['/* ACTUAL_LINUX_SHARED_LOCK_ACCESSORS */'] = '\n\n'.join(upper)
+    ww_parts = [macro(condvar, n) for n in ['cv_wait', 'cv_wait_sig']]
+    ww_parts += [macro(mutex, n) for n in ['mutex_unlock', 'mutex_destroy']]
+    try_macro = macro(mutex, 'mutex_trylock')
+    cpp_try = try_macro.replace('({', '([&]() { return ', 1)
+    cpp_try = cpp_try.rsplit('})', 1)[0] + '}())'
+    ww_parts += ['#ifdef _MSC_VER\n' + cpp_try + '\n#else\n' + try_macro + '\n#endif']
+    ww_parts += [definition(mutex, n) for n in ['linux_mutex_init', 'linux_mutex_destroy']]
+    for source, name in [(ww_h, 'ww_class'), (ww_h, 'ww_acquire_ctx'),
+                         (ww_h, 'ww_mutex'), (ww_c, 'ww_mutex_thread')]:
+        found = re.findall(rf'^struct {name} \{{\n.*?^\}};', source, re.M | re.S)
+        if len(found) != 1:
+            raise ValueError(f'WW layout drift: {name}')
+        ww_parts.append(found[0])
+    ww_parts += ['static TAILQ_HEAD(, ww_mutex_thread) ww_mutex_head;',
+                 'static struct mtx ww_mutex_global;']
+    ww_parts += [definition(sched_h, 'linux_schedule_save_interrupt_value')]
+    ww_parts += [definition(ww_c, n) for n in ['linux_ww_init', 'linux_ww_uninit',
+                 'linux_ww_lock', 'linux_ww_unlock']]
+    if re.search(r'^static bool\s+linux_ww_would_deadlock\(', ww_c, re.M):
+        ww_parts.append(definition(ww_c, 'linux_ww_would_deadlock'))
+    ww_parts += [definition(ww_c, n) for n in ['linux_ww_mutex_lock_sub', 'linux_ww_mutex_unlock_sub']]
+    ww_parts += [definition(ww_h, n) for n in ['ww_mutex_lock', 'ww_mutex_lock_interruptible',
+                 'ww_mutex_unlock', 'ww_mutex_init', 'ww_mutex_destroy']]
+    # Select the actual >=51600 signature used by this port; retain its body.
+    tries = re.findall(r'ww_mutex_trylock\(struct ww_mutex \*lock, struct ww_acquire_ctx \*ctx\)\n#else\n.*?#endif\n(\{\n.*?^\})', ww_h, re.M | re.S)
+    if len(tries) != 1:
+        raise ValueError('WW trylock target signature drift')
+    ww_parts.append('static inline int ww_mutex_trylock(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)\n' + tries[0])
+    values['/* ACTUAL_WW_WAIT_PATH */'] = '\n\n'.join(ww_parts)
     idr_parts = [macro(idr_h, n) for n in ['IDR_BITS', 'IDR_SIZE', 'MAX_IDR_SHIFT']]
     idr_parts += [macro(idr, n) for n in ['MAX_IDR_LEVEL', 'MAX_IDR_FREE']]
     for source, name in [(idr_h, 'idr_layer'), (idr_h, 'idr'), (idr, 'linux_idr_cache')]:

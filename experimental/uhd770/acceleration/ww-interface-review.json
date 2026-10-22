@@ -1,0 +1,27 @@
+{
+  "date": "2026-10-22",
+  "scope": "WW reservation progress and native CV/locking interfaces used by GEM submission",
+  "verification": {
+    "status": "implemented and 25 joined host cases passed; native macOS pending",
+    "baseline": "Actual legacy pairwise WW core with otherwise-current owner/context helpers fails the three-thread cycle and needs test-only interruption to terminate. This is a software regression, not a reproduction of the target GPU panic.",
+    "baseline_log": "ww-pairwise-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nPASS WW-context-lifetime\nPASS WW-native-CV-handoff\nPASS WW-native-CV-early-wake\nPASS WW-interrupted-wait\nPASS WW-cycle-two\nFAIL WW-cycle-three: WW cycle required forced cancellation instead of returning EDEADLK\n",
+    "baseline_core_sha256": "5c056ccfe78747ec37f5392e10485f814ea29d768f94de4477385b77cc062133",
+    "repair": "Bounded owner -> pending lock -> owner traversal under ww_mutex_global, with actual -EDEADLK backoff; no allocation/recursion or synthetic completion. WW init clears ctx and successful trylock retains the caller context; failure preserves incumbent ctx.",
+    "host_log": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nPASS WW-context-lifetime\nPASS WW-native-CV-handoff\nPASS WW-native-CV-early-wake\nPASS WW-interrupted-wait\nPASS WW-cycle-two\nPASS WW-cycle-three\nPASS WW-cycle-four\nPASS WW-cycle-eight\nPASS WW-acyclic-chain\nActual Linux/native locking, WW/CV, IDR/BH/critical/CSB contracts passed; Mach/allocator/list/MMIO primitives modeled; no GPU executed.\n",
+    "coverage": [
+      "actual Linux WW init/try/blocking/unlock and ctx lifetime",
+      "actual native CV wait registration/block/errno and generic native lock release/reacquire",
+      "ordinary and pre-block early wake; interrupt return and saved Linux interruption value",
+      "2/3/4/8-thread cycle backoff without forced cancellation",
+      "six-thread acyclic chain completes without false EDEADLK",
+      "all prior 16 native lock/IDR/BH/critical/CSB cases retained"
+    ],
+    "limits": "Mach wait primitives, allocator/registry, intrusive-list storage and MMIO are host models. The baseline canceller is only a failure escape and never an accepted pass. Native clang uses the original GNU trylock macro; Windows changes only that expression wrapper. No GPU is executed.",
+    "hardware_executed": false,
+    "new_hardware_test_requested": false
+  },
+  "next": [
+    "Native compiler/TSan/memory/KC verification",
+    "Review GPU VA/PTE and actual IRQ/fence/readback/cleanup before another target request"
+  ]
+}

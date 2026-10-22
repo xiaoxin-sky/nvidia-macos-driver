@@ -73,3 +73,113 @@
  			cv_signal(&lock->condvar);
  	}
  
+--- a/sys/compat/linuxkpi/common/include/linux/ww_mutex.h
++++ b/sys/compat/linuxkpi/common/include/linux/ww_mutex.h
+@@ -72,13 +72,21 @@
+ 
+ #if defined(LINUXKPI_VERSION) && LINUXKPI_VERSION >= 51600
+ static inline int __must_check
+-ww_mutex_trylock(struct ww_mutex *lock, struct ww_acquire_ctx *ctx __unused)
++ww_mutex_trylock(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
+ #else
+ static inline int __must_check
+ ww_mutex_trylock(struct ww_mutex *lock)
+ #endif
+ {
+-	return (mutex_trylock(&lock->base));
++	if (!mutex_trylock(&lock->base))
++		return (0);
++	/* Darwin try-acquire has the same context lifetime as blocking acquire. */
++#if defined(LINUXKPI_VERSION) && LINUXKPI_VERSION >= 51600
++	lock->ctx = ctx;
++#else
++	lock->ctx = NULL;
++#endif
++	return (1);
+ }
+ 
+ extern int linux_ww_mutex_lock_sub(struct ww_mutex *,
+@@ -134,6 +142,7 @@
+ {
+ 	linux_mutex_init(&lock->base, ww_class->mutex_name, SX_NOWITNESS);
+ 	cv_init(&lock->condvar, "lkpi-ww");
++	lock->ctx = NULL;
+ }
+ 
+ static inline void
+--- a/sys/compat/linuxkpi/common/src/linux_lock.c
++++ b/sys/compat/linuxkpi/common/src/linux_lock.c
+@@ -67,6 +67,37 @@
+ 	mtx_unlock(&ww_mutex_global);
+ }
+ 
++/* ww_mutex_global is held and the requester is already linked in the wait
++ * list. Follow owner -> pending lock -> owner, instead of testing only one
++ * reciprocal pair. This covers arbitrary cycles without allocation/recursion.
++ * A nonwaiting owner terminates an acyclic path. The queue-length bound also
++ * prevents looping if we reach an existing cycle, so the caller can back off
++ * through the established -EDEADLK path and release its reserved objects. */
++static bool
++linux_ww_would_deadlock(struct ww_mutex *lock, struct thread *requester)
++{
++    struct ww_mutex_thread *cursor;
++    struct thread *owner = sx_xholder(&lock->base.sx);
++    unsigned remaining = 0;
++
++    KASSERT(mtx_owned(&ww_mutex_global), ("WW graph requires global lock"));
++    TAILQ_FOREACH(cursor, &ww_mutex_head, entry)
++        ++remaining;
++    while (owner != NULL && remaining != 0) {
++        if (owner == requester)
++            return true;
++        --remaining;
++        TAILQ_FOREACH(cursor, &ww_mutex_head, entry) {
++            if (cursor->thread == owner)
++                break;
++        }
++        if (cursor == NULL)
++            return false;
++        owner = sx_xholder(&cursor->lock->base.sx);
++    }
++    return owner != NULL;
++}
++
+ /* lock a mutex with deadlock avoidance */
+ int
+ linux_ww_mutex_lock_sub(struct ww_mutex *lock,
+@@ -74,7 +105,6 @@
+ {
+ 	struct task_struct *task;
+ 	struct ww_mutex_thread entry;
+-	struct ww_mutex_thread *other;
+ 	int retval = 0;
+ 
+ 	task = current;
+@@ -86,24 +116,9 @@
+ 		TAILQ_INSERT_TAIL(&ww_mutex_head, &entry, entry);
+ 
+ 		do {
+-			struct thread *owner = sx_xholder(&lock->base.sx);
+-
+-			/* scan for deadlock */
+-			TAILQ_FOREACH(other, &ww_mutex_head, entry) {
+-				/* skip own thread */
+-				if (other == &entry)
+-					continue;
+-				/*
+-				 * If another thread is owning our
+-				 * lock and is at the same time trying
+-				 * to acquire a lock this thread owns,
+-				 * that means deadlock.
+-				 */
+-				if (other->thread == owner &&
+-				    sx_xholder(&other->lock->base.sx) == curthread) {
+-					retval = -EDEADLK;
+-					goto done;
+-				}
++			if (linux_ww_would_deadlock(lock, curthread)) {
++				retval = -EDEADLK;
++				goto done;
+ 			}
+ 			if (catch_signal) {
+ 				retval = -cv_wait_sig(&lock->condvar, &ww_mutex_global);

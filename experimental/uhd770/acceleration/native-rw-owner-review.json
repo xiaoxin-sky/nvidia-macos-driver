@@ -1,6 +1,6 @@
 {
   "date": "2026-10-22",
-  "status": "implemented and 16 joined host cases passed; native macOS/TSan/ASan pending",
+  "status": "native 16-case lock/IDR checks passed; 25-case WW/CV extension host-passed, native pending",
   "scope": "Linux mutex/rwsem and BSD sx/rw owner metadata over native lck_rw; used by GEM/VM/context paths",
   "findings": [
     "nmx_lock.c SX/RW owner probes and publication use volatile sx_lock/rw_owner, unlike the repaired explicit atomic mtx_owner path",
@@ -37,6 +37,33 @@
     "complete_common_source": "D:/UHD770-driver-kit/build-audit/freebsd-native-interfaces/sys/compat/linuxkpi/common",
     "owner_read_consumers": "Full common-source search identified mutex.h, ww_mutex.h and linux_lock.c; all owner-word reads in these paths now use sx_xholder and the native atomic helper.",
     "migration_consumers": "Mandatory IDR preload migrated to thread-owned scoped state. Native critical/FPU exclusion is preserved; highmem uses the PMAP_HAS_DMAP fast path on this port. Scatterlist copy helpers still have per-CPU/direct-map assumptions and were not found on ordinary i915 compute caller paths; no broad compatibility claim is made.",
-    "WW_progress": "Existing WW source checks direct two-thread wait cycles. Its general contention/progress behavior needs a separate actual wait-graph review, not an inference from owner metadata tests."
+    "WW_progress": "Pairwise-only core reproduced a three-thread cycle failure. Current staged source traverses the bounded wait chain; actual CV/native lock and context cases host-passed, native pending."
+  },
+  "native_evidence": {
+    "source": "8fcf6fa027433bc38232c78c796230249d2d4318",
+    "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39730672410",
+    "artifact_id": 12405540999,
+    "sha256": "54f8a60a7b852592440f5a687ace6883f05277dd2fed79e5517a16fdbcdeba2f",
+    "result": "16 actual Linux/native lock/SX/RW/IDR/BH/CSB groups passed normally, with ThreadSanitizer and AddressSanitizer/UBSan on macOS; all 1250 kernel units/KC preflight passed",
+    "hardware_executed": false
+  },
+  "WW_extension": {
+    "status": "implemented and 25 joined host cases passed; native macOS pending",
+    "baseline": "Actual legacy pairwise WW core with otherwise-current owner/context helpers fails the three-thread cycle and needs test-only interruption to terminate. This is a software regression, not a reproduction of the target GPU panic.",
+    "baseline_log": "ww-pairwise-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nPASS WW-context-lifetime\nPASS WW-native-CV-handoff\nPASS WW-native-CV-early-wake\nPASS WW-interrupted-wait\nPASS WW-cycle-two\nFAIL WW-cycle-three: WW cycle required forced cancellation instead of returning EDEADLK\n",
+    "baseline_core_sha256": "5c056ccfe78747ec37f5392e10485f814ea29d768f94de4477385b77cc062133",
+    "repair": "Bounded owner -> pending lock -> owner traversal under ww_mutex_global, with actual -EDEADLK backoff; no allocation/recursion or synthetic completion. WW init clears ctx and successful trylock retains the caller context; failure preserves incumbent ctx.",
+    "host_log": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nPASS WW-context-lifetime\nPASS WW-native-CV-handoff\nPASS WW-native-CV-early-wake\nPASS WW-interrupted-wait\nPASS WW-cycle-two\nPASS WW-cycle-three\nPASS WW-cycle-four\nPASS WW-cycle-eight\nPASS WW-acyclic-chain\nActual Linux/native locking, WW/CV, IDR/BH/critical/CSB contracts passed; Mach/allocator/list/MMIO primitives modeled; no GPU executed.\n",
+    "coverage": [
+      "actual Linux WW init/try/blocking/unlock and ctx lifetime",
+      "actual native CV wait registration/block/errno and generic native lock release/reacquire",
+      "ordinary and pre-block early wake; interrupt return and saved Linux interruption value",
+      "2/3/4/8-thread cycle backoff without forced cancellation",
+      "six-thread acyclic chain completes without false EDEADLK",
+      "all prior 16 native lock/IDR/BH/critical/CSB cases retained"
+    ],
+    "limits": "Mach wait primitives, allocator/registry, intrusive-list storage and MMIO are host models. The baseline canceller is only a failure escape and never an accepted pass. Native clang uses the original GNU trylock macro; Windows changes only that expression wrapper. No GPU is executed.",
+    "hardware_executed": false,
+    "new_hardware_test_requested": false
   }
 }
