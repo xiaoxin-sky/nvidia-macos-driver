@@ -288,8 +288,8 @@
     {
       "id": "completion",
       "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
-      "status": "LOWER LOCK/WAIT AND WW CONTRACTS NATIVE-PASSED; joined completion host-passed, latest native fixture compilation failed before execution",
-      "remaining": "Native fixture unused-state declaration fixed and host-rechecked; native rerun still needed. PCI/MMIO delivery, command/HWSP generation and actual GPU completion/exit remain unverified",
+      "status": "JOINED COMPLETION FIXTURE NATIVE-PASSED (NORMAL/TSan/ASan) AND THE PCI IRQ ENTRY IS SOURCE-VERIFIED; physical IRQ delivery and GPU completion unverified",
+      "remaining": "Still open: physical MSI/legacy delivery and acknowledgement on the target, whether running i915's handler on a work-loop thread changes completion timing, the GPU actually generating command/HWSP writes, and a real completion reaching 0 exit. The native retry that earlier text said was pending has already passed.",
       "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
       "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018",
       "next_review": "Complete remaining critical-scope transitive audit and actual GPU context/memory/submission/visibility/cleanup contracts; no hardware request merely for a passing build",
@@ -391,7 +391,7 @@
       },
       "next_transitive_route": "Native PCI IOInterruptEventSource -> nmx_bus intr_trampoline -> Linux irq handler -> gen11 GT identity decode -> execlists tasklet/breadcrumb irq_work -> dma_fence callback -> real syncobj wait/sleepqueue. Worker queues and lower waits have separate fixtures, but this joined GPU completion path is not yet verified.",
       "joined_completion": {
-        "status": "11 joined host groups passed; latest native fixture compilation failed before execution, unused-state annotation fixed and host-rechecked; native retry pending",
+        "status": "11 joined host groups passed natively on macOS normally, under TSan and under ASan/UBSan; hardware IRQ and GPU completion unverified",
         "route": "Injected GT interrupt identity -> actual GT engine selection/execlists IRQ -> actual irq_work and NMX taskqueue worker -> actual i915 HWSP completion predicate/breadcrumbs -> actual dma_fence callback -> actual DRM ordinary syncobj wait -> actual Linux schedule/wake -> actual native sleepqueue/Mach adapter",
         "actual_code": [
           "GT identity macros/pick_gt/gen11_gt_identity_handler/intel_engine_cs_irq/execlists_irq_handler",
@@ -430,22 +430,116 @@
         "hardware_executed": false,
         "new_user_reboot_requested": false,
         "latest_native_attempt": {
+          "source": "358e6c1c4a1fb903668837165d11d2ff45e7f3b5",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39746307678",
+          "artifact_id": 12411804139,
+          "sha256": "8912c0c9ee2be922875d878afd1fccbcfe41ecd7e0c481dbd3db8353bcb6c6e3",
+          "result": "PASSED: the 11 joined completion groups ran on macOS normally, under ThreadSanitizer and under AddressSanitizer/UndefinedBehaviorSanitizer; kernel build and native KC preflight passed in the same run",
+          "first_native_pass": {
+            "source": "e3b8552b077c5ce3635754a8c33d848ff0d3f49a",
+            "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39741156952",
+            "artifact_id": 12410006891,
+            "sha256": "6f512061ed5cb20f6188813a266b85acf74efc5960e91e4a9dfe0a3686c87d47",
+            "result": "PASSED after the [[maybe_unused]] fix: 11 of 11 groups in the normal, TSan and ASan logs, empty completion compile logs, kernel build and native KC preflight passed",
+            "verified_here": "artifact downloaded and its sha256 compared with the GitHub API digest"
+          },
+          "previous_failure": {
+            "source": "82f3c38fcfffdef322a1f6eaad01c971c1da36cc",
+            "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39738541155",
+            "artifact_id": 12408491286,
+            "sha256": "07a2b76f1b84f465e2f5c6e8bd8e24987da557dd8e0f330ee1bf59204e81790b",
+            "result": "FAILED BEFORE EXECUTION: native Clang -Werror,-Wunused-const-variable rejected TASK_UNINTERRUPTIBLE in the shared fixture declaration",
+            "kept_for_history": true
+          },
+          "hardware_executed": false
+        }
+      },
+      "latest_native_attempt": {
+        "source": "358e6c1c4a1fb903668837165d11d2ff45e7f3b5",
+        "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39746307678",
+        "artifact_id": 12411804139,
+        "sha256": "8912c0c9ee2be922875d878afd1fccbcfe41ecd7e0c481dbd3db8353bcb6c6e3",
+        "result": "PASSED: the 11 joined completion groups ran on macOS normally, under ThreadSanitizer and under AddressSanitizer/UndefinedBehaviorSanitizer; kernel build and native KC preflight passed in the same run",
+        "first_native_pass": {
+          "source": "e3b8552b077c5ce3635754a8c33d848ff0d3f49a",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39741156952",
+          "artifact_id": 12410006891,
+          "sha256": "6f512061ed5cb20f6188813a266b85acf74efc5960e91e4a9dfe0a3686c87d47",
+          "result": "PASSED after the [[maybe_unused]] fix: 11 of 11 groups in the normal, TSan and ASan logs, empty completion compile logs, kernel build and native KC preflight passed",
+          "verified_here": "artifact downloaded and its sha256 compared with the GitHub API digest"
+        },
+        "previous_failure": {
           "source": "82f3c38fcfffdef322a1f6eaad01c971c1da36cc",
           "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39738541155",
           "artifact_id": 12408491286,
           "sha256": "07a2b76f1b84f465e2f5c6e8bd8e24987da557dd8e0f330ee1bf59204e81790b",
           "result": "FAILED BEFORE EXECUTION: native Clang -Werror,-Wunused-const-variable rejected TASK_UNINTERRUPTIBLE in the shared fixture declaration",
-          "repair": "Annotate the fixture-only shared state declaration with [[maybe_unused]], preserving its values and all production code; regenerated 11 host cases and targeted clang check passed. Native retry pending",
-          "hardware_executed": false
-        }
+          "kept_for_history": true
+        },
+        "hardware_executed": false
       },
-      "latest_native_attempt": {
-        "source": "82f3c38fcfffdef322a1f6eaad01c971c1da36cc",
-        "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39738541155",
-        "artifact_id": 12408491286,
-        "sha256": "07a2b76f1b84f465e2f5c6e8bd8e24987da557dd8e0f330ee1bf59204e81790b",
-        "result": "FAILED BEFORE EXECUTION: native Clang -Werror,-Wunused-const-variable rejected TASK_UNINTERRUPTIBLE in the shared fixture declaration",
-        "repair": "Annotate the fixture-only shared state declaration with [[maybe_unused]], preserving its values and all production code; regenerated 11 host cases and targeted clang check passed. Native retry pending",
+      "pci_irq_entry": {
+        "status": "source-verified interrupt numbering, index selection, handler context and teardown ordering; physical delivery unverified",
+        "route": "i915 request_irq(pdev->irq) -> linuxkpi irq lookup -> bus_setup_intr -> nmx_xnu_pci_irq_setup -> IOInterruptEventSource on its own IOWorkLoop -> intr_trampoline -> i915 handler",
+        "verified": [
+          {
+            "edge": "irq numbering agrees between pci_alloc_msi, the resource and the requested irq",
+            "anchors": [
+              "port: bsdcompat/src/nmx_bus.c:96-100,138 each PCI function owns a block of IRQ_BLOCK (64) numbers from IRQ_FIRST (1024): base + 0 is the legacy line, base + n is message-signalled vector n-1",
+              "port: bsdcompat/src/nmx_bus.c:810-815 bus_alloc_resource maps rid 0 to the legacy line and rid n to vector n-1, setting r->irqno = irq_base + rid",
+              "port: override/src/linux_pci.c:1603-1606 after pci_alloc_msi the device's irq becomes rid 1's start, i.e. the first message-signalled vector",
+              "drm: i915_irq.c:1215,1227 intel_irq_install requests exactly to_pci_dev(...)->irq"
+            ],
+            "finding": "pdev->irq, the resource irqno and the vector index the IOKit lookup will pick all derive from the same rid, so the handler cannot be attached to a different vector than the one the device was granted. Legacy keeps base + 0 and is selected by vector < 0."
+          },
+          {
+            "edge": "vector index translates to an IOKit interrupt index",
+            "anchors": [
+              "port: xnu/nmx_pci.cpp:117-133 interrupt_index walks getInterruptType, counts message-signalled entries and returns the n-th of them, or the first legacy entry when vector < 0"
+            ],
+            "finding": "The count reported by pci_msi_count and the index chosen at setup use the same walk, so the n-th enabled vector is the n-th message-signalled entry. pci_msix_count returns 0 (nmx_bus.c:996), so i915's single-vector request takes the MSI path rather than MSI-X."
+          },
+          {
+            "edge": "the driver handler runs on a work-loop thread, not in primary interrupt context",
+            "anchors": [
+              "port: xnu/nmx_pci.cpp:98-114 an NMXIrq owner keeps the handler and arg; IOInterruptEventSource dispatches irq_action on the loop",
+              "port: xnu/nmx_pci.cpp:168-181 one IOWorkLoop per vector, event source added, then enabled",
+              "drm: i915_irq.c:1227 i915 registers a single non-threaded handler with IRQF_SHARED"
+            ],
+            "finding": "This differs from a hard-IRQ handler but matches what i915 needs: no threaded split, no sleeping in the handler beyond what the uncore waits already do, and the interrupt line is masked by IOKit while the action runs. The cost is latency, not correctness, and that cost is a target question."
+          },
+          {
+            "edge": "the trampoline keeps FreeBSD filter/handler semantics",
+            "anchors": [
+              "port: bsdcompat/src/nmx_bus.c:848-856 rv defaults to FILTER_SCHEDULE_THREAD; the filter, when present, runs first and the handler runs only if the filter still asks for the thread"
+            ],
+            "finding": "For i915, which passes no filter, the handler always runs. A filter that returns FILTER_HANDLED suppresses the handler as FreeBSD specifies. What does not happen is running the filter in interrupt context; on this port both run on the loop thread."
+          },
+          {
+            "edge": "teardown cannot free the callback out from under an in-flight interrupt",
+            "anchors": [
+              "port: xnu/nmx_pci.cpp:225-236 teardown disables the event source, runs a drain action on the loop (which waits for any running action to finish), removes the event source, then releases event source, loop and owner in that order",
+              "port: bsdcompat/src/nmx_bus.c:884-895 bus_teardown_intr unlinks the cookie under the list lock, tears down the native interrupt, then frees the cookie",
+              "port: bsdcompat/src/nmx_bus.c:729-745 _intr_drain retains each work loop while the list lock is held, so a concurrent teardown cannot free the loop mid-drain"
+            ],
+            "finding": "The ordering is remove-after-drain-then-free at every level, and the object the action dereferences stays alive until the drain returns."
+          },
+          {
+            "edge": "a latent out-of-bounds in the pinned dependency is not reachable here",
+            "anchors": [
+              "freebsd: sys/compat/linuxkpi/common/src/linux_pci.c:1433-1438 and the port's copy at override/src/linux_pci.c:1671-1676 compute vec = irq_start - irq, which is <= 0 for every irq >= irq_start, then index msi_desc[vec]",
+              "freebsd: sys/compat/linuxkpi/common/include/linux/interrupt.h:143-148 the only caller path is irq_get_msi_desc(irq)",
+              "grep over the pinned DRM tree and the port: no caller of irq_get_msi_desc"
+            ],
+            "finding": "The expression is inverted (it should be irq - irq_start) and would index msi_desc[] negatively for any vector past the first. It is upstream code, it is unreachable in this build because irq_get_msi_desc has no callers, and it is recorded rather than patched so the dependency stays as pinned."
+          }
+        ],
+        "open": [
+          "physical MSI or legacy delivery and the acknowledgement sequence on the target",
+          "whether the work-loop-threaded handler delays completion enough to matter against the fence deadline",
+          "shared-line behaviour: IRQF_SHARED is accepted but the port has no notion of sharing a line between drivers",
+          "the GPU actually raising the GT interrupt that this entry receives (target only)"
+        ],
         "hardware_executed": false
       }
     },
