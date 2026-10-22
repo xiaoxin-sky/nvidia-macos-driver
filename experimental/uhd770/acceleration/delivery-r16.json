@@ -182,5 +182,38 @@
       "this is a reading of the scripts and binaries, not a run",
       "the UUID comparison proves the staged binary is what loaded; it does not prove that binary computes correctly"
     ]
+  },
+  "report_analysis": {
+    "tool": "D:\\UHD770-driver-kit\\build-audit\\compute-contracts-20261022\\t2-page-map\\analyze_session_report.py",
+    "what_it_reads": [
+      "system/stage-state.txt",
+      "user-diagnostics/manual-*/session.txt (gpu_started, coordinator_exit)",
+      "user-diagnostics/manual-*/vulkan-runner.txt (the evidence directory it named)",
+      "user-diagnostics/*-vulkan.*/system.txt (phase, uid, macOS version), loaded-UUIDs.txt, probe.log, markers",
+      "an optional panic file: headline, panicked task and the first frames"
+    ],
+    "validated_on": "the real r14 report plus its panic file; it reproduced the r14 verdict and the exact failing line",
+    "previous_failure_signature_found": {
+      "where": "r14 report, four earlier manual sessions",
+      "probe_lines": [
+        "probe_version=1 ... deadline_s=45",
+        "os=Darwin release=24.6.0 machine=x86_64",
+        "macOS=15.7.9",
+        "FAIL: enumerate physical count: VkResult=-3"
+      ],
+      "meaning": "the driver had attached (registry_ready true, loaded UUID recorded) but ANV could not enumerate a physical device, so no Vulkan device, submission or readback was ever reached in those attempts",
+      "later_in_the_same_report": "the last manual session has an empty probe.log and the panic, i.e. the 18:33 attempt died before printing anything",
+      "relevance": "the discovery and node-identity work landed after those runs (opened-fd identity, clone minors), so r16 may pass this point; if it fails the same way, the next step is the ANV/DRM discovery path, not compute"
+    },
+    "how_to_read_the_next_report": {
+      "exit 64/65": "refused before compute: wrong boot, opt-out boot, not armed, no authorization, or unverified recovery",
+      "exit 66": "driver initialization failed (look for guard retained or attach.no_framebuffer in registry)",
+      "exit 67": "IORegistry query failed",
+      "exit 68": "gate timeout waiting for recovery/initialization",
+      "exit 124": "deadline expired",
+      "exit 2 with FAIL lines": "probe failed after starting; the last printed stage names the edge",
+      "exit 0 with COMPUTE_READBACK_VERIFIED": "the compute/readback acceptance for this stage is met, subject to the system showing no panic/hang",
+      "empty probe.log": "a kernel-level event interrupted the probe; judge from the panic backtrace and kernel-stream.txt"
+    }
   }
 }
