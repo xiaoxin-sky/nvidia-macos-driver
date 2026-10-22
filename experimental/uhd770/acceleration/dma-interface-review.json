@@ -188,5 +188,58 @@
       "Whether the GPU actually performs the GTT lookup and writes the seqno is target-only"
     ],
     "hardware_executed": false
+  },
+  "ppgtt_root_and_pde": {
+    "status": "source-verified parent PDE encoding and context root programming; page-walk, pin ordering and all hardware effects unverified",
+    "question": "Does the GPU reach the page tables the driver wrote: is every parent directory entry and the context root filled with the DMA address of the object it names, with the flags the hardware expects?",
+    "chain": [
+      "child page-table and page-directory objects are i915 internal GEM objects; their pages are DMA-mapped by i915_gem_gtt_prepare_pages through the S/G -> BSD -> native path already reviewed",
+      "px_dma(px) = __px_dma(px_base(px)) = sg_dma_address(obj->mm.pages->sgl) (intel_gtt.h:206-207, intel_gtt.c:326-330)",
+      "a parent entry is gen8_pde_encode(px_dma(to), I915_CACHE_LLC) written as one 64-bit slot and flushed (intel_ppgtt.c:98-110 via intel_gtt.h:643-649)",
+      "gen8_pde_encode ORs GEN8_PAGE_PRESENT and GEN8_PAGE_RW into the raw address and adds PPAT_CACHED_PDE for any cache level other than NONE (gen8_ppgtt.c:19-31)",
+      "the context root is px_dma(ppgtt->pd) split upper/lower 32 bits into CTX_PDP0_UDW and CTX_PDP0_LDW (intel_lrc_reg.h:40-45)",
+      "the 4-level branch is the one taken: i915_vm_is_4lvl is (total - 1) >> 32 (intel_gtt.h:425), and ADL-S is GEN12_FEATURES with __runtime.ppgtt_size = 48, so init_ppgtt_regs calls ASSIGN_CTX_PML4 rather than assigning four PDPs (intel_lrc.c:888-902)"
+    ],
+    "verified": [
+      {
+        "edge": "no CPU physical address enters a parent entry or the context root",
+        "anchors": [
+          "drm: gt/intel_ppgtt.c:109 __set_pd_entry passes px_dma(to) to the encoder",
+          "drm: gt/intel_lrc_reg.h:42 ASSIGN_CTX_PML4 reads px_dma((ppgtt)->pd)",
+          "drm: i915_gem_gtt.c:326-330 __px_dma returns sg_dma_address(p->mm.pages->sgl)"
+        ],
+        "finding": "Both the parent entries and the context root come from sg_dma_address of the already DMA-mapped object. No page_to_phys, virt_to_phys or struct page field is used, so a device address and a CPU physical address cannot be confused on this path."
+      },
+      {
+        "edge": "64-bit address width preserved to the register pair",
+        "anchors": [
+          "drm: gt/gen8_ppgtt.c:19-31 gen8_pde_encode takes dma_addr_t and returns u64, ORing flags into it",
+          "drm: gt/intel_lrc_reg.h:43-44 ASSIGN_CTX_PML4 splits with upper_32_bits and lower_32_bits"
+        ],
+        "finding": "The address stays 64-bit from sg_dma_address through the encoder, and the context root is explicitly split into its upper and lower halves, so nothing is truncated to 32 bits on the way to the context image."
+      },
+      {
+        "edge": "the entry is ordered before the GPU can walk it",
+        "anchors": [
+          "drm: gt/intel_ppgtt.c:92-95 write_dma_entry stores the encoded 64-bit entry and calls drm_clflush_virt_range(&vaddr[idx], sizeof(u64))",
+          "drm: drivers/gpu/drm/drm_cache.c:167-189 the flush aligns down to the cache line, starts with mb(), issues clflushopt per line, then serialises with clflushopt(end - 1) and a final mb()"
+        ],
+        "finding": "The store, the leading mb() and the line-aligned flush give a published parent entry before the context is submitted. On this port the flush is the real CONFIG_X86 branch recorded under ggtt_hwsp_contract."
+      },
+      {
+        "edge": "the flags ORed into the address cannot collide with address bits",
+        "anchors": [
+          "drm: gt/gen8_ppgtt.c:23 pde = addr | GEN8_PAGE_PRESENT | GEN8_PAGE_RW, plus PPAT_CACHED_PDE",
+          "drm: gt/gen8_ppgtt.c:19-31 no mask or alignment assertion in the encoder itself"
+        ],
+        "finding": "The encoder ORs flags into the low bits of the address, so it relies on a 4K-aligned DMA address. That holds because the mapped objects are whole pages and the DMA path maps page-aligned ranges, but the encoder itself does not assert it. Worth an explicit assertion if this path is ever fed a non-page-aligned object."
+      }
+    ],
+    "open": [
+      "pin ordering: that the top page-directory object already has pages and a DMA address at the moment init_ppgtt_regs reads px_dma (upstream guarantees it, this review has not traced the allocation-to-context-init order itself)",
+      "whether the GPU page-walk actually reaches the parent entries (target only)",
+      "scratch/TLB interaction when a parent entry is replaced or cleared while the GPU is using it"
+    ],
+    "hardware_executed": false
   }
 }
