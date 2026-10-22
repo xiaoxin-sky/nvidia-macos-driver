@@ -175,6 +175,20 @@ jobs:
             2>&1 | tee /tmp/nmx-page-map-asan-compile.log
           python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-page-map-asan"], timeout=60, check=True)' \
             2>&1 | tee /tmp/nmx-page-map-asan.log
+          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_ring_fixture.py" \
+            --drm "$S/kpi/drm-kmod/drivers/gpu/drm/i915" \
+            --templates "$GITHUB_WORKSPACE/experimental/uhd770/tests" \
+            --output /tmp/nmx-ring-test.c
+          cc -std=c11 -Wall -Wextra -Werror -Wno-pointer-arith -Wno-unused-parameter \
+            /tmp/nmx-ring-test.c -o /tmp/nmx-ring-test \
+            2>&1 | tee /tmp/nmx-ring-compile.log
+          python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-ring-test"], timeout=60, check=True)' \
+            2>&1 | tee /tmp/nmx-ring-test.log
+          cc -std=c11 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
+            -Wno-pointer-arith -Wno-unused-parameter /tmp/nmx-ring-test.c -o /tmp/nmx-ring-asan \
+            2>&1 | tee /tmp/nmx-ring-asan-compile.log
+          python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-ring-asan"], timeout=60, check=True)' \
+            2>&1 | tee /tmp/nmx-ring-asan.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_thread_fixture.py" \
             --port "$X" --template "$GITHUB_WORKSPACE/experimental/uhd770/tests/thread_lifetime.cpp.in" \
             --output /tmp/nmx-thread-test.cpp
@@ -464,6 +478,7 @@ jobs:
           cp /tmp/nmx-mm-fixture/mm-test.c "$GITHUB_WORKSPACE/out/logs/nmx-mm-test.c" 2>/dev/null || true
           cp /tmp/nmx-mm-fixture/native-mm-test.cpp "$GITHUB_WORKSPACE/out/logs/nmx-native-mm-test.cpp" 2>/dev/null || true
           cp /tmp/nmx-page-map-test.c /tmp/nmx-page-map*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
+          cp /tmp/nmx-ring-test.c /tmp/nmx-ring*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-thread-test.cpp /tmp/nmx-thread-test.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-thread-compile.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp /tmp/nmx-tasklet-test.cpp /tmp/nmx-tasklet*.log "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true

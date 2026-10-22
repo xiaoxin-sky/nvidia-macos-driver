@@ -1,0 +1,268 @@
+/* Actual i915 ring space accounting and wrap code, taken from the pinned
+ * gt/intel_ring.c and gt/intel_ring.h by prepare_ring_fixture.py.
+ *
+ * Executed unchanged: __intel_ring_space, intel_ring_update_space,
+ * intel_ring_wrap, intel_ring_direction, intel_ring_offset_valid,
+ * intel_ring_offset, intel_ring_advance, intel_ring_set_tail,
+ * assert_ring_tail_valid and intel_ring_begin.
+ *
+ * Modelled: the struct layout (copied field for field from
+ * intel_ring_types.h, minus the kref/vma/pin fields these functions never
+ * touch), the request wait (the real wait_for_space sleeps on a GPU fence, so
+ * here the GPU is simulated as retiring everything already emitted), and
+ * i915_request_timeline. No GPU, GGTT or request object is touched; this
+ * proves where a packet is placed and how much space it consumes, not that
+ * hardware consumed it.
+ */
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef uint32_t u32;
+typedef uint64_t u64;
+
+#define CACHELINE_BYTES 64
+#define GEM_BUG_ON(cond) assert(!(cond))
+#define IS_ALIGNED(x, a) (((x) & ((a) - 1)) == 0)
+#define round_down(x, a) ((x) & ~((a) - 1))
+#define unlikely(x) (x)
+#define likely(x) (x)
+#define READ_ONCE(x) (x)
+#define typecheck(type, expr) ((void)0)
+#define IS_ENABLED(x) 0
+#define POISON_INUSE 0x5a
+#define ERR_PTR(e) ((u32 *)(intptr_t)(e))
+
+static inline int is_power_of_2(unsigned long n) { return n != 0 && (n & (n - 1)) == 0; }
+
+static inline void memset64(void *p, uint64_t v, size_t n)
+{
+    uint64_t *q = (uint64_t *)p;
+    while (n--)
+        *q++ = v;
+}
+
+static inline void memset32(void *p, uint32_t v, size_t n)
+{
+    uint32_t *q = (uint32_t *)p;
+    while (n--)
+        *q++ = v;
+}
+
+struct intel_ring {
+    void *vaddr;
+    u32 head; /* updated during retire, loosely tracks RING_HEAD */
+    u32 tail; /* updated on submission, used for RING_TAIL */
+    u32 emit; /* updated during request construction */
+    u32 space;
+    u32 size;
+    u32 wrap;
+    u32 effective_size;
+};
+
+struct intel_timeline {
+    int placeholder;
+};
+
+struct i915_request {
+    struct intel_ring *ring;
+    struct intel_timeline *timeline;
+    unsigned int reserved_space;
+};
+
+/* Modelled: the real accessor only unwraps an RCU-protected pointer. */
+static inline struct intel_timeline *i915_request_timeline(const struct i915_request *rq)
+{
+    return rq->timeline;
+}
+
+unsigned int intel_ring_update_space(struct intel_ring *ring);
+
+/* Modelled: the real wait_for_space blocks on the fence of a request whose
+ * completion would free the requested bytes. Here that retirement is
+ * simulated, so the arithmetic around the wait runs unchanged. */
+static unsigned int wait_calls;
+static unsigned int wait_bytes;
+static int wait_for_space(struct intel_ring *ring, struct intel_timeline *tl, unsigned int bytes)
+{
+    assert(tl != NULL);
+    wait_calls++;
+    wait_bytes = bytes;
+    ring->head = ring->emit;
+    intel_ring_update_space(ring);
+    return 0;
+}
+
+/* NMX_ACTUAL_RING_IMPLEMENTATION */
+
+#define RING_SIZE 4096
+#define MARGIN CACHELINE_BYTES          /* space always keeps one cacheline free */
+#define RESERVED 32u                    /* request finalisation reservation */
+
+static struct intel_ring ring;
+static unsigned char storage[RING_SIZE];
+static struct i915_request rq;
+static struct intel_timeline tl;
+
+static void ring_init(void)
+{
+    memset(&ring, 0, sizeof(ring));
+    memset(storage, 0xee, sizeof(storage)); /* so an MI_NOOP fill is observable */
+    ring.vaddr = storage;
+    ring.size = RING_SIZE;
+    ring.wrap = 32 - 12;                    /* BITS_PER_TYPE(u32) - ilog2(size) */
+    ring.effective_size = RING_SIZE;        /* only i830/i845G shave two cachelines */
+    ring.head = ring.emit = ring.tail = 0;
+    rq.ring = &ring;
+    rq.timeline = &tl;
+    rq.reserved_space = RESERVED;
+    wait_calls = 0;
+    wait_bytes = 0;
+    assert(intel_ring_update_space(&ring) == RING_SIZE - MARGIN);
+    assert(ring.space == RING_SIZE - MARGIN);
+}
+
+/* 62 packets of 64 bytes fit without waiting: the last 32 bytes of margin stay
+ * unusable until the reserved space is also satisfied. */
+static void fill_without_waiting(void)
+{
+    for (unsigned i = 0; i < 62; i++) {
+        u32 *cs = intel_ring_begin(&rq, 16);
+        assert(cs == (u32 *)(storage + i * 64));
+        assert(ring.emit == (i + 1) * 64);
+        assert(ring.space == RING_SIZE - MARGIN - (i + 1) * 64);
+        assert(wait_calls == 0);
+    }
+    assert(ring.emit == 3968);
+    assert(ring.space == 64);
+}
+
+static void test_steady_emission(void)
+{
+    ring_init();
+    fill_without_waiting();
+    printf("PASS steady emission places packets and meters space exactly\n");
+}
+
+/* The reservation no longer fits, so the writer waits, but not yet wraps. */
+static void test_reserved_space_triggers_wait(void)
+{
+    ring_init();
+    fill_without_waiting();
+    u32 *cs = intel_ring_begin(&rq, 16);
+    assert(wait_calls == 1);
+    assert(wait_bytes == 96);              /* 64 bytes + 32 reserved */
+    assert(cs == (u32 *)(storage + 3968));
+    assert(ring.emit == 4032);
+    assert(ring.space == 3968);            /* reset to full after retire, minus 64 */
+    printf("PASS reserved space forces a wait without wrapping early\n");
+}
+
+/* Reserved space alone falls off the end; only the packet after that wraps. */
+static void test_tail_reaches_end_before_wrap(void)
+{
+    ring_init();
+    fill_without_waiting();
+    assert(intel_ring_begin(&rq, 16) == (u32 *)(storage + 3968));
+    u32 *cs = intel_ring_begin(&rq, 16);
+    assert(wait_calls == 1);
+    assert(cs == (u32 *)(storage + 4032));
+    assert(ring.emit == 4096);             /* exactly the end, still legal */
+    assert(ring.space == 3904);
+
+    u32 *next = intel_ring_begin(&rq, 16);
+    assert(wait_calls == 1);               /* head was retired, space sufficed */
+    assert(next == (u32 *)storage);
+    assert(ring.emit == 64);
+    assert(ring.space == 3840);
+    printf("PASS a tail that reaches the end wraps on the following packet\n");
+}
+
+/* The interesting wrap: the packet is larger than the usable remainder. */
+static void test_wrap_noops_the_gap(void)
+{
+    ring_init();
+    fill_without_waiting();
+    u32 *small = intel_ring_begin(&rq, 8); /* 32 bytes, still no wait */
+    assert(small == (u32 *)(storage + 3968));
+    assert(ring.emit == 4000);
+    assert(ring.space == 32);
+    assert(wait_calls == 0);
+
+    u32 *cs = intel_ring_begin(&rq, 32);   /* 128 bytes cannot fit in 96 */
+    assert(wait_calls == 1);
+    assert(wait_bytes == 256);             /* 128 + 32, plus 96 to reach the end */
+    assert(cs == (u32 *)storage);
+    assert(ring.emit == 128);
+    assert(ring.space == 3808);            /* 4032 - 96 noop - 128 */
+    for (int i = 4000; i < RING_SIZE; i++)
+        assert(storage[i] == 0);           /* MI_NOOP fill, not 0xee */
+
+    intel_ring_advance(&rq, cs + 32);
+    assert(intel_ring_offset(&rq, cs + 32) == 128);
+    printf("PASS a packet larger than the remainder no-ops the gap and restarts\n");
+}
+
+static void test_offset_and_wrap_helpers(void)
+{
+    ring_init();
+    assert(intel_ring_wrap(&ring, RING_SIZE) == 0);
+    assert(intel_ring_wrap(&ring, RING_SIZE + 128) == 128);
+    assert(intel_ring_wrap(&ring, 128) == 128);
+    assert(intel_ring_offset_valid(&ring, 128));
+    assert(!intel_ring_offset_valid(&ring, 12));        /* not qword aligned */
+    assert(!intel_ring_offset_valid(&ring, RING_SIZE)); /* == size is size zero */
+    printf("PASS wrap and offset-validity predicates hold at the boundary\n");
+}
+
+static void test_direction_across_wrap(void)
+{
+    ring_init();
+    assert(intel_ring_direction(&ring, 128, 4032) > 0); /* forward over the end */
+    assert(intel_ring_direction(&ring, 4032, 128) < 0); /* backward over the end */
+    assert(intel_ring_direction(&ring, 256, 128) > 0);
+    assert(intel_ring_direction(&ring, 128, 256) < 0);
+    printf("PASS ring direction keeps its sign across the wrap point\n");
+}
+
+static void test_space_recomputed_from_head(void)
+{
+    ring_init();
+    for (unsigned i = 0; i < 4; i++)
+        assert(intel_ring_begin(&rq, 16) != NULL);
+    assert(ring.emit == 256);
+    ring.head = 64;                        /* the GPU consumed the first packet */
+    unsigned space = intel_ring_update_space(&ring);
+    assert(space == ((64u - 256u - MARGIN) & (RING_SIZE - 1)));
+    assert(ring.space == space);
+    assert(ring.space == RING_SIZE - MARGIN - 192);
+    printf("PASS space is recomputed from head and emit, not tracked blindly\n");
+}
+
+static void test_tail_assignment(void)
+{
+    ring_init();
+    ring.head = 0;
+    assert(intel_ring_set_tail(&ring, 128) == 128);
+    assert(ring.tail == 128);
+    assert(intel_ring_set_tail(&ring, 0) == 0);
+    assert(ring.tail == 0);
+    printf("PASS tail assignment keeps the value the hardware will read\n");
+}
+
+int main(void)
+{
+    test_steady_emission();
+    test_reserved_space_triggers_wait();
+    test_tail_reaches_end_before_wrap();
+    test_wrap_noops_the_gap();
+    test_offset_and_wrap_helpers();
+    test_direction_across_wrap();
+    test_space_recomputed_from_head();
+    test_tail_assignment();
+    printf("Actual i915 ring space/wrap arithmetic passed; the request wait and timeline accessor "
+           "are modelled; no GPU, GGTT or request object was touched.\n");
+    return 0;
+}

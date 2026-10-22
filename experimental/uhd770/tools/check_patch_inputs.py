@@ -21,6 +21,7 @@ from prepare_irq_fixture import prepare as prepare_irq
 from prepare_native_display_fixture import prepare as prepare_native_display
 from prepare_kernel_clock_fixture import prepare as prepare_kernel_clock
 from prepare_page_map_fixture import prepare as prepare_page_map
+from prepare_ring_fixture import prepare as prepare_ring
 
 
 def check(port, drm, package, freebsd):
@@ -54,6 +55,7 @@ def check(port, drm, package, freebsd):
         prepare_native_display(x / "xnu/nmx_fb.cpp", package / "tests/native_display_fixture.cpp.in", root / "native-display-test.cpp")
         prepare_kernel_clock(x, f, d, package / "tests/kernel_clock_fixture.cpp.in", root / "kernel-clock-test.cpp")
         prepare_page_map(x, package / "tests", root / "page-map-test.c")
+        prepare_ring(d / "drivers/gpu/drm/i915", package / "tests", root / "ring-test.c")
         for folder, template, output in [
             ("kernel-tests", "mmap_fixture.c.in", "i915-mmap-test.c"),
             ("workqueue-tests", "taskqueue_fixture.cpp.in", "taskqueue-test.cpp"),
@@ -74,6 +76,7 @@ def check(port, drm, package, freebsd):
             "python_syntax": "passed",
             "fixture_preparation": "passed; compilation/execution requires a C++ host compiler",
             "page_map_fixture_preparation": "passed; the vmmap registration/rollback fixture is prepared from the patched sources",
+            "ring_fixture_preparation": "passed; the ring space/wrap fixture is prepared from the patched i915 sources",
             "display_fixture_preparation": "passed; host behavior/concurrency execution is separate from GPU validation",
             "compiler_cache_launchers": "passed against patched pinned scripts; runtime cache probe requires macOS",
             "dp_tunnel_configuration": "passed",
