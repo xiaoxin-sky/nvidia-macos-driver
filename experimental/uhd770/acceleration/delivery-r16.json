@@ -70,9 +70,9 @@
     "the previous USB pointer files were copied into the delivery folder before being replaced, so the earlier instructions are still recoverable"
   ],
   "how_to_confirm_the_loaded_version": [
-    "before running: shasum -a 256 on the installed NMXGPU and on probe/uhd770-compute-probe, compared with the two binary_sha256 values above",
-    "after boot: the session tooling records the loaded kext identity and the probe prints its own stage log, which the report carries back",
-    "the two checks together distinguish a stale installed kext from the artifact recorded here"
+    "the packaged run-probe.sh does it: it compares the loaded kext's LC_UUID from kextstat against the staged binary's LC_UUID and records both, failing on any mismatch",
+    "manually, if ever needed: shasum -a 256 on the installed NMXGPU and probe/uhd770-compute-probe, compared with the two binary_sha256 values above",
+    "the probe prints its stage log to the session directory, which the report carries back"
   ],
   "does_not_prove": [
     "any GPU execution, completion, cache visibility, physical interrupt or machine stability",
@@ -154,5 +154,33 @@
         "the temporary collection is deliberately never installed, so the real collection for the test boot is built at prepare time on the target"
       ]
     }
+  },
+  "loaded_version_check_as_implemented": {
+    "method": "read run-probe.sh; the check is part of the packaged test path, not something the user must do by hand",
+    "kext_identity": [
+      "before any probe, run-probe.sh requires the staged NMXGPU Mach-O and extracts its x86_64 LC_UUID",
+      "it then reads kextstat -l -b com.nullmoth.NMXGPU, requires exactly one table row with a valid UUID, and fails unless that UUID equals the staged binary's UUID",
+      "the bundle name and UUID are appended to loaded-UUIDs.txt and the binary sha256 to payload-SHA256SUMS, so the report carries what was actually loaded"
+    ],
+    "userland_identity": [
+      "the staged runtime directory is walked and every file is hashed into payload-SHA256SUMS",
+      "the ICD is rewritten per session with an absolute library_path to the staged libvulkan_intel.dylib, so the loader never searches globally and the relative-path hazard in the shipped intel_icd.json is avoided",
+      "the probe is invoked with --device-id 0x4680, so a different device is rejected rather than tested"
+    ],
+    "vulkan_payload_check": {
+      "icd_shipped": "intel_icd.json with library_path ./libvulkan_intel.dylib (relative to its own directory)",
+      "icd_used": "rewritten to an absolute path at the staged runtime directory",
+      "dylib_install_names": {
+        "libvulkan_intel.dylib": "@loader_path/libvulkan_intel.dylib, loading @loader_path/libdrm.2.dylib plus libSystem, libz and libc++",
+        "libdrm.2.dylib": "@loader_path/libdrm.2.dylib plus libSystem",
+        "libvulkan.1.dylib": "@loader_path/libvulkan.1.dylib plus libSystem and CoreFoundation"
+      },
+      "finding": "no runner path survives in any install name, so the bundle is self-contained; the shader verify.comp.spv (2060 bytes) ships beside the probe",
+      "probe_arguments": "--device-id 0x4680 --count 4099 --iterations 3 --deadline 45, with an outer runner deadline of 55 seconds"
+    },
+    "limits": [
+      "this is a reading of the scripts and binaries, not a run",
+      "the UUID comparison proves the staged binary is what loaded; it does not prove that binary computes correctly"
+    ]
   }
 }
