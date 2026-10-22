@@ -4997,3 +4997,403 @@
  }
  
  static void *attach_on(void *iopci, const char *busclass, int display);
+--- /dev/null
++++ b/override/include/linux/interrupt.h
+@@ -0,0 +1,11 @@
++/* Darwin tasklet state queries shared by the runtime and i915 helpers.
++ * Keep these helpers synchronized with override/src/linux_tasklet.c; the
++ * upstream numeric states are not Linux RUN/SCHED bits. Public tasklet ABI,
++ * layout, IRQ declarations and the rest of LinuxKPI remain upstream-owned. */
++#ifndef NMX_LINUX_INTERRUPT_H
++#define NMX_LINUX_INTERRUPT_H
++#include_next <linux/interrupt.h>
++int nmx_tasklet_is_running(const struct tasklet_struct *);
++int nmx_tasklet_is_pending(const struct tasklet_struct *);
++int nmx_tasklet_enable(struct tasklet_struct *);
++#endif
+--- /dev/null
++++ b/override/src/linux_tasklet.c
+@@ -0,0 +1,383 @@
++/*-
++ * Copyright (c) 2017 Hans Petter Selasky
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice unmodified, this list of conditions, and the following
++ *    disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <sys/types.h>
++#include <sys/malloc.h>
++#include <sys/gtaskqueue.h>
++#include <sys/proc.h>
++#include <sys/sched.h>
++
++#include <linux/compiler.h>
++#include <linux/interrupt.h>
++#include <linux/compat.h>
++
++#define	TASKLET_ST_IDLE 0
++#define	TASKLET_ST_BUSY 1
++#define	TASKLET_ST_EXEC 2
++#define	TASKLET_ST_LOOP 3
++#define TASKLET_ST_PARKED 4
++#define TASKLET_ST_INLINE_QUEUED 5
++
++/* Darwin's tasklets run on taskqueue threads. BUSY owns one queue entry;
++ * EXEC/LOOP own one callback or explicit i915 tasklet lock. INLINE_QUEUED
++ * owns an inline lock and an existing queue entry, matching Linux's separate
++ * RUN/SCHED bits. PARKED retains
++ * pending work while disabled without occupying a worker queue. The same
++ * running states are used by worker and inline callbacks, so rescheduling
++ * cannot disappear at tasklet_unlock. i915_tasklet.h uses the queries below
++ * rather than assuming FreeBSD's numeric states match Linux's state bits.
++ *
++ * This does not change the port's BH/preemption policy. That lower contract
++ * must be audited independently before target execution is requested. */
++
++#define	TASKLET_ST_CMPSET(ts, old, new)	\
++	atomic_cmpset_int((volatile u_int *)&(ts)->tasklet_state, old, new)
++
++#define	TASKLET_ST_SET(ts, new)	\
++	atomic_store_rel_int((volatile u_int *)&(ts)->tasklet_state, new)
++
++#define	TASKLET_ST_GET(ts) \
++	atomic_load_acq_int((volatile u_int *)&(ts)->tasklet_state)
++
++struct tasklet_worker {
++	struct mtx mtx;
++	TAILQ_HEAD(tasklet_list, tasklet_struct) head;
++	struct grouptask gtask;
++} __aligned(CACHE_LINE_SIZE);
++
++#define	TASKLET_WORKER_LOCK(tw) mtx_lock(&(tw)->mtx)
++#define	TASKLET_WORKER_UNLOCK(tw) mtx_unlock(&(tw)->mtx)
++
++DPCPU_DEFINE_STATIC(struct tasklet_worker, tasklet_worker);
++
++/* Only state/count publication is serialized here. Never hold this spin lock
++ * across callbacks, worker mutexes, allocations or queue dispatch. In
++ * particular, parking and enabling share this lock so a worker cannot access
++ * ts after another CPU resumes it, finishes it and frees it through kill. */
++static struct mtx nmx_tasklet_state_lock;
++
++/* A BUSY state reserves the object's lifetime until this queue entry is
++ * consumed. After enqueueing, access only the immortal worker, not ts: the
++ * callback may finish and tasklet_kill may release ts on another thread. */
++static void
++nmx_tasklet_queue(struct tasklet_struct *ts)
++{
++    struct tasklet_worker *tw = &DPCPU_GET(tasklet_worker);
++    TASKLET_WORKER_LOCK(tw);
++    TAILQ_INSERT_TAIL(&tw->head, ts, entry);
++    TASKLET_WORKER_UNLOCK(tw);
++    GROUPTASK_ENQUEUE(&tw->gtask);
++}
++
++static int
++nmx_tasklet_start(struct tasklet_struct *ts)
++{
++    int run;
++    mtx_lock_spin(&nmx_tasklet_state_lock);
++    if (TASKLET_ST_GET(ts) == TASKLET_ST_INLINE_QUEUED) {
++        /* An inline flush owns RUN while we own the removed queue entry.
++         * Transfer our pending invocation to its unlock, never run twice. */
++        TASKLET_ST_SET(ts, TASKLET_ST_LOOP);
++        mtx_unlock_spin(&nmx_tasklet_state_lock);
++        return 0;
++    }
++    KASSERT(TASKLET_ST_GET(ts) == TASKLET_ST_BUSY, ("tasklet queue ownership"));
++    run = !atomic_read(&ts->count);
++    TASKLET_ST_SET(ts, run ? TASKLET_ST_EXEC : TASKLET_ST_PARKED);
++    mtx_unlock_spin(&nmx_tasklet_state_lock);
++    return run;
++}
++
++static int
++nmx_tasklet_finish(struct tasklet_struct *ts)
++{
++    int repeat = 0;
++    mtx_lock_spin(&nmx_tasklet_state_lock);
++    u_int state = TASKLET_ST_GET(ts);
++    KASSERT(state == TASKLET_ST_EXEC || state == TASKLET_ST_LOOP,
++        ("tasklet callback ownership"));
++    if (state == TASKLET_ST_LOOP) {
++        repeat = !atomic_read(&ts->count);
++        TASKLET_ST_SET(ts, repeat ? TASKLET_ST_EXEC : TASKLET_ST_PARKED);
++    } else {
++        TASKLET_ST_SET(ts, TASKLET_ST_IDLE);
++    }
++    mtx_unlock_spin(&nmx_tasklet_state_lock);
++    return repeat;
++}
++
++int
++nmx_tasklet_is_running(const struct tasklet_struct *ts)
++{
++    /* Pair with worker publication: disable may increment count just after
++     * a worker observed zero but before it published EXEC. */
++    mtx_lock_spin(&nmx_tasklet_state_lock);
++    u_int state = TASKLET_ST_GET(ts);
++    mtx_unlock_spin(&nmx_tasklet_state_lock);
++    return state == TASKLET_ST_EXEC || state == TASKLET_ST_LOOP ||
++        state == TASKLET_ST_INLINE_QUEUED;
++}
++
++int
++nmx_tasklet_is_pending(const struct tasklet_struct *ts)
++{
++    mtx_lock_spin(&nmx_tasklet_state_lock);
++    u_int state = TASKLET_ST_GET(ts);
++    mtx_unlock_spin(&nmx_tasklet_state_lock);
++    return state == TASKLET_ST_BUSY || state == TASKLET_ST_LOOP ||
++        state == TASKLET_ST_PARKED || state == TASKLET_ST_INLINE_QUEUED;
++}
++
++static void
++tasklet_handler(void *arg)
++{
++    struct tasklet_worker *tw = (struct tasklet_worker *)arg;
++    struct tasklet_struct *ts;
++    struct tasklet_struct *last;
++
++    linux_set_current(curthread);
++    TASKLET_WORKER_LOCK(tw);
++    last = TAILQ_LAST(&tw->head, tasklet_list);
++    while ((ts = TAILQ_FIRST(&tw->head)) != NULL) {
++        TAILQ_REMOVE(&tw->head, ts, entry);
++        TASKLET_WORKER_UNLOCK(tw);
++        if (nmx_tasklet_start(ts)) {
++            do {
++                if (ts->use_callback)
++                    ts->callback(ts);
++                else
++                    ts->func(ts->data);
++            } while (nmx_tasklet_finish(ts));
++        }
++        /* start(false) and finish(false) relinquish our ownership. Another
++         * CPU may already have resumed or freed ts; compare only its value. */
++        TASKLET_WORKER_LOCK(tw);
++        if (ts == last)
++            break;
++    }
++    TASKLET_WORKER_UNLOCK(tw);
++}
++
++static void
++tasklet_subsystem_init(void *arg __unused)
++{
++	struct tasklet_worker *tw;
++	char buf[32];
++	int i;
++
++	mtx_init(&nmx_tasklet_state_lock, "nmx_tasklet_state", NULL, MTX_SPIN);
++
++	CPU_FOREACH(i) {
++		if (CPU_ABSENT(i))
++			continue;
++
++		tw = DPCPU_ID_PTR(i, tasklet_worker);
++
++		mtx_init(&tw->mtx, "linux_tasklet", NULL, MTX_DEF);
++		TAILQ_INIT(&tw->head);
++		GROUPTASK_INIT(&tw->gtask, 0, tasklet_handler, tw);
++		snprintf(buf, sizeof(buf), "softirq%d", i);
++		taskqgroup_attach_cpu(qgroup_softirq, &tw->gtask,
++		    "tasklet", i, NULL, NULL, buf);
++       }
++}
++SYSINIT(linux_tasklet, SI_SUB_TASKQ, SI_ORDER_THIRD, tasklet_subsystem_init, NULL);
++
++static void
++tasklet_subsystem_uninit(void *arg __unused)
++{
++	struct tasklet_worker *tw;
++	int i;
++
++	taskqgroup_drain_all(qgroup_softirq);
++
++	CPU_FOREACH(i) {
++		if (CPU_ABSENT(i))
++			continue;
++
++		tw = DPCPU_ID_PTR(i, tasklet_worker);
++
++		taskqgroup_detach(qgroup_softirq, &tw->gtask);
++		mtx_destroy(&tw->mtx);
++	}
++	mtx_destroy(&nmx_tasklet_state_lock);
++}
++SYSUNINIT(linux_tasklet, SI_SUB_TASKQ, SI_ORDER_THIRD, tasklet_subsystem_uninit, NULL);
++
++void
++tasklet_init(struct tasklet_struct *ts,
++    tasklet_func_t *func, unsigned long data)
++{
++	ts->entry.tqe_prev = NULL;
++	ts->entry.tqe_next = NULL;
++	ts->func = func;
++	ts->callback = NULL;
++	ts->data = data;
++	TASKLET_ST_SET(ts, TASKLET_ST_IDLE);
++	atomic_set(&ts->count, 0);
++	ts->use_callback = false;
++}
++
++void
++tasklet_setup(struct tasklet_struct *ts, tasklet_callback_t *c)
++{
++	ts->entry.tqe_prev = NULL;
++	ts->entry.tqe_next = NULL;
++	ts->func = NULL;
++	ts->callback = c;
++	ts->data = 0;
++	TASKLET_ST_SET(ts, TASKLET_ST_IDLE);
++	atomic_set(&ts->count, 0);
++	ts->use_callback = true;
++}
++
++void
++local_bh_enable(void)
++{
++	sched_unpin();
++}
++
++void
++local_bh_disable(void)
++{
++	sched_pin();
++}
++
++void
++tasklet_schedule(struct tasklet_struct *ts)
++{
++    int queue = 0;
++    mtx_lock_spin(&nmx_tasklet_state_lock);
++    u_int state = TASKLET_ST_GET(ts);
++    if (state == TASKLET_ST_EXEC) {
++        TASKLET_ST_SET(ts, TASKLET_ST_LOOP);
++    } else if (state == TASKLET_ST_IDLE || state == TASKLET_ST_PARKED) {
++        queue = !atomic_read(&ts->count);
++        TASKLET_ST_SET(ts, queue ? TASKLET_ST_BUSY : TASKLET_ST_PARKED);
++    }
++    /* BUSY/INLINE_QUEUED own a queue reservation; LOOP records another call. */
++    mtx_unlock_spin(&nmx_tasklet_state_lock);
++    if (queue)
++        nmx_tasklet_queue(ts);
++}
++
++void
++tasklet_kill(struct tasklet_struct *ts)
++{
++
++	WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, NULL, "tasklet_kill() can sleep");
++
++	/* wait until tasklet is no longer busy */
++	while (TASKLET_ST_GET(ts) != TASKLET_ST_IDLE)
++		pause("W", 1);
++}
++
++int
++nmx_tasklet_enable(struct tasklet_struct *ts)
++{
++    int queue = 0;
++    mtx_lock_spin(&nmx_tasklet_state_lock);
++    int enabled = atomic_dec_and_test(&ts->count);
++    if (enabled && TASKLET_ST_GET(ts) == TASKLET_ST_PARKED) {
++        TASKLET_ST_SET(ts, TASKLET_ST_BUSY);
++        queue = 1;
++    }
++    mtx_unlock_spin(&nmx_tasklet_state_lock);
++    if (queue)
++        nmx_tasklet_queue(ts);
++    return enabled;
++}
++
++void
++tasklet_enable(struct tasklet_struct *ts)
++{
++    (void)nmx_tasklet_enable(ts);
++}
++
++void
++tasklet_disable(struct tasklet_struct *ts)
++{
++
++	atomic_inc(&ts->count);
++	tasklet_unlock_wait(ts);
++}
++
++void
++tasklet_disable_nosync(struct tasklet_struct *ts)
++{
++	atomic_inc(&ts->count);
++	barrier();
++}
++
++int
++tasklet_trylock(struct tasklet_struct *ts)
++{
++    mtx_lock_spin(&nmx_tasklet_state_lock);
++    u_int state = TASKLET_ST_GET(ts);
++    int locked = state == TASKLET_ST_IDLE || state == TASKLET_ST_BUSY ||
++        state == TASKLET_ST_PARKED;
++    if (locked) {
++        /* i915's synchronous flush must be able to claim RUN even if SCHED
++         * is already set. Keep the queued invocation independently owned. */
++        TASKLET_ST_SET(ts, state == TASKLET_ST_BUSY ? TASKLET_ST_INLINE_QUEUED :
++            state == TASKLET_ST_PARKED ? TASKLET_ST_LOOP : TASKLET_ST_EXEC);
++    }
++    mtx_unlock_spin(&nmx_tasklet_state_lock);
++    return locked;
++}
++
++void
++tasklet_unlock(struct tasklet_struct *ts)
++{
++    int queue = 0;
++    mtx_lock_spin(&nmx_tasklet_state_lock);
++    u_int state = TASKLET_ST_GET(ts);
++    KASSERT(state == TASKLET_ST_EXEC || state == TASKLET_ST_LOOP ||
++        state == TASKLET_ST_INLINE_QUEUED,
++        ("tasklet_unlock without running ownership"));
++    if (state == TASKLET_ST_INLINE_QUEUED) {
++        /* The queue entry still exists, so do not enqueue a second copy. */
++        TASKLET_ST_SET(ts, TASKLET_ST_BUSY);
++    } else if (state == TASKLET_ST_LOOP) {
++        queue = !atomic_read(&ts->count);
++        TASKLET_ST_SET(ts, queue ? TASKLET_ST_BUSY : TASKLET_ST_PARKED);
++    } else {
++        TASKLET_ST_SET(ts, TASKLET_ST_IDLE);
++    }
++    mtx_unlock_spin(&nmx_tasklet_state_lock);
++    if (queue)
++        nmx_tasklet_queue(ts);
++}
++
++void
++tasklet_unlock_wait(struct tasklet_struct *ts)
++{
++    /* Linux waits only for the running owner here. Waiting for pending work
++     * after incrementing count deadlocks: that work cannot run until enable.
++     * tasklet_kill separately waits for all queued/running/pending ownership. */
++    while (nmx_tasklet_is_running(ts))
++        pause("W", 1);
++}

@@ -366,3 +366,37 @@
  }
  EXPORT_SYMBOL(__drm_printfn_err);
  
+--- a/drivers/gpu/drm/i915/i915_tasklet.h
++++ b/drivers/gpu/drm/i915/i915_tasklet.h
+@@ -16,7 +16,9 @@
+ 
+ static inline bool tasklet_is_locked(const struct tasklet_struct *t)
+ {
+-#ifdef __linux__
++#ifdef NMXKPI
++    return nmx_tasklet_is_running(t);
++#elif defined(__linux__)
+ 	return test_bit(TASKLET_STATE_RUN, &t->state);
+ #elif defined(__FreeBSD__)
+ 	return t->tasklet_state == 2;	/* BSDFIXME: Check if it's correct to use TASKLET_ST_EXEC */
+@@ -36,12 +38,19 @@
+ 
+ static inline bool __tasklet_enable(struct tasklet_struct *t)
+ {
++#ifdef NMXKPI
++    /* Re-enable also wakes work parked by the threaded Darwin tasklet. */
++    return nmx_tasklet_enable(t);
++#else
+ 	return atomic_dec_and_test(&t->count);
++#endif
+ }
+ 
+ static inline bool __tasklet_is_scheduled(struct tasklet_struct *t)
+ {
+-#ifdef __linux__
++#ifdef NMXKPI
++    return nmx_tasklet_is_pending(t);
++#elif defined(__linux__)
+ 	return test_bit(TASKLET_STATE_SCHED, &t->state);
+ #elif defined(__FreeBSD__)
+ 	return t->tasklet_state == 3;	/* BSDFIXME: Check if it's correct to use TASKLET_ST_LOOP */

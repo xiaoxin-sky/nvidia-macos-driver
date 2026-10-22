@@ -36,8 +36,8 @@
     {
       "id": "memory",
       "route": "GEM create -> backing pages -> DMA/IOMMU -> PPGTT/GGTT -> NMX mmap -> IOKit user map",
-      "status": "SHARED MM/NATIVE TASK OWNERSHIP REPAIRED; joined native CI pending",
-      "remaining": "Validate combined native fixture and kernel linkage; complete DMA/GPU VA/visibility review and thread-record lifetime repair before a new hardware request",
+      "status": "SHARED MM/NATIVE TASK OWNERSHIP REPAIRED; joined native CI passed",
+      "remaining": "Complete DMA/GPU VA/visibility review and validate actual target memory paths; native fixtures model Mach task/IOKit primitives",
       "source_findings": [
         "PROC_LOCK only refreshes signals, so process p_lkpi_mm publication/acquisition lacks its expected lock",
         "linux_mm_dtor clears current process mm rather than locating the original mm owner",
@@ -61,11 +61,20 @@
     {
       "id": "completion",
       "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
-      "status": "SLEEP/WAKE REPAIR COMPILED AND TESTED ON NATIVE MACOS; hardware pending",
-      "remaining": "GPU IRQ/breadcrumb/fence delivery and other transitive dependencies still need review/target evidence",
+      "status": "SLEEP/WAKE NATIVE CHECKS PASSED; tasklet state/caller repair passed host checks, new native build pending",
+      "remaining": "Nested BH/preempt interrupt masking versus sleepable locks remains unresolved; real IRQ/breadcrumb/fence delivery and hardware execution still unverified",
       "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
       "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018",
-      "next_review": "Nested LinuxKPI spin_lock -> local_bh_disable -> sched_pin -> NMX interrupt masking, with sleepable MTX_DEF contention; inspect actual i915 callback/tasklet routes before selecting an adaptation"
+      "next_review": "Resolve actual Linux spin_lock -> local_bh_disable -> sched_pin interrupt masking with nested sleepable MTX_DEF and explicit preempt-disable scopes; tasklet state repair does not change this policy",
+      "tasklet_repair": {
+        "implementation": "Threaded tasklet pending/running/queued-inline ownership; disabled work resumes; disable waits only running owner; matching i915 state queries and enable helper; explicit state initialization",
+        "host_cases_passed": 12,
+        "pristine_baseline_failures": 7,
+        "pristine_baseline_cases": 9,
+        "validation": "Actual tasklet module + actual i915 helpers and synchronous engine flush; modeled kernel locks/atomics/queues; parallel host producers/workers and forced disable/publication interleaving",
+        "native_status": "pending",
+        "hardware_executed": false
+      }
     },
     {
       "id": "visibility",
@@ -76,8 +85,8 @@
     {
       "id": "cleanup",
       "route": "fence/context/BO destruction -> user unmap -> final file/MM/task release -> RCU callbacks",
-      "status": "TASK-RETAINED THREAD RECORDS AND SCOPED DEVICE ENTRY IMPLEMENTED; native tests pending",
-      "remaining": "Verify combined mm and actual native callback/thread fixtures; review non-referenced lookup assumptions, other IRQ entry points and remaining GPU teardown path",
+      "status": "SCOPED DEVICE/RETAINED THREAD RECORD FIXTURES AND KERNEL BUILD PASSED ON MACOS; target pending",
+      "remaining": "Review non-referenced lookups, other native entry contexts, GPU teardown, tasklet/BH and module-unload ordering; target cleanup still unverified",
       "source_findings": [
         "Device cdev callbacks never invoke the documented nmx_thread_enter/nmx_thread_leave path",
         "Wiring that path blindly can free struct thread while a retained task_struct still points to task_thread",
@@ -85,9 +94,15 @@
       ],
       "mm_repair": "Final mm destructor now clears the original owner cache under the mm mutex and destroys its native mmap_sem; native task lookup/wire holds explicit references",
       "thread_repair": "Registry + Linux task references retain native thread and thread metadata; task install/detach and referenced tid lookup serialized; device callbacks release only records they created",
-      "pending_native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39714586056",
-      "pending_native_source": "501601084a451d21013566313e3b594de263dc2b",
-      "fixture_repair": "Darwin user_size_t typedef conflict corrected; compiler output now preserved. Previous failures did not produce a usable kernel."
+      "fixture_repair": "Darwin user_size_t typedef conflict corrected; compiler output now preserved. Previous failures did not produce a usable kernel.",
+      "native_thread_evidence": {
+        "source": "501601084a451d21013566313e3b594de263dc2b",
+        "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39714586056",
+        "artifact_id": 12399200091,
+        "sha256": "2f849a4df5df5b0e4df341516babca89a8120e976c924f6c0e0471c11285775e",
+        "result": "actual device scopes/thread registry + joined mm fixtures passed; 900 DRM, 274 i915 and 76 runtime units compiled; native KC preflight passed",
+        "hardware_executed": false
+      }
     }
   ],
   "test_limit": "Existing fixtures are evidence only for their actual extracted code and exercised contracts. Kernel services or hardware replaced by host mocks are not verified by those mocks.",
@@ -104,5 +119,21 @@
     "native_KC_preflight": "passed",
     "hardware_executed": false,
     "new_user_test_requested": false
+  },
+  "latest_thread_verification": {
+    "source": "501601084a451d21013566313e3b594de263dc2b",
+    "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39714586056",
+    "artifact_id": 12399200091,
+    "sha256": "2f849a4df5df5b0e4df341516babca89a8120e976c924f6c0e0471c11285775e",
+    "result": "actual device scopes/thread registry + joined mm fixtures passed; 900 DRM, 274 i915 and 76 runtime units compiled; native KC preflight passed",
+    "hardware_executed": false
+  },
+  "latest_software_progress": {
+    "date": "2026-10-22",
+    "tasklet_host_evidence": "12 actual-source contract cases passed; 7 of 9 common cases failed on pristine baseline",
+    "pristine_patch_validation": "all 43 port and 11 DRM patched files match staged source after CRLF/LF normalization",
+    "native_ci_status": "tasklet build not yet verified",
+    "new_user_test_requested": false,
+    "usb_package_changed": false
   }
 }

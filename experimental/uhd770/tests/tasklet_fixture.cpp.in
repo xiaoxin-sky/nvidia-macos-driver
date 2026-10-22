@@ -1,0 +1,323 @@
+/* Actual LinuxKPI tasklet state machine joined to i915 helpers and submission
+ * flush. Only kernel queues, atomics, mutexes and worker dispatch are modeled.
+ * Deterministic interleavings cover disabled work and inline rescheduling;
+ * parallel producers exercise single-queue ownership. No GPU is executed.
+ */
+#include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+#include <vector>
+#ifdef _MSC_VER
+#pragma warning(disable: 4100 4505)
+#endif
+#ifndef __FreeBSD__
+#define __FreeBSD__ 1
+#endif
+#ifndef __aligned
+#define __aligned(n)
+#endif
+#ifndef __unused
+#define __unused
+#endif
+#define CACHE_LINE_SIZE 64
+#define CPU_FOREACH(i) for ((i)=0; (i)<2; ++(i))
+#define CPU_ABSENT(i) false
+#define MTX_DEF 0
+#define MTX_SPIN 1
+#define DPCPU_DEFINE_STATIC(t,n) static t nmx_dpcpu_##n[2]
+#define DPCPU_ID_PTR(i,n) (&nmx_dpcpu_##n[(i)])
+static thread_local int fixture_cpu=0;
+#define DPCPU_GET(n) (nmx_dpcpu_##n[fixture_cpu])
+#define SYSINIT(...)
+#define SYSUNINIT(...)
+#define WITNESS_WARN(...)
+#define KASSERT(v, msg) assert(v)
+#define MPASS(v) assert(v)
+#define barrier() std::atomic_thread_fence(std::memory_order_seq_cst)
+using u_int=unsigned;
+using atomic_t=std::atomic<int>;
+static thread_local std::function<void()> after_count_read;
+static int atomic_read(const atomic_t *p)
+{
+    int value=p->load();
+    if(after_count_read) { auto f=std::move(after_count_read); after_count_read={}; f(); }
+    return value;
+}
+static void atomic_set(atomic_t *p,int v) { p->store(v); }
+static void atomic_inc(atomic_t *p) { ++*p; }
+static void atomic_dec(atomic_t *p) { --*p; }
+static int atomic_fetch_inc(atomic_t *p) { return p->fetch_add(1); }
+static bool atomic_dec_and_test(atomic_t *p) { return --*p==0; }
+/* Serialize the host representation of the volatile state word. Production
+ * uses FreeBSD atomic_cmpset_int / acquire-release state accesses. */
+static std::mutex state_mutex;
+static u_int load_state(const volatile u_int *p) { std::lock_guard<std::mutex> g(state_mutex); return *p; }
+static void store_state(volatile u_int *p,u_int v) { std::lock_guard<std::mutex> g(state_mutex); *p=v; }
+static int atomic_cmpset_int(volatile u_int *p,u_int old,u_int value)
+{
+    std::lock_guard<std::mutex> g(state_mutex);
+    if (*p!=old) return 0;
+    *p=value; return 1;
+}
+static void atomic_set_int(volatile u_int *p,u_int bits)
+{
+    std::lock_guard<std::mutex> g(state_mutex); *p|=bits;
+}
+static u_int atomic_load_acq_int(const volatile u_int *p) { return load_state(p); }
+static void atomic_store_rel_int(volatile u_int *p,u_int value) { store_state(p,value); }
+#define READ_ONCE(v) load_state(&(v))
+#define WRITE_ONCE(v,x) store_state(&(v),(x))
+struct mtx { std::mutex native; };
+static void mtx_init(mtx *,const char *,void *,int) {}
+static void mtx_destroy(mtx *) {}
+static void mtx_lock(mtx *m) { m->native.lock(); }
+static void mtx_unlock(mtx *m) { m->native.unlock(); }
+#define mtx_lock_spin(m) mtx_lock(m)
+#define mtx_unlock_spin(m) mtx_unlock(m)
+struct tasklet_struct;
+using tasklet_func_t=void(unsigned long);
+using tasklet_callback_t=void(tasklet_struct *);
+struct tasklet_struct {
+    struct { tasklet_struct *tqe_prev=nullptr,*tqe_next=nullptr; } entry;
+    tasklet_func_t *func=nullptr;
+    volatile u_int tasklet_state=0;
+    atomic_t count{0};
+    unsigned long data=0;
+    tasklet_callback_t *callback=nullptr;
+    bool use_callback=false;
+};
+struct fixture_queue { std::deque<tasklet_struct *> entries; };
+#define TAILQ_HEAD(name,type) fixture_queue
+#define TAILQ_INIT(q) ((q)->entries.clear())
+#define TAILQ_FIRST(q) ((q)->entries.empty()?nullptr:(q)->entries.front())
+#define TAILQ_LAST(q,type) ((q)->entries.empty()?nullptr:(q)->entries.back())
+static void queue_remove(fixture_queue *q,tasklet_struct *t)
+{
+    auto at=std::find(q->entries.begin(),q->entries.end(),t); assert(at!=q->entries.end()); q->entries.erase(at);
+}
+static void queue_insert(fixture_queue *q,tasklet_struct *t)
+{
+    assert(std::find(q->entries.begin(),q->entries.end(),t)==q->entries.end()); q->entries.push_back(t);
+}
+#define TAILQ_REMOVE(q,t,field) queue_remove((q),(t))
+#define TAILQ_INSERT_TAIL(q,t,field) queue_insert((q),(t))
+struct grouptask { void (*fn)(void *)=nullptr; void *arg=nullptr; std::mutex executor; };
+static void *qgroup_softirq=nullptr;
+static std::mutex work_mutex;
+static std::deque<grouptask *> pending;
+static std::function<void()> before_dispatch;
+static void enqueue(grouptask *g)
+{
+    std::lock_guard<std::mutex> guard(work_mutex);
+    if (std::find(pending.begin(),pending.end(),g)==pending.end()) pending.push_back(g);
+}
+static bool dispatch_one()
+{
+    grouptask *g;
+    { std::lock_guard<std::mutex> guard(work_mutex); if(pending.empty()) return false; g=pending.front();pending.pop_front(); }
+    if(before_dispatch) { auto h=std::move(before_dispatch); before_dispatch={}; h(); }
+    /* The native taskqueue prevents concurrent execution of the same task. */
+    std::lock_guard<std::mutex> executor(g->executor);
+    g->fn(g->arg); return true;
+}
+static void drain()
+{
+    unsigned n=0;
+    while(dispatch_one()) { if(++n>1000) throw std::runtime_error("worker fails to quiesce"); }
+}
+#define GROUPTASK_INIT(g,p,f,a) do { (g)->fn=(f); (g)->arg=(a); } while(0)
+#define GROUPTASK_ENQUEUE(g) enqueue(g)
+static void taskqgroup_attach_cpu(void *,grouptask *,const char *,int,void *,void *,char *) {}
+static void taskqgroup_detach(void *,grouptask *) {}
+static void taskqgroup_drain_all(void *) { drain(); }
+static int curthread;
+static void linux_set_current(int) {}
+static int bh_depth;
+static void sched_pin() { ++bh_depth; }
+static void sched_unpin() { assert(bh_depth>0); --bh_depth; }
+static std::function<void()> on_pause;
+static unsigned waits;
+static void pause(const char *,int)
+{
+    if (++waits>10) throw std::runtime_error("wait includes queued/parked tasklet instead of only running callback");
+    if (on_pause) on_pause(); else dispatch_one();
+}
+static void cpu_relax() { std::this_thread::yield(); }
+void tasklet_schedule(tasklet_struct *);
+void tasklet_unlock_wait(tasklet_struct *);
+#define tasklet_unlock_spin_wait(t) tasklet_unlock_wait(t)
+/* ACTUAL_TASKLET_SOURCE */
+struct i915_sched_engine { tasklet_struct tasklet; };
+struct intel_engine_cs { i915_sched_engine *sched_engine; };
+/* ACTUAL_I915_HELPERS */
+
+static int calls;
+static void count_callback(tasklet_struct *) { ++calls; }
+static void reschedule_callback(tasklet_struct *t) { if (++calls==1) tasklet_schedule(t); }
+static void require(bool v,const char *why) { if (!v) throw std::runtime_error(why); }
+static void reset_fixture()
+{
+    for(auto &tw:nmx_dpcpu_tasklet_worker) tw.head.entries.clear();
+    pending.clear(); calls=0; waits=0; bh_depth=0; before_dispatch={}; on_pause={}; fixture_cpu=0; after_count_read={};
+}
+static void inline_reschedule()
+{
+    i915_sched_engine s; intel_engine_cs engine{&s}; tasklet_setup(&s.tasklet,reschedule_callback);
+    __intel_engine_flush_submission(&engine,false); drain();
+    require(calls==2,"inline submission callback lost reschedule"); tasklet_kill(&s.tasklet);
+}
+static void disabled_schedule()
+{
+    tasklet_struct t; tasklet_setup(&t,count_callback); tasklet_disable_nosync(&t);
+    tasklet_schedule(&t); drain(); require(calls==0,"disabled callback ran");
+    tasklet_enable(&t); drain(); require(calls==1,"schedule while disabled was lost"); tasklet_kill(&t);
+}
+static void queued_inline_flush()
+{
+    i915_sched_engine s; intel_engine_cs engine{&s}; tasklet_setup(&s.tasklet,count_callback);
+    tasklet_schedule(&s.tasklet);
+    __intel_engine_flush_submission(&engine,true);
+    require(calls==1,"synchronous flush returned without executing queued submission");
+    drain(); require(calls==2,"inline flush lost existing queue reservation"); tasklet_kill(&s.tasklet);
+}
+static void queued_disable()
+{
+    tasklet_struct t; tasklet_setup(&t,count_callback); tasklet_schedule(&t);
+    tasklet_disable(&t); drain(); require(calls==0,"queued callback ignored disable");
+    tasklet_enable(&t); drain(); require(calls==1,"re-enable failed to wake parked work"); tasklet_kill(&t);
+}
+static void i915_state_contract()
+{
+    tasklet_struct t; tasklet_setup(&t,count_callback);
+    require(tasklet_trylock(&t)!=0,"inline lock failed");
+    require(tasklet_is_locked(&t),"i915 does not see inline tasklet lock");
+    tasklet_schedule(&t);
+    require(tasklet_is_locked(&t),"i915 loses running state on reschedule");
+    require(__tasklet_is_scheduled(&t),"i915 loses pending reschedule");
+    tasklet_unlock(&t);
+    require(__tasklet_is_scheduled(&t),"i915 does not see queued work");
+    __tasklet_disable_sync_once(&t); drain();
+    require(!__tasklet_is_enabled(&t) && calls==0,"reset disable did not park work");
+    require(__tasklet_enable(&t),"final reset enable returned false");
+    drain(); require(calls==1,"i915 enable lost pending work"); tasklet_kill(&t);
+}
+static void worker_reschedule_disable(tasklet_struct *t)
+{
+    if (++calls==1) { tasklet_disable_nosync(t); tasklet_schedule(t); }
+}
+static void callback_disables()
+{
+    tasklet_struct t; tasklet_setup(&t,worker_reschedule_disable); tasklet_schedule(&t); drain();
+    require(calls==1,"worker reran a callback while disabled");
+    tasklet_enable(&t); drain(); require(calls==2,"callback reschedule lost across disable"); tasklet_kill(&t);
+}
+static void concurrent_schedule()
+{
+    tasklet_struct t; tasklet_setup(&t,count_callback);
+    std::vector<std::thread> producers;
+    for(int i=0;i<8;++i) producers.emplace_back([&,i] { fixture_cpu=i%2; for(int n=0;n<500;++n) tasklet_schedule(&t); });
+    for(auto &p:producers) p.join();
+    drain(); require(calls==1,"concurrent schedules were not coalesced"); tasklet_kill(&t);
+}
+static void normal_worker()
+{
+    tasklet_struct t; tasklet_setup(&t,reschedule_callback); tasklet_schedule(&t); drain();
+    require(calls==2,"normal worker lost requeue"); tasklet_kill(&t);
+    require(t.tasklet_state==0,"kill returned before idle");
+}
+static void reinitialization()
+{
+    tasklet_struct t;
+    t.tasklet_state=0xffffffffU;
+    tasklet_setup(&t,count_callback);
+    require(t.tasklet_state==0,"tasklet_setup did not clear previous state");
+    t.tasklet_state=0xffffffffU;
+    tasklet_init(&t,nullptr,0);
+    require(t.tasklet_state==0,"tasklet_init did not clear previous state");
+}
+#ifdef NMXKPI
+static void queued_inline_handoff()
+{
+    tasklet_struct t; tasklet_setup(&t,count_callback); tasklet_schedule(&t);
+    require(tasklet_trylock(&t)!=0,"queued tasklet cannot acquire inline RUN");
+    drain(); require(calls==0,"queued worker overlapped inline owner");
+    require(tasklet_is_locked(&t) && __tasklet_is_scheduled(&t),"worker lost pending ownership at inline handoff");
+    tasklet_unlock(&t); drain(); require(calls==1,"inline unlock failed to requeue consumed entry"); tasklet_kill(&t);
+}
+static void disable_publication_race()
+{
+    tasklet_struct t; tasklet_setup(&t,count_callback); tasklet_schedule(&t);
+    std::atomic<bool> returned{false};
+    bool returned_before_publish=false;
+    std::thread disabler;
+    on_pause=[] { std::this_thread::sleep_for(std::chrono::milliseconds(1)); };
+    after_count_read=[&] {
+        disabler=std::thread([&] { tasklet_disable(&t); returned=true; });
+        while(t.count.load()==0) std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        returned_before_publish=returned.load();
+    };
+    drain(); disabler.join();
+    require(!returned_before_publish,"disable returned before a claimed callback published its running ownership");
+    require(returned && calls==1,"disable failed to wait for already claimed callback");
+    tasklet_enable(&t); tasklet_kill(&t);
+}
+static std::atomic<int> active_callbacks{0},callback_overlaps{0},concurrent_calls{0};
+static void concurrent_callback(tasklet_struct *t)
+{
+    if (++active_callbacks!=1) ++callback_overlaps;
+    if (++concurrent_calls%7==0) tasklet_schedule(t);
+    std::this_thread::yield(); --active_callbacks;
+}
+static void live_workers()
+{
+    tasklet_struct t; tasklet_setup(&t,concurrent_callback);
+    std::atomic<bool> done{false};
+    std::vector<std::thread> producers,consumers;
+    for(int i=0;i<2;++i) consumers.emplace_back([&,i] {
+        fixture_cpu=i;
+        while(!done || dispatch_one()) if(!dispatch_one()) std::this_thread::yield();
+    });
+    for(int i=0;i<4;++i) producers.emplace_back([&,i] {
+        fixture_cpu=i%2; for(int n=0;n<1000;++n) tasklet_schedule(&t);
+    });
+    for(auto &p:producers) p.join();
+    done=true; for(auto &c:consumers) c.join(); drain();
+    tasklet_kill(&t);
+    require(concurrent_calls>0 && callback_overlaps==0 && active_callbacks==0,
+        "parallel workers overlapped a callback or lost all work");
+}
+#endif
+int main()
+{
+    tasklet_subsystem_init(nullptr);
+    const std::pair<const char *,void(*)()> tests[]={
+        {"inline-reschedule",inline_reschedule},{"disabled-schedule",disabled_schedule},
+        {"queued-inline-flush",queued_inline_flush},
+        {"queued-disable",queued_disable},{"i915-state",i915_state_contract},
+        {"callback-disables",callback_disables},{"parallel-producers",concurrent_schedule},
+        {"normal-worker",normal_worker},{"reinitialization",reinitialization}
+#ifdef NMXKPI
+        ,{"queued-inline-handoff",queued_inline_handoff},
+        {"disable-publication-race",disable_publication_race},{"live-workers",live_workers}
+#endif
+    };
+    unsigned failed=0;
+    for(auto &test:tests) {
+        reset_fixture();
+        try { test.second(); std::printf("PASS %s\n",test.first); }
+        catch(const std::exception &e) { ++failed;std::printf("FAIL %s: %s\n",test.first,e.what()); }
+    }
+    reset_fixture(); tasklet_subsystem_uninit(nullptr);
+    std::printf("Actual tasklet/i915 contracts: %u failed; host primitives modeled; no GPU executed.\n",failed);
+    return failed?1:0;
+}
