@@ -269,7 +269,24 @@
         "they contain no 'NullMoth devfs: open' line, so the -19 did not report through the port's own failure path",
         "conclusion: the -19 cannot be attributed to a current-code path from this evidence; either that build lacked the print or the refusal came from the devfs layer before nmx_cdev_open"
       ],
-      "discriminator_for_the_next_run": "if a device open is refused again, the presence of the port's own 'NullMoth devfs: open ... error=' line says which callback refused it; its absence, in a report that did capture kernel streams, says the refusal happened before the port's open path. The analyzer now separates that from the case where no streams were captured at all, where absence proves nothing."
+      "discriminator_for_the_next_run": "if a device open is refused again, the presence of the port's own 'NullMoth devfs: open ... error=' line says which callback refused it; its absence, in a report that did capture kernel streams, says the refusal happened before the port's open path. The analyzer now separates that from the case where no streams were captured at all, where absence proves nothing.",
+      "what_stage_open_proves": {
+        "source": "experimental/uhd770/acceleration/patches/libdrm-nmx-node.patch, the drm_darwin_fd_probe helper",
+        "reading": "the helper starts with stage=\"open\", calls open(O_RDWR|O_CLOEXEC|O_NOFOLLOW), and on failure jumps straight to the summary that prints stage and result; every later step reassigns stage to NODE_INFO, logical-name or PCIINFO before failing",
+        "consequence": "the r14 line 'stage=open result=-19' can only have been produced by the open() call itself, so the PCIINFO and NODE_INFO hypotheses are excluded by the code"
+      },
+      "independent_review": {
+        "method": "a second reviewer, separate context, traced the open path through nmx_devfs.cpp, nmx_linux_cdev.c, nmx_drm_os.c and linux_compat.c and enumerated every ENODEV site",
+        "findings": [
+          "nmx_devfs.cpp contains no ENODEV at all; its failures are ENXIO, EFAULT, EINVAL and ENOMEM, so the XNU glue cannot produce -19",
+          "the only open-path ENODEV in the port is linux_dev_fdopen's si_drv1/vnode guard, and it is unreachable for a node that exists because both fields are set before the callback",
+          "any error returned through that path is printed twice, by linux_dev_fdopen's caller and by the driver-open wrapper",
+          "the remaining reachable source of open(2) == ENODEV is drm_minor_acquire finding no entry for the minor, i.e. the node exists but the render minor was never registered, or was unregistered"
+        ],
+        "why_the_missing_log_line_is_not_evidence": "the failing boot's captured kernel stream in the r14 report is one of the 293-byte ones that carry only the filter header, so the absence of the port's failure line there says nothing either way",
+        "discriminator_for_the_next_run": "grep the new report's kernel streams for 'NullMoth devfs: open id=': present with error=19 means the driver's open refused and the render minor was not registered; absent, in a report that did capture streams, means open(2) was refused before the port's callback and the XNU devfs layer is the place to look. A root open of /dev/dri/card0 separates 'no minor registered at all' from 'render minor missing'.",
+        "hardware_executed": false
+      }
     },
     "artifacts_to_bring_back": {
       "always": [

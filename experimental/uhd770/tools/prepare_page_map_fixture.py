@@ -67,11 +67,15 @@ def function(source, name):
 
 
 def strip_arch_guards(text):
-    """Drop the i386/amd64 guard *lines* around code the kernel compiles on x86_64.
+    """Drop the architecture guard *lines* around code the kernel compiles on x86_64.
 
     Only the two directive lines go away; the statements they guard stay, because
-    they are the ones this fixture has to execute. The host is macOS x86_64, so
-    clang does not define __amd64__ the way FreeBSD does.
+    they are the ones this fixture has to execute. The guards test FreeBSD/GCC
+    macros such as __amd64__, which the extracted text's host compiler (MSVC on
+    the Windows side) does not define, so leaving them in would silently compile
+    the guarded statements out of the fixture. The kext build uses clang on
+    x86_64, which does define __amd64__, so the same statements are compiled
+    there -- the fixture is not testing a different code set.
     """
     while True:
         opening = re.search(r"^#if defined\(__i386__\)[^\n]*\n", text, re.M)

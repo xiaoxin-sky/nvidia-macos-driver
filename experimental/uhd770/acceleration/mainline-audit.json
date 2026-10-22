@@ -17,7 +17,8 @@
     {
       "id": "discovery",
       "route": "libdrm canonical open -> NODE_INFO/PCIINFO -> linux_file_close -> CK RCU",
-      "status": "r13/r14 defects repaired; actual CK and compiled atomics verified in r15; target pending"
+      "status": "r13/r14 defects repaired; actual CK and compiled atomics verified in r15; target pending",
+      "last_target_evidence": "the last target run failed before compute: open of /dev/dri/renderD128 returned ENODEV. A source review of the open path found no way for the port's own code to return ENODEV silently, so the remaining candidate is drm_minor_acquire not finding the render minor; the next run's kernel log discriminates this from a devfs-layer refusal."
     },
     {
       "id": "ioctl",

@@ -110,6 +110,26 @@
       "sha256": "8912c0c9ee2be922875d878afd1fccbcfe41ecd7e0c481dbd3db8353bcb6c6e3",
       "result": "All 11 actual registration/rollback cases passed on macOS normally and under AddressSanitizer/UndefinedBehaviorSanitizer; the kernel extension build and native KC preflight passed in the same run",
       "hardware_executed": false
+    },
+    "independent_review": {
+      "method": "a separate reviewer, with its own context and no access to my reasoning, read the patched functions, the FreeBSD originals, the generator and the fixture, and answered fixed questions A-E",
+      "confirmed": {
+        "A_ioremap_rollback": "correct: the rollback passes the same addr and size that were just mapped, the vmmap hash is untouched because vmmap_add's only failure exit precedes the lock and the insert, and the device registry entry created by pmap_mapdev_attr is removed by pmap_unmapdev's exact-va lookup, so no double unmap is possible",
+        "B_vmap_rollback": "correct and primitive-matched: the rollback calls nmx_xnu_unmap on the same handle that nmx_xnu_map_pages filled in, which is exactly what vunmap later reads back out of the registry",
+        "C_failure_state": "nothing left behind: the sole failure exit precedes any global write, so vmmap_remove and is_vmalloc_addr observe the pre-call table",
+        "D_fixture_detects_revert": "verified three independent ways: the generator's MUST_CONTAIN guard reports 4 violations on the pre-fix tree and 0 on the fixed one; with the guard bypassed the pre-fix binary dies at the null store while the fixed one passes 11/11; and the failing case really drives the allocation budget to zero and asserts both the NULL return and the single unmap call"
+      },
+      "limitations_found": [
+        "pmap_unmapdev ignores its size argument, so the fixture cannot observe whether the rollback passes the right size - only the address is observable",
+        "VMAP_MAX_CHUNK_SIZE is defined and never referenced, so vmap no longer rejects counts the FreeBSD original rejected; the effective bound is the page-list bound in nmx_vm.cpp",
+        "one registry holds both ioremap and vmap entries with no discriminator, so calling iounmap on a vmap address (or vunmap on an ioremap address) would leak the other kind's handle; no caller in the tree mixes them",
+        "is_vmalloc_addr is an exact-base test rather than the Linux range test"
+      ],
+      "resolved_by_follow_up": {
+        "is_vmalloc_addr": "the exact-base test is deliberate and matches Linux for every in-tree caller: i915 passes the base address from vmap (unmap_object, the shrinker's mapping test) and kmalloc memory must report false, which dropping FreeBSD's vtoslab fallback achieves; an interior pointer would differ, and no caller passes one",
+        "arch_guard_faithfulness": "the reviewer suspected the fixture might execute statements the kext build preprocesses out. Disproved from the built binary: the Mach-O symbol table of the packaged kext contains __ioremap_attr, which is the mangled name of _ioremap_attr, so the guard around it evaluated true in the kext build; the guard is false only for the fixture's host compiler, which is why the directive lines are stripped"
+      },
+      "hardware_executed": false
     }
   },
   "ggtt_hwsp_contract": {
