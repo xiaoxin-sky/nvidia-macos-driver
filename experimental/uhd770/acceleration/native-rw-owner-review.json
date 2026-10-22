@@ -1,6 +1,6 @@
 {
   "date": "2026-10-22",
-  "status": "source finding awaiting joined native shared/exclusive-lock review; not an observed target failure",
+  "status": "implemented and 16 joined host cases passed; native macOS/TSan/ASan pending",
   "scope": "Linux mutex/rwsem and BSD sx/rw owner metadata over native lck_rw; used by GEM/VM/context paths",
   "findings": [
     "nmx_lock.c SX/RW owner probes and publication use volatile sx_lock/rw_owner, unlike the repaired explicit atomic mtx_owner path",
@@ -13,5 +13,22 @@
     "Use native concurrency diagnostics before claiming this interface reviewed; preserve native lock exclusion and avoid dropping synchronization"
   ],
   "hardware_executed": false,
-  "new_hardware_test_requested": false
+  "new_hardware_test_requested": false,
+  "repair_and_validation": {
+    "status": "implemented and 16 joined host cases passed; native macOS/TSan/ASan pending",
+    "change": "Atomic SX/RW owner helpers and publication; Linux mutex and WW-mutex owner accessors/readers use the same helper. Actual Linux mutex/rwsem, native SX/RW methods and generic release/reacquire are joined in the fixture.",
+    "IDR": "GEM and syncobj handle creation reach idr_preload. The original sched_pin masked interrupts over mutex waits/malloc. Override retains a private current-native-thread cache across migration; balances unused-node/cache release at preload_end and preserves the actual IDR radix-tree algorithm.",
+    "IDR_callers": [
+      "drm_gem.c:drm_gem_handle_create_tail",
+      "drm_syncobj.c:drm_syncobj_get_handle and create-as-handle path"
+    ],
+    "host_log": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nActual Linux/native locking, IDR/BH/critical/CSB contracts passed; native primitives/allocator/MMIO modeled; no GPU executed.\n",
+    "limits": "Native lock primitives, registry, allocator/timer/MMIO are host models. IDR preload/get/free are actual source; full radix tree compilation is separate. WW owner reads were made consistent; the complete WW wait-graph algorithm is not covered by this fixture.",
+    "remaining": [
+      "Native compiler/concurrency/memory checks and kernel linkage",
+      "Review WW contention/progress semantics separately from atomic owner access",
+      "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
+    ],
+    "hardware_executed": false
+  }
 }

@@ -11,3 +11,65 @@
  	return ((uint64_t)ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec);
  }
  
+--- a/sys/compat/linuxkpi/common/include/linux/mutex.h
++++ b/sys/compat/linuxkpi/common/include/linux/mutex.h
+@@ -123,7 +123,7 @@
+ static inline bool
+ mutex_is_locked(mutex_t *m)
+ {
+-	return ((struct thread *)SX_OWNER(m->sx.sx_lock) != NULL);
++	return (sx_xholder(&m->sx) != NULL);
+ }
+ 
+ static inline bool
+--- a/sys/compat/linuxkpi/common/include/linux/ww_mutex.h
++++ b/sys/compat/linuxkpi/common/include/linux/ww_mutex.h
+@@ -89,7 +89,7 @@
+ {
+ 	if (MUTEX_SKIP())
+ 		return (0);
+-	else if ((struct thread *)SX_OWNER(lock->base.sx.sx_lock) == curthread)
++	else if (sx_xholder(&lock->base.sx) == curthread)
+ 		return (-EALREADY);
+ 	else
+ 		return (linux_ww_mutex_lock_sub(lock, ctx, 0));
+@@ -100,7 +100,7 @@
+ {
+ 	if (MUTEX_SKIP())
+ 		return (0);
+-	else if ((struct thread *)SX_OWNER(lock->base.sx.sx_lock) == curthread)
++	else if (sx_xholder(&lock->base.sx) == curthread)
+ 		return (-EALREADY);
+ 	else
+ 		return (linux_ww_mutex_lock_sub(lock, ctx, 1));
+--- a/sys/compat/linuxkpi/common/src/linux_lock.c
++++ b/sys/compat/linuxkpi/common/src/linux_lock.c
+@@ -86,8 +86,7 @@
+ 		TAILQ_INSERT_TAIL(&ww_mutex_head, &entry, entry);
+ 
+ 		do {
+-			struct thread *owner = (struct thread *)
+-			    SX_OWNER(lock->base.sx.sx_lock);
++			struct thread *owner = sx_xholder(&lock->base.sx);
+ 
+ 			/* scan for deadlock */
+ 			TAILQ_FOREACH(other, &ww_mutex_head, entry) {
+@@ -101,8 +100,7 @@
+ 				 * that means deadlock.
+ 				 */
+ 				if (other->thread == owner &&
+-				    (struct thread *)SX_OWNER(
+-				    other->lock->base.sx.sx_lock) == curthread) {
++				    sx_xholder(&other->lock->base.sx) == curthread) {
+ 					retval = -EDEADLK;
+ 					goto done;
+ 				}
+@@ -122,7 +120,7 @@
+ 		TAILQ_REMOVE(&ww_mutex_head, &entry, entry);
+ 
+ 		/* if the lock is free, wakeup next lock waiter, if any */
+-		if ((struct thread *)SX_OWNER(lock->base.sx.sx_lock) == NULL)
++		if (sx_xholder(&lock->base.sx) == NULL)
+ 			cv_signal(&lock->condvar);
+ 	}
+ 

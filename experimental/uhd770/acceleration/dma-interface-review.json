@@ -3,7 +3,7 @@
   "reviewed_implementation": "2669b1879818143bae11805151b1349ff8f78007",
   "scope": "DMA address and mapping ownership contracts for UHD770; not GPU execution proof",
   "fixture": {
-    "status": "joined Linux/BSD/native DMA fixture passed on Windows; native macOS and ASan/UBSan pending",
+    "status": "native macOS fixture/ASan/UBSan/kernel/KC passed; target DMA unverified",
     "groups": 6,
     "executed": "actual linux_dma_map_sg_attrs/unmap -> actual busdma map growth/bounds/rollback -> actual nmx_xnu_dma_map/unmap",
     "covered": [
@@ -17,10 +17,17 @@
     "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nActual Linux/BSD/native DMA contracts passed; IOKit/allocator/flat S/G primitives modeled; no GPU executed.\n",
     "limits": "IOKit descriptor/command, allocator, mutex and flat S/G storage are primitives; no real device/IOMMU DMA, GEM page residency, S/G chaining, scalar pctrie mapping or GPU PTE/cache behavior executed.",
     "hardware_executed": false,
-    "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39726229681"
+    "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39726229681",
+    "native_evidence": {
+      "source": "f3bc9b6f1865314c7dbfd3cb77183a39816fd434",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39726229681",
+      "artifact_id": 12402714065,
+      "sha256": "92d0d951d323c49b95848ca37baedc3126e74433eca01d597fe6c0af23b3e7b7",
+      "result": "Six actual Linux/BSD/native S/G-DMA groups passed normally and with AddressSanitizer/UndefinedBehaviorSanitizer on macOS; all 1250 kernel units and native KC preflight passed",
+      "hardware_executed": false
+    }
   },
   "next": [
-    "Run joined fixture and memory sanitizers on native macOS",
     "Review scalar DMA/page-table allocation and the GPU PTE consumer",
     "Review native managed-page WB/WC aliases and actual cache visibility",
     "Validate actual target DMA/IRQ/readback/cleanup only after the full source review"

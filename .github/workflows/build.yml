@@ -198,6 +198,12 @@ jobs:
             2>&1 | tee /tmp/nmx-native-lock-tsan-compile.log
           python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-native-lock-tsan"], timeout=60, check=True)' \
             2>&1 | tee /tmp/nmx-native-lock-tsan.log
+          c++ -std=c++17 -pthread -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
+            -Wno-unused-parameter -Wno-unused-function -Wno-sign-compare \
+            /tmp/nmx-native-lock-test.cpp -o /tmp/nmx-native-lock-asan \
+            2>&1 | tee /tmp/nmx-native-lock-asan-compile.log
+          python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-native-lock-asan"], timeout=60, check=True)' \
+            2>&1 | tee /tmp/nmx-native-lock-asan.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_kernel_clock_fixture.py" \
             --port "$X" --freebsd "$S/kpi/freebsd-src" --drm "$S/kpi/drm-kmod" \
             --template "$GITHUB_WORKSPACE/experimental/uhd770/tests/kernel_clock_fixture.cpp.in" \

@@ -1,12 +1,15 @@
-/* Actual native mutex/BH/critical adapters and i915 CSB/uncore read code.
+/* Actual Linux mutex/rwsem/IDR, native locking and i915 CSB/uncore read code.
  * Native locks, CPU identity, timer and MMIO are controlled host primitives.
  * These checks diagnose illegal blocking contexts; they do not execute a GPU.
  */
 #include <atomic>
 #include <cassert>
 #include <climits>
+#include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <mutex>
@@ -29,30 +32,40 @@ static void host_owner_store(volatile uintptr_t *p,uintptr_t v)
 {
     (void)_InterlockedExchange64(reinterpret_cast<volatile long long *>(p),static_cast<long long>(v));
 }
+static int host_owner_load(const volatile int *p)
+{
+    return static_cast<int>(_InterlockedCompareExchange(reinterpret_cast<volatile long *>(const_cast<volatile int *>(p)),0,0));
+}
+static int host_counter_add(volatile int *p,int v)
+{
+    return static_cast<int>(_InterlockedExchangeAdd(reinterpret_cast<volatile long *>(p),v));
+}
 #define __atomic_load_n(p,o) host_owner_load(p)
 #define __atomic_store_n(p,v,o) host_owner_store((p),(v))
+#define __atomic_fetch_add(p,v,o) host_counter_add((p),(v))
+#define __atomic_fetch_sub(p,v,o) host_counter_add((p),-(v))
 #endif
 #define NMXKPI 1
 #define FALSE false
 #define MAXCPU 2
-#define MTX_DEF 0
-#define MTX_SPIN 1
-#define MTX_RECURSE 4
-#define LO_INITIALIZED 1
-#define LO_RECURSABLE 2
-#define LO_SLEEPABLE 4
-#define NMX_LC_MTX 1
-#define NMX_LC_SPIN 2
+#define LCK_RW_TYPE_SHARED 0
+#define LCK_RW_TYPE_EXCLUSIVE 1
 #define LCK_ATTR_NULL nullptr
 #define KASSERT(v,msg) do { if (!(v)) throw std::runtime_error(#v); } while (0)
 #define bzero(p,n) std::memset((p),0,(n))
 #define SPIN_SKIP() 0
 #define mtx_lock(m) nmx_mtx_lock(m)
 #define mtx_unlock(m) nmx_mtx_unlock(m)
+#define mtx_owned(m) nmx_mtx_owned(m)
 #define preempt_disable() nmx_critical_enter()
 #define preempt_enable() nmx_critical_exit()
 #define noinline
 #define READ_ONCE(v) (v)
+#define curthread nmx_curthread()
+/* Every extracted generic lock entry uses its leading lock_object member.
+ * Resolve offsetof through a template type to avoid MSVC confusing the C
+ * local name "sx" with the struct tag inside the offsetof builtin. */
+#define __containerof(p,t,field) host_lock_container<t>(p)
 using boolean_t=bool;
 using u_int=unsigned;
 using u32=uint32_t;
@@ -68,10 +81,14 @@ static thread_local unsigned native_spins=0;
 static boolean_t ml_at_interrupt_context() { return hard_irq; }
 static boolean_t ml_set_interrupts_enabled(boolean_t state) { bool old=irqs;irqs=state;return old; }
 static int cpu_number() { return host_cpu; }
-static void panic(const char *s,...) { throw std::runtime_error(s); }
+[[noreturn]] static void panic(const char *s,...) { throw std::runtime_error(s); }
 static void *nmx_lck_grp=nullptr;
-struct lock_object { const char *lo_name;unsigned lo_class,lo_flags; };
-struct mtx { struct lock_object lock_object;void *mtx_lk;volatile uintptr_t mtx_owner;int mtx_recurse,mtx_saved_intr; };
+/* ACTUAL_NATIVE_LOCK_LAYOUTS */
+template<class T> static T *host_lock_container(lock_object *p)
+{
+    static_assert(offsetof(T,lock_object)==0,"native lock_object must lead its container");
+    return reinterpret_cast<T *>(p);
+}
 struct NativeLock { std::mutex value; };
 static std::function<void()> on_native_lock;
 static std::atomic<unsigned> blocking_entries{0};
@@ -96,7 +113,92 @@ static bool lck_spin_try_lock(void *p)
     ++native_spins; return true;
 }
 static void lck_spin_unlock(void *p) { assert(!irqs && native_spins);--native_spins;static_cast<NativeLock *>(p)->value.unlock(); }
+/* Native lck_rw primitives support atomic downgrade. A mutex/condition model
+ * supplies that guarantee without a false unlock/relock gap in the test. */
+struct NativeRW {
+    std::mutex guard;
+    std::condition_variable ready;
+    unsigned readers=0;
+    bool writer=false;
+};
+static void rw_context() { if(!irqs || native_spins) throw std::runtime_error("native RW acquisition in CPU critical context"); }
+static void *lck_rw_alloc_init(void *,void *) { return new NativeRW; }
+static void lck_rw_free(void *p,void *)
+{
+    auto *r=static_cast<NativeRW *>(p);assert(!r->readers && !r->writer);delete r;
+}
+static void lck_rw_lock_shared(void *p)
+{
+    rw_context();auto *r=static_cast<NativeRW *>(p);std::unique_lock<std::mutex> g(r->guard);
+    r->ready.wait(g,[&] { return !r->writer; });++r->readers;
+}
+static void lck_rw_unlock_shared(void *p)
+{
+    auto *r=static_cast<NativeRW *>(p);std::lock_guard<std::mutex> g(r->guard);
+    assert(r->readers && !r->writer);--r->readers;r->ready.notify_all();
+}
+static void lck_rw_lock_exclusive(void *p)
+{
+    rw_context();auto *r=static_cast<NativeRW *>(p);std::unique_lock<std::mutex> g(r->guard);
+    r->ready.wait(g,[&] { return !r->writer && !r->readers; });r->writer=true;
+}
+static void lck_rw_unlock_exclusive(void *p)
+{
+    auto *r=static_cast<NativeRW *>(p);std::lock_guard<std::mutex> g(r->guard);
+    assert(r->writer && !r->readers);r->writer=false;r->ready.notify_all();
+}
+static bool lck_rw_try_lock(void *p,int type)
+{
+    rw_context();auto *r=static_cast<NativeRW *>(p);std::lock_guard<std::mutex> g(r->guard);
+    if(r->writer || (type==LCK_RW_TYPE_EXCLUSIVE && r->readers)) return false;
+    if(type==LCK_RW_TYPE_SHARED) ++r->readers;else r->writer=true;
+    return true;
+}
+static void lck_rw_lock_exclusive_to_shared(void *p)
+{
+    auto *r=static_cast<NativeRW *>(p);std::lock_guard<std::mutex> g(r->guard);
+    assert(r->writer && !r->readers);r->writer=false;r->readers=1;r->ready.notify_all();
+}
 /* ACTUAL_NATIVE_LOCK_IMPLEMENTATION */
+/* ACTUAL_LINUX_SHARED_LOCK_ACCESSORS */
+
+using spinlock_t=struct mtx;
+using gfp_t=unsigned;
+#define GFP_KERNEL 1
+#define M_WAITOK 1
+#define M_NOWAIT 2
+#define M_ZERO 4
+#define M_IDR 0
+#define MPASS(v) KASSERT(v,("IDR invariant"))
+#define likely(v) (v)
+#define spin_lock_init(m) mtx_init((m),"idr-preload",nullptr,MTX_DEF|MTX_NOWITNESS|MTX_NEW)
+#define spin_lock_destroy(m) mtx_destroy(m)
+static std::atomic<unsigned> idr_live_allocations{0};
+static thread_local unsigned idr_allocations=0,idr_fail_at=0;
+static thread_local bool idr_fail_nowait=false;
+static thread_local std::function<void()> on_idr_allocation;
+static void *host_idr_alloc(size_t size,unsigned flags)
+{
+    if(!irqs || native_spins) throw std::runtime_error("IDR allocation with native interrupts masked");
+    if(flags&M_WAITOK) assert(nmx_linux_bh_depth()==0);
+    if(on_idr_allocation) on_idr_allocation();
+    if(++idr_allocations==idr_fail_at || ((flags&M_NOWAIT) && idr_fail_nowait)) return nullptr;
+    void *p=(flags&M_ZERO)?std::calloc(1,size):std::malloc(size);
+    if(p) ++idr_live_allocations;return p;
+}
+static void host_idr_free(void *p)
+{
+    if(p) { assert(idr_live_allocations);--idr_live_allocations;std::free(p); }
+}
+static void bitmap_fill(unsigned long *word,unsigned bits)
+{
+    assert(bits==32);*word=(~0UL)>>(sizeof(unsigned long)*CHAR_BIT-bits);
+}
+#define malloc(size,type,flags) host_idr_alloc((size),(flags))
+#define free(p,type) host_idr_free(p)
+/* ACTUAL_IDR_PRELOAD */
+#undef malloc
+#undef free
 
 using i915_reg_t=u32;
 enum forcewake_domains { FORCEWAKE_NONE=0 };
@@ -216,13 +318,150 @@ static void bh_bounds()
     hard_irq=false;
     require(underflow && overflow && isr && nmx_linux_bh_depth()==0,"BH boundary checks failed");
 }
+static void linux_mutex_owner_probes()
+{
+    mutex_t m{};sx_init_flags(&m.sx,"linux-owner",0);
+    nmx_sx_xlock(&m.sx);
+    require(mutex_is_locked(&m) && mutex_is_owned(&m),"Linux mutex owner probes lost current owner");
+    std::thread other([&] {
+        require(mutex_is_locked(&m) && !mutex_is_owned(&m),"Linux locked/owned meanings collapsed across threads");
+        require(sx_xholder(&m.sx)!=curthread,"SX holder identity changed to observer");
+    });other.join();nmx_sx_xunlock(&m.sx);
+    std::atomic<bool> done{false};int value=0;
+    std::thread observer([&] { while(!done) { (void)mutex_is_locked(&m);require(!mutex_is_owned(&m),"observer became mutex owner"); } });
+    std::vector<std::thread> writers;
+    for(int i=0;i<4;++i) writers.emplace_back([&] {
+        for(int n=0;n<500;++n) { nmx_sx_xlock(&m.sx);require(mutex_is_owned(&m),"writer owner metadata missing");++value;nmx_sx_unlock(&m.sx); }
+    });
+    for(auto &w:writers)w.join();done=true;observer.join();
+    require(value==2000 && !mutex_is_locked(&m),"SX writers or final owner release failed");sx_destroy(&m.sx);
+}
+static void linux_rwsem_contention()
+{
+    rw_semaphore sem{};linux_init_rwsem(&sem,"linux-rwsem");int value=0;
+    std::vector<std::thread> workers;
+    for(int i=0;i<2;++i) workers.emplace_back([&] {
+        for(int n=0;n<500;++n) { down_write(&sem);require(nmx_sx_xlocked(&sem.sx),"rwsem writer identity lost");++value;up_write(&sem); }
+    });
+    for(int i=0;i<2;++i) workers.emplace_back([&] {
+        for(int n=0;n<500;++n) { down_read(&sem);require(value>=0 && value<=1000 && !nmx_sx_xlocked(&sem.sx),"rwsem shared/writer state invalid");up_read(&sem); }
+    });
+    for(auto &w:workers)w.join();
+    require(value==1000 && sem.sx.sx_shared==0 && !nmx_sx_owner(&sem.sx),"rwsem final state not balanced");sx_destroy(&sem.sx);
+}
+static void native_rw_contention()
+{
+    rwlock rw{};rw_init_flags(&rw,"native-rw",0);int value=0;
+    std::vector<std::thread> workers;std::atomic<bool> done{false};
+    std::thread observer([&] { while(!done) require(!nmx_rw_wowned(&rw),"observer became native write owner"); });
+    for(int i=0;i<2;++i) workers.emplace_back([&] {
+        for(int n=0;n<500;++n) { nmx_rw_wlock(&rw);require(nmx_rw_wowned(&rw),"native write owner missing");++value;nmx_rw_unlock(&rw); }
+    });
+    for(int i=0;i<2;++i) workers.emplace_back([&] {
+        for(int n=0;n<500;++n) { nmx_rw_rlock(&rw);require(value>=0 && value<=1000 && !nmx_rw_wowned(&rw),"native shared state invalid");nmx_rw_unlock(&rw); }
+    });
+    for(auto &w:workers)w.join();done=true;observer.join();
+    require(value==1000 && !nmx_rw_owner(&rw) && rw.rw_readers==0,"native RW final state not balanced");rw_destroy(&rw);
+}
+static void exclusive_sleep_recursion()
+{
+    sx s{};sx_init_flags(&s,"sx-recursive",SX_RECURSE);
+    nmx_sx_xlock(&s);require(nmx_sx_try_xlock(&s) && s.sx_recurse==1,"SX recursive acquisition failed");
+    uintptr_t how=nmx_lock_release(&s.lock_object);
+    require(how==1 && !nmx_sx_owner(&s),"SX sleep release did not drop recursion and native ownership");
+    std::thread sxwriter([&] { nmx_sx_xlock(&s);nmx_sx_xunlock(&s); });sxwriter.join();
+    nmx_lock_reacquire(&s.lock_object,how);
+    require(nmx_sx_xlocked(&s) && s.sx_recurse==1,"SX sleep reacquire lost recursive ownership");
+    nmx_sx_xunlock(&s);require(nmx_sx_xlocked(&s),"SX recursive unlock released native lock too early");nmx_sx_xunlock(&s);sx_destroy(&s);
+    rwlock rw{};rw_init_flags(&rw,"rw-recursive",RW_RECURSE);
+    nmx_rw_wlock(&rw);require(nmx_rw_try_wlock(&rw) && rw.rw_recurse==1,"RW recursive acquisition failed");
+    how=nmx_lock_release(&rw.lock_object);require(how==1 && !nmx_rw_owner(&rw),"RW sleep release lost recursion mode");
+    std::thread rwwriter([&] { nmx_rw_wlock(&rw);nmx_rw_wunlock(&rw); });rwwriter.join();
+    nmx_lock_reacquire(&rw.lock_object,how);
+    require(nmx_rw_wowned(&rw) && rw.rw_recurse==1,"RW sleep reacquire did not restore depth");
+    nmx_rw_wunlock(&rw);require(nmx_rw_wowned(&rw),"RW recursive unlock released early");nmx_rw_wunlock(&rw);rw_destroy(&rw);
+}
+static void downgrade_and_shared_sleep()
+{
+    rw_semaphore sem{};linux_init_rwsem(&sem,"rwsem-downgrade");down_write(&sem);downgrade_write(&sem);
+    require(!nmx_sx_xlocked(&sem.sx) && sem.sx.sx_shared==1,"rwsem downgrade lost shared ownership");
+    std::thread second([&] { require(down_read_trylock(&sem),"downgrade prevented another reader");up_read(&sem); });second.join();
+    require(!down_write_trylock(&sem) && !nmx_sx_try_upgrade(&sem.sx),"failed SX try-upgrade did not retain original shared hold");
+    uintptr_t how=nmx_lock_release(&sem.sx.lock_object);require(how==HOW_SHARED && sem.sx.sx_shared==0,"SX shared sleep release incorrect");
+    down_write(&sem);up_write(&sem);nmx_lock_reacquire(&sem.sx.lock_object,how);
+    require(sem.sx.sx_shared==1 && !nmx_sx_xlocked(&sem.sx),"SX shared sleep reacquire changed mode");up_read(&sem);sx_destroy(&sem.sx);
+    rwlock rw{};rw_init_flags(&rw,"rw-downgrade",0);nmx_rw_wlock(&rw);nmx_rw_downgrade(&rw);
+    require(!nmx_rw_wowned(&rw) && rw.rw_readers==1,"native RW downgrade lost shared mode");
+    require(!nmx_rw_try_wlock(&rw) && !nmx_rw_try_upgrade(&rw),"native RW failed upgrade dropped shared lock");
+    how=nmx_lock_release(&rw.lock_object);require(how==HOW_SHARED && rw.rw_readers==0,"RW shared release wrong");
+    nmx_rw_wlock(&rw);nmx_rw_wunlock(&rw);nmx_lock_reacquire(&rw.lock_object,how);
+    require(rw.rw_readers==1 && !nmx_rw_wowned(&rw),"RW shared reacquire changed mode");nmx_rw_unlock(&rw);rw_destroy(&rw);
+}
+static void other_owner_trylocks()
+{
+    sx s{};sx_init_flags(&s,"sx-other",0);nmx_sx_xlock(&s);
+    std::thread a([&] { require(!nmx_sx_try_xlock(&s) && !nmx_sx_try_slock(&s),"SX trylock stole another thread's exclusive hold"); });a.join();
+    require(nmx_sx_xlocked(&s),"SX failed trylock changed owner");nmx_sx_xunlock(&s);sx_destroy(&s);
+    rwlock rw{};rw_init_flags(&rw,"rw-other",0);nmx_rw_wlock(&rw);
+    std::thread b([&] { require(!nmx_rw_try_wlock(&rw) && !nmx_rw_try_rlock(&rw),"RW trylock stole another writer"); });b.join();
+    require(nmx_rw_wowned(&rw),"RW failed trylock changed owner");nmx_rw_wunlock(&rw);rw_destroy(&rw);
+}
+static void idr_threaded_preload()
+{
+    require(!nmx_idr_preload_get() && !idr_live_allocations,"IDR preload starts with stale scope");
+    idr_allocations=idr_fail_at=0;idr_fail_nowait=false;
+    on_idr_allocation=[] { host_cpu^=1; };
+    idr_preload(GFP_KERNEL);on_idr_allocation={};
+    auto *cache=static_cast<linux_idr_cache *>(nmx_idr_preload_get());
+    require(cache && cache->count==MAX_IDR_FREE && irqs && nmx_linux_bh_depth()==1,
+        "IDR cache was not reserved in a sleepable native context");
+    host_cpu^=1;idr_fail_nowait=true;idr tree{};
+    idr_layer *node=idr_get(&tree);
+    require(node && node->bitmap==0xffffffffUL && cache->count==MAX_IDR_FREE-1,
+        "IDR did not consume its original thread cache after CPU migration");
+    idr_preload_end();idr_fail_nowait=false;
+    require(!nmx_idr_preload_get() && nmx_linux_bh_depth()==0 && irqs && idr_live_allocations==1,
+        "IDR end did not release unused cache outside the native lock");
+    host_idr_free(node);require(!idr_live_allocations,"IDR caller-owned reservation freed too early/leaked");
+}
+static void idr_partial_preload()
+{
+    idr tree{};idr_allocations=0;idr_fail_at=1;
+    idr_preload(GFP_KERNEL);require(!nmx_idr_preload_get() && nmx_linux_bh_depth()==0,"IDR cache allocation failure left active scope");
+    idr_preload_end();idr_fail_at=0;
+    idr_allocations=0;idr_fail_at=4;idr_preload(GFP_KERNEL);idr_fail_at=0;idr_fail_nowait=true;
+    auto *cache=static_cast<linux_idr_cache *>(nmx_idr_preload_get());
+    require(cache && cache->count==2,"IDR partial prefill did not retain successful reservations");
+    auto *one=idr_get(&tree);auto *two=idr_get(&tree);auto *none=idr_get(&tree);
+    require(one && two && !none,"IDR exhausted prefill did not report allocation failure");
+    idr_preload_end();idr_fail_nowait=false;host_idr_free(one);host_idr_free(two);
+    require(!idr_live_allocations && !nmx_idr_preload_get() && nmx_linux_bh_depth()==0,"partial IDR cache leaked allocations or scope");
+}
+static void idr_parallel_preloads()
+{
+    std::vector<std::thread> workers;
+    for(int i=0;i<4;++i) workers.emplace_back([] {
+        for(int n=0;n<30;++n) {
+            idr_preload(GFP_KERNEL);host_cpu^=1;idr_fail_nowait=true;idr tree{};
+            auto *node=idr_get(&tree);require(node!=nullptr,"parallel IDR cache lost a reservation");
+            idr_preload_end();idr_fail_nowait=false;host_idr_free(node);
+            require(nmx_linux_bh_depth()==0 && !nmx_idr_preload_get() && irqs,"parallel IDR thread scope not balanced");
+        }
+    });for(auto &w:workers)w.join();
+    require(!idr_live_allocations,"parallel IDR caches leaked native allocations");
+}
 int main()
 {
     const std::pair<const char *,void(*)()> cases[]={
         {"nested-native-contention",nested_spin_wait},{"BH-migration-and-critical",explicit_bh_migration},
         {"true-critical-guard",true_critical_guard},{"actual-CSB-uncore-fallback",csb_fallback},
         {"parallel-native-owner",concurrent_owner},{"recursion-and-spin",recursion_and_trylock},
-        {"BH-bounds",bh_bounds}};
+        {"BH-bounds",bh_bounds},{"Linux-mutex-owner-probes",linux_mutex_owner_probes},
+        {"Linux-rwsem-contention",linux_rwsem_contention},{"native-RW-contention",native_rw_contention},
+        {"exclusive-sleep-recursion",exclusive_sleep_recursion},
+        {"downgrade-shared-sleep",downgrade_and_shared_sleep},{"other-owner-trylocks",other_owner_trylocks},
+        {"IDR-thread-cache-migration",idr_threaded_preload},{"IDR-partial-prefill",idr_partial_preload},
+        {"IDR-parallel-preloads",idr_parallel_preloads}};
     for(auto &c:cases) { c.second();std::printf("PASS %s\n",c.first); }
-    std::puts("Actual native mutex/BH/critical/CSB contracts passed; native primitives/MMIO modeled; no GPU executed.");
+    std::puts("Actual Linux/native locking, IDR/BH/critical/CSB contracts passed; native primitives/allocator/MMIO modeled; no GPU executed.");
 }

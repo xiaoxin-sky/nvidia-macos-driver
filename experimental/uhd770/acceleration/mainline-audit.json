@@ -31,14 +31,31 @@
       "id": "identity_context",
       "route": "ANV Intel QUERY/GETPARAM -> i915 capabilities, VM/context and engine setup",
       "status": "MANDATORY ANV UAPI CALLS MAPPED TO REAL KERNEL HANDLERS; transitive and target validation incomplete",
-      "remaining": "Complete native allocation/locking and target VM/queue creation evidence; ioctl dispatch passing alone is insufficient",
-      "source_review": "experimental/uhd770/acceleration/compute-interface-review.json"
+      "remaining": "New scoped IDR preload and shared-lock helpers require native validation; target VM/context/queue creation and real execution evidence still absent",
+      "source_review": "experimental/uhd770/acceleration/compute-interface-review.json",
+      "IDR_handle_initialization": {
+        "status": "implemented and 16 joined host cases passed; native macOS/TSan/ASan pending",
+        "change": "Atomic SX/RW owner helpers and publication; Linux mutex and WW-mutex owner accessors/readers use the same helper. Actual Linux mutex/rwsem, native SX/RW methods and generic release/reacquire are joined in the fixture.",
+        "IDR": "GEM and syncobj handle creation reach idr_preload. The original sched_pin masked interrupts over mutex waits/malloc. Override retains a private current-native-thread cache across migration; balances unused-node/cache release at preload_end and preserves the actual IDR radix-tree algorithm.",
+        "IDR_callers": [
+          "drm_gem.c:drm_gem_handle_create_tail",
+          "drm_syncobj.c:drm_syncobj_get_handle and create-as-handle path"
+        ],
+        "host_log": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nActual Linux/native locking, IDR/BH/critical/CSB contracts passed; native primitives/allocator/MMIO modeled; no GPU executed.\n",
+        "limits": "Native lock primitives, registry, allocator/timer/MMIO are host models. IDR preload/get/free are actual source; full radix tree compilation is separate. WW owner reads were made consistent; the complete WW wait-graph algorithm is not covered by this fixture.",
+        "remaining": [
+          "Native compiler/concurrency/memory checks and kernel linkage",
+          "Review WW contention/progress semantics separately from atomic owner access",
+          "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
+        ],
+        "hardware_executed": false
+      }
     },
     {
       "id": "memory",
       "route": "GEM create -> backing pages -> DMA/IOMMU -> PPGTT/GGTT -> NMX mmap -> IOKit user map",
-      "status": "SHARED MM/TASK OWNERSHIP PASSED NATIVE; joined S/G-DMA ownership/address fixture host-passed, native pending",
-      "remaining": "Native DMA fixture/ASan verification; scalar page-table DMA registry and actual page allocation; complete GPU VA/cache-alias/visibility review and target DMA/coherency evidence",
+      "status": "SHARED MM AND JOINED S/G-DMA CHECKS PASSED NATIVE; shared-lock/IDR repair host-passed, native pending",
+      "remaining": "Verify shared-lock/IDR repair natively; review scalar DMA/private GPU VA/page tables and native cache aliases; target DMA and coherency remain unverified",
       "source_findings": [
         "PROC_LOCK only refreshes signals, so process p_lkpi_mm publication/acquisition lacks its expected lock",
         "linux_mm_dtor clears current process mm rather than locating the original mm owner",
@@ -54,7 +71,7 @@
       },
       "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json",
       "dma_interface": {
-        "status": "joined Linux/BSD/native DMA fixture passed on Windows; native macOS and ASan/UBSan pending",
+        "status": "native macOS fixture/ASan/UBSan/kernel/KC passed on f3bc9b6; device DMA still unverified",
         "groups": 6,
         "executed": "actual linux_dma_map_sg_attrs/unmap -> actual busdma map growth/bounds/rollback -> actual nmx_xnu_dma_map/unmap",
         "covered": [
@@ -68,9 +85,34 @@
         "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nActual Linux/BSD/native DMA contracts passed; IOKit/allocator/flat S/G primitives modeled; no GPU executed.\n",
         "limits": "IOKit descriptor/command, allocator, mutex and flat S/G storage are primitives; no real device/IOMMU DMA, GEM page residency, S/G chaining, scalar pctrie mapping or GPU PTE/cache behavior executed.",
         "hardware_executed": false,
-        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39726229681"
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39726229681",
+        "native_evidence": {
+          "source": "f3bc9b6f1865314c7dbfd3cb77183a39816fd434",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39726229681",
+          "artifact_id": 12402714065,
+          "sha256": "92d0d951d323c49b95848ca37baedc3126e74433eca01d597fe6c0af23b3e7b7",
+          "result": "Six actual Linux/BSD/native S/G-DMA groups passed normally and with AddressSanitizer/UndefinedBehaviorSanitizer on macOS; all 1250 kernel units and native KC preflight passed",
+          "hardware_executed": false
+        }
       },
-      "native_shared_lock_review": "experimental/uhd770/acceleration/native-rw-owner-review.json"
+      "native_shared_lock_review": "experimental/uhd770/acceleration/native-rw-owner-review.json",
+      "shared_lock_and_IDR": {
+        "status": "implemented and 16 joined host cases passed; native macOS/TSan/ASan pending",
+        "change": "Atomic SX/RW owner helpers and publication; Linux mutex and WW-mutex owner accessors/readers use the same helper. Actual Linux mutex/rwsem, native SX/RW methods and generic release/reacquire are joined in the fixture.",
+        "IDR": "GEM and syncobj handle creation reach idr_preload. The original sched_pin masked interrupts over mutex waits/malloc. Override retains a private current-native-thread cache across migration; balances unused-node/cache release at preload_end and preserves the actual IDR radix-tree algorithm.",
+        "IDR_callers": [
+          "drm_gem.c:drm_gem_handle_create_tail",
+          "drm_syncobj.c:drm_syncobj_get_handle and create-as-handle path"
+        ],
+        "host_log": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nActual Linux/native locking, IDR/BH/critical/CSB contracts passed; native primitives/allocator/MMIO modeled; no GPU executed.\n",
+        "limits": "Native lock primitives, registry, allocator/timer/MMIO are host models. IDR preload/get/free are actual source; full radix tree compilation is separate. WW owner reads were made consistent; the complete WW wait-graph algorithm is not covered by this fixture.",
+        "remaining": [
+          "Native compiler/concurrency/memory checks and kernel linkage",
+          "Review WW contention/progress semantics separately from atomic owner access",
+          "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
+        ],
+        "hardware_executed": false
+      }
     },
     {
       "id": "submission",
@@ -183,7 +225,8 @@
         "sha256": "2f849a4df5df5b0e4df341516babca89a8120e976c924f6c0e0471c11285775e",
         "result": "actual device scopes/thread registry + joined mm fixtures passed; 900 DRM, 274 i915 and 76 runtime units compiled; native KC preflight passed",
         "hardware_executed": false
-      }
+      },
+      "shared_lock_and_IDR": "Current repair balances IDR preload before thread-record final destruction; generic shared/exclusive sleep release/reacquire tested from actual code on host, native pending"
     }
   ],
   "test_limit": "Existing fixtures are evidence only for their actual extracted code and exercised contracts. Kernel services or hardware replaced by host mocks are not verified by those mocks.",
@@ -234,7 +277,7 @@
         "staged_match": "all patched source text identical after CRLF/LF normalization"
       }
     },
-    "current_native_ci_status": "DMA fixture source f3bc9b6 run 39726229681 live at verified observation; no real GPU execution yet",
+    "current_native_ci_status": "Shared-lock/IDR repair not yet native-verified; prior DMA/clock/PCODE implementation passed native build",
     "new_user_test_requested": false,
     "usb_package_changed": false,
     "kernel_clock": {
@@ -287,6 +330,31 @@
       "limits": "IOKit descriptor/command, allocator, mutex and flat S/G storage are primitives; no real device/IOMMU DMA, GEM page residency, S/G chaining, scalar pctrie mapping or GPU PTE/cache behavior executed.",
       "hardware_executed": false,
       "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39726229681"
+    },
+    "dma_native_evidence": {
+      "source": "f3bc9b6f1865314c7dbfd3cb77183a39816fd434",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39726229681",
+      "artifact_id": 12402714065,
+      "sha256": "92d0d951d323c49b95848ca37baedc3126e74433eca01d597fe6c0af23b3e7b7",
+      "result": "Six actual Linux/BSD/native S/G-DMA groups passed normally and with AddressSanitizer/UndefinedBehaviorSanitizer on macOS; all 1250 kernel units and native KC preflight passed",
+      "hardware_executed": false
+    },
+    "shared_lock_and_IDR": {
+      "status": "implemented and 16 joined host cases passed; native macOS/TSan/ASan pending",
+      "change": "Atomic SX/RW owner helpers and publication; Linux mutex and WW-mutex owner accessors/readers use the same helper. Actual Linux mutex/rwsem, native SX/RW methods and generic release/reacquire are joined in the fixture.",
+      "IDR": "GEM and syncobj handle creation reach idr_preload. The original sched_pin masked interrupts over mutex waits/malloc. Override retains a private current-native-thread cache across migration; balances unused-node/cache release at preload_end and preserves the actual IDR radix-tree algorithm.",
+      "IDR_callers": [
+        "drm_gem.c:drm_gem_handle_create_tail",
+        "drm_syncobj.c:drm_syncobj_get_handle and create-as-handle path"
+      ],
+      "host_log": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nActual Linux/native locking, IDR/BH/critical/CSB contracts passed; native primitives/allocator/MMIO modeled; no GPU executed.\n",
+      "limits": "Native lock primitives, registry, allocator/timer/MMIO are host models. IDR preload/get/free are actual source; full radix tree compilation is separate. WW owner reads were made consistent; the complete WW wait-graph algorithm is not covered by this fixture.",
+      "remaining": [
+        "Native compiler/concurrency/memory checks and kernel linkage",
+        "Review WW contention/progress semantics separately from atomic owner access",
+        "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
+      ],
+      "hardware_executed": false
     }
   }
 }
