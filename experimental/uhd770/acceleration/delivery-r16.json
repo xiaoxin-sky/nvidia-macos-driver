@@ -123,7 +123,19 @@
     "limits": [
       "this is a reading of the scripts, not a run; only the target boot shows which configuration OpenCore applied",
       "if the machine panicked before the boot-time restore, the USB could still hold the test config; reference-efi/config.optout-reference.plist and Restore-UHD770.ps1 are the Windows-side recovery"
-    ]
+    ],
+    "swallowed_error_audit": {
+      "method": "every '|| :' and '|| true' in the packaged session.sh was read, and session-user.sh was checked for the same pattern",
+      "sites_in_session_sh": 16,
+      "categories": [
+        "evidence collection that is allowed to fail: ls/stat context, sysctl boot identity, kmutil showloaded, dmesg and ioreg snapshots, ditto of the managed directory",
+        "best-effort cleanup: bootout of the capture job, killing the log follower, rmdir of the session lock",
+        "one automatic export attempt that the user can repeat by hand"
+      ],
+      "sites_in_session_user_sh": 0,
+      "conclusion": "no safety-relevant step is swallowed: restore_optout, the recovery verification and the compute sequence all have explicit error handling, so a failure there stops the run instead of degrading quietly",
+      "limit": "reading the scripts, not running them"
+    }
   },
   "probe_math_check": {
     "method": "compared the compute shader in the packaged probe with the CPU expectation in the same probe source",
