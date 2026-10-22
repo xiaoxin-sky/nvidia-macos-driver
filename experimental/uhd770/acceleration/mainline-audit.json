@@ -64,7 +64,7 @@
     {
       "id": "completion",
       "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
-      "status": "THREADED BH/NATIVE MUTEX/CSB REPAIR PASSED NATIVE MACOS/TSAN/KERNEL CHECKS; monotonic clock fixture repair pending",
+      "status": "THREADED BH/NATIVE MUTEX/CSB AND MONOTONIC CLOCK PASSED NATIVE MACOS CHECKS; PCODE retry pending",
       "remaining": "Verify kernel clock and PCODE retry on native macOS; finish remaining native critical/seqcount/IRQ-work/allocation paths and actual GPU request/IRQ/fence evidence",
       "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
       "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018",
@@ -75,7 +75,7 @@
         "pristine_baseline_failures": 7,
         "pristine_baseline_cases": 9,
         "validation": "Actual tasklet module + actual i915 helpers and synchronous engine flush; modeled kernel locks/atomics/queues; parallel host producers/workers and forced disable/publication interleaving",
-        "native_status": "passed on f58bce1; subsequent BH changes need their own native build",
+        "native_status": "passed through 16f571a/b61fdf3 including threaded BH changes",
         "hardware_executed": false,
         "native_evidence": {
           "source": "f58bce1dd24799f8305c50bf0fbad9a8fb852ad9",
@@ -108,17 +108,26 @@
         "patch_sha256": "74bfab1205cd77248b0b136b44bbb74c5a01db26baf2f5ce7ff991d2df106984",
         "baseline": "kernel-clock-old.cpp\nFAIL kernel clock: local_clock still reads calendar time\n",
         "host_result": "kernel-clock-test.cpp\nPASS actual clock/uptime adapter with forward/backward calendar jumps\nGNU i915 wait expressions require native clang; not executed by Windows fixture.\nKernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.\n",
-        "native_status": "previous native fixture compilation failed: user clock_types header does not expose kernel clock_sec_t/nsec types and defines NSEC_PER_SEC as a macro. Fixture now models kernel primitive argument types and respects the SDK macro; retry pending.",
+        "native_status": "passed on b61fdf3 after correcting the fixture kernel/user clock-type conflict",
         "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
         "hardware_executed": false,
-        "retry_native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39723485354"
+        "retry_native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39723485354",
+        "native_evidence": {
+          "source": "b61fdf3aa932267206d482e0a3a2efa8d46644c8",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39723485354",
+          "artifact_id": 12402581894,
+          "sha256": "7ac4d8e1a5dd09943e4f817d8e998090cd2d0710d2774593b223940a02fe90f3",
+          "result": "Actual local_clock/native uptime plus actual i915 GNU wait success, migration, timeout and caller-owned atomic scope passed on macOS; tasklet/native-lock TSan and all 1250 kernel units/KC preflight passed",
+          "hardware_executed": false
+        }
       },
       "pcode_retry_repair": {
         "status": "implemented, native verification pending",
         "change": "NMX-only 50ms retry uses actual non-atomic wait helper; mailbox sb_lock, request/ack condition, retry budget and status precedence preserved",
         "source_trace": "__snb_pcode_rw uses forcewake-independent raw mailbox MMIO and __intel_wait_for_register_fw; nested fast polling uses non-atomic helper with only short clock snapshots critical",
         "test_scope": "Actual skl_pcode_request + actual i915 wait macros + actual native clock adapter; mailbox transaction modeled; GNU expressions/PCODE tests require native clang and were not executed by the Windows fixture",
-        "hardware_executed": false
+        "hardware_executed": false,
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39724583464"
       }
     },
     {
@@ -199,7 +208,7 @@
         "staged_match": "all patched source text identical after CRLF/LF normalization"
       }
     },
-    "current_native_ci_status": "not yet verified",
+    "current_native_ci_status": "PCODE retry source 2669b18 run 39724583464 live at last verified observation; no current GPU proof",
     "new_user_test_requested": false,
     "usb_package_changed": false,
     "kernel_clock": {
@@ -208,9 +217,17 @@
       "patch_sha256": "74bfab1205cd77248b0b136b44bbb74c5a01db26baf2f5ce7ff991d2df106984",
       "baseline": "kernel-clock-old.cpp\nFAIL kernel clock: local_clock still reads calendar time\n",
       "host_result": "kernel-clock-test.cpp\nPASS actual clock/uptime adapter with forward/backward calendar jumps\nGNU i915 wait expressions require native clang; not executed by Windows fixture.\nKernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.\n",
-      "native_status": "pending; native clang additionally executes actual i915 GNU wait macro, migration/success/timeout branches",
+      "native_status": "passed on b61fdf3; PCODE retry extension has separate pending verification",
       "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
-      "hardware_executed": false
+      "hardware_executed": false,
+      "native_evidence": {
+        "source": "b61fdf3aa932267206d482e0a3a2efa8d46644c8",
+        "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39723485354",
+        "artifact_id": 12402581894,
+        "sha256": "7ac4d8e1a5dd09943e4f817d8e998090cd2d0710d2774593b223940a02fe90f3",
+        "result": "Actual local_clock/native uptime plus actual i915 GNU wait success, migration, timeout and caller-owned atomic scope passed on macOS; tasklet/native-lock TSan and all 1250 kernel units/KC preflight passed",
+        "hardware_executed": false
+      }
     },
     "native_lock_evidence": {
       "source": "16f571a1a7349a29361ceb581fbcf58932cbfd93",

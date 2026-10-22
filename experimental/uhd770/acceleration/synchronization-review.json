@@ -137,13 +137,22 @@
     "patch_sha256": "74bfab1205cd77248b0b136b44bbb74c5a01db26baf2f5ce7ff991d2df106984",
     "baseline": "kernel-clock-old.cpp\nFAIL kernel clock: local_clock still reads calendar time\n",
     "host_result": "kernel-clock-test.cpp\nPASS actual clock/uptime adapter with forward/backward calendar jumps\nGNU i915 wait expressions require native clang; not executed by Windows fixture.\nKernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.\n",
-    "native_status": "native fixture header/type conflict repaired; retry pending, no usable driver from failed run 39722716450",
+    "native_status": "passed on b61fdf3; previous failed fixture build did not produce a usable kernel",
     "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
-    "hardware_executed": false
+    "hardware_executed": false,
+    "native_evidence": {
+      "source": "b61fdf3aa932267206d482e0a3a2efa8d46644c8",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39723485354",
+      "artifact_id": 12402581894,
+      "sha256": "7ac4d8e1a5dd09943e4f817d8e998090cd2d0710d2774593b223940a02fe90f3",
+      "result": "Actual local_clock/native uptime plus actual i915 GNU wait success, migration, timeout and caller-owned atomic scope passed on macOS; tasklet/native-lock TSan and all 1250 kernel units/KC preflight passed",
+      "hardware_executed": false
+    }
   },
   "pcode_retry": {
     "status": "implemented, native tests pending",
     "policy": "Mailbox mutex remains held; retry predicate and 50ms budget unchanged. Only short per-iteration clock snapshots enter native CPU critical sections. No forced acknowledgment or success fallback.",
-    "coverage": "Actual request retry/timeout/status precedence and actual wait/clock bodies, modeled mailbox transaction; native clang required for GNU wait expressions"
+    "coverage": "Actual request retry/timeout/status precedence and actual wait/clock bodies, modeled mailbox transaction; native clang required for GNU wait expressions",
+    "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39724583464"
   }
 }
