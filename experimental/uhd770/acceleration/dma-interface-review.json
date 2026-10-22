@@ -28,9 +28,38 @@
     }
   },
   "next": [
-    "Review scalar DMA/page-table allocation and the GPU PTE consumer",
-    "Review native managed-page WB/WC aliases and actual cache visibility",
-    "Validate actual target DMA/IRQ/readback/cleanup only after the full source review"
+    "Native verification of the expanded DMA/PTE source fixture",
+    "GEM internal page allocation/map_pt_dma and parent PDE/root programming",
+    "TLB invalidation and real GPU request/IRQ/fence/visibility/cleanup interfaces",
+    "Actual target evidence after the complete source review; no hardware request for this isolated pass"
   ],
-  "new_hardware_test_requested": false
+  "new_hardware_test_requested": false,
+  "pte_consumer": {
+    "status": "joined DMA-to-PTE source fixture host-passed; native macOS/ASan/UBSan pending",
+    "actual_source": "gen12_pte_encode, gen8_ppgtt_insert_pte and gen8_ppgtt_insert_huge, with pinned masks/index macros; fed by actual Linux/BSD/native DMA mapping output",
+    "cases": "2 mapping modes x 4 ADL PAT indexes x 8 placement/page-size cases, plus 3 encoder-flag cases; all previously verified DMA failure/rollback groups retained",
+    "covered": [
+      "identity and translated IOVA addresses above 4GiB preserved into PTEs",
+      "fragmented S/G entries and crossing the 512-PTE/512-PDE boundaries",
+      "4K, aligned 2M, mixed 2M+4K, 2M alignment fallback, full-table 64K hint and partial 64K fallback",
+      "every emitted 4K address compared to mapped DMA output; untouched PTE guard words preserved",
+      "every modified modeled page-table/directory page has an actual driver flush call observed"
+    ],
+    "negative_controls": [
+      {
+        "mutation": "dma-pte-bad-address",
+        "exit": 1,
+        "detected": "FAIL DMA contract: actual Gen12 PTE insertion changed a mapped DMA address/PAT/page index"
+      },
+      {
+        "mutation": "dma-pte-missing-flush",
+        "exit": 1,
+        "detected": "FAIL DMA contract: actual Gen12 PTE insertion changed a mapped DMA address/PAT/page index"
+      }
+    ],
+    "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nPASS actual DMA -> Gen12 PTE insertion across 4K/table/directory boundaries and 64K/2M/fallback branches\nActual Linux/BSD/native DMA and PTE consumer contracts passed; IOKit/allocator/S-G/hierarchy/cache-flush primitives modeled; no GPU executed.\n",
+    "limits": "Flat S/G linkage, page-table hierarchy/allocation and cache flush services are models. Native GPU VA allocation, root PDE programming, TLB invalidation, actual CPU/GPU cache coherence and device execution are not proved. Encoder RO/LM flags are interface tests, not advertised ADL hardware features.",
+    "hardware_executed": false
+  },
+  "source_trace_update": "i915 page-table backing alloc_pt_dma -> i915_gem_object_create_internal -> i915_gem_object_get_pages_internal -> i915_gem_gtt_prepare_pages uses the same S/G DMA path, rather than necessarily the separate scalar pctrie mapping path. Root allocation/map_pt_dma and actual GPU page-table visibility remain review requirements."
 }

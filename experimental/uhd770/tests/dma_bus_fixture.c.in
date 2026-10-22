@@ -11,6 +11,9 @@
 #include "nmx_checked_ranges.h"
 #ifdef _MSC_VER
 #pragma warning(disable: 4100 4505)
+/* Driver page index narrows only masked 9-bit values; Windows additionally
+ * diagnoses the unexecuted selftest-only huge-page branch's u16 conversion. */
+#pragma warning(disable: 4244 4245 4018 4389)
 #define __ATOMIC_SEQ_CST 0
 void fixture_native_fence(void);
 #define __atomic_thread_fence(v) fixture_native_fence()
@@ -53,7 +56,7 @@ void fixture_mutex_lock(struct mtx *);
 void fixture_mutex_unlock(struct mtx *);
 struct pctrie { int unused; };
 struct device { void *dma_priv; };
-struct scatterlist { uint64_t phys;unsigned length;uint64_t dma_address;unsigned dma_length;bus_dmamap_t dma_map; };
+struct scatterlist { uint64_t phys;unsigned length;uint64_t dma_address;unsigned dma_length;bus_dmamap_t dma_map;struct scatterlist *next; };
 #define sg_phys(sg) ((sg)->phys)
 #define sg_dma_address(sg) ((sg)->dma_address)
 #define for_each_sg(sgl,sg,n,i) for((i)=0,(sg)=(sgl);(i)<(n);++(i),++(sg))
@@ -72,6 +75,68 @@ void bus_dmamap_sync(bus_dma_tag_t,bus_dmamap_t,bus_dmasync_op_t);
 /* ACTUAL_LINUX_BSD_DMA */
 #undef malloc
 #undef free
+
+/* Actual PTE consumer receives the output of the actual DMA mapping above.
+ * Hierarchy allocation and cache flushing are host model services; directory
+ * indexes, S/G iteration, PAT flags and insertion branches remain driver code. */
+typedef uint64_t u64,dma_addr_t,gen8_pte_t;
+typedef uint32_t u32;
+typedef uint16_t u16;
+#define PAGE_SIZE 4096U
+#define SZ_4K 4096U
+#define I915_GTT_PAGE_SIZE 4096U
+#define I915_GTT_PAGE_SIZE_64K 65536U
+#define I915_GTT_PAGE_SIZE_2M 2097152U
+#define BIT(n) (1U<<(n))
+#define BIT_ULL(n) (1ULL<<(n))
+#define GEM_BUG_ON(v) assert(!(v))
+#define I915_SELFTEST_ONLY(v) (0)
+#define IS_ALIGNED(v,a) (((v)&((a)-1))==0)
+#define unlikely(v) (v)
+#ifndef __always_inline
+#define __always_inline inline
+#endif
+static unsigned ilog2(unsigned value) { unsigned n=0;while(value>1) {value>>=1;++n;}return n; }
+#define sg_dma_len(sg) ((sg)->dma_length)
+static struct scatterlist *__sg_next(struct scatterlist *sg) { return sg->next; }
+/* ACTUAL_PTE_ENCODER */
+struct i915_page_table { gen8_pte_t words[512];bool checked[512]; };
+struct i915_page_directory { gen8_pte_t words[512];void *entry[512]; };
+struct i915_address_space {
+    u64 (*pte_encode)(dma_addr_t,unsigned,u32);
+    struct i915_page_directory *root;
+    bool scratch64;
+    struct { u64 encode; } *scratch[1];
+};
+struct i915_ppgtt { struct i915_address_space vm; };
+struct sgt_dma { struct scatterlist *sg;dma_addr_t dma,max; };
+struct i915_vma_resource {
+    u64 start,node_size;
+    struct { struct { unsigned sg; } page_sizes; } bi;
+    unsigned page_sizes_gtt;
+};
+static struct i915_page_directory *i915_pd_entry(struct i915_page_directory *p,unsigned n) { assert(p && p->entry[n]);return p->entry[n]; }
+static struct i915_page_table *i915_pt_entry(struct i915_page_directory *p,unsigned n) { assert(p && p->entry[n]);return p->entry[n]; }
+#define px_vaddr(p) ((p)->words)
+static struct i915_page_directory *gen8_pdp_for_page_address(struct i915_address_space *vm,u64 start)
+{
+    assert(start<(1ULL<<39));return vm->root;
+}
+static bool i915_vm_is_4lvl(struct i915_address_space *vm) { (void)vm;return true; }
+static bool i915_vm_has_scratch_64K(struct i915_address_space *vm) { return vm->scratch64; }
+static unsigned page_flushes;
+static void *flushed_pages[64];
+static void drm_clflush_virt_range(void *p,size_t n)
+{
+    assert(p && n==PAGE_SIZE && page_flushes<64);flushed_pages[page_flushes++]=p;
+}
+static bool fixture_was_flushed(void *p)
+{
+    for(unsigned i=0;i<page_flushes;++i)if(flushed_pages[i]==p)return true;
+    return false;
+}
+static void memset64(u64 *p,u64 v,unsigned count) { while(count--)*p++=v; }
+/* ACTUAL_PPGTT_INSERT */
 
 struct fixture_context {
     struct device dev;
@@ -95,7 +160,10 @@ int fixture_dma_map_sg(void *ptr,const uint64_t *addresses,const unsigned *lengt
 {
     struct fixture_context *c=ptr;assert(count>0 && count<=32 && !c->active);
     memset(c->entries,0,sizeof(c->entries));
-    for(int i=0;i<count;++i) { c->entries[i].phys=addresses[i];c->entries[i].length=lengths[i]; }
+    for(int i=0;i<count;++i) {
+        c->entries[i].phys=addresses[i];c->entries[i].length=lengths[i];
+        c->entries[i].next=i+1<count?&c->entries[i+1]:NULL;
+    }
     int result=linux_dma_map_sg_attrs(&c->dev,c->entries,count,DMA_BIDIRECTIONAL,0);
     c->active=result>0;
     if(result) for(int i=0;i<count;++i) { out[i]=c->entries[i].dma_address;assert(c->entries[i].dma_length==lengths[i]); }
@@ -118,3 +186,71 @@ void fixture_dma_destroy(void *ptr)
 }
 void fixture_dma_fail_alloc(unsigned nth) { allocations=0;fail_allocation=nth; }
 unsigned fixture_dma_live_allocations(void) { return live_allocations; }
+
+static struct i915_page_directory *fixture_pd(struct i915_address_space *vm,u64 page)
+{
+    unsigned top=gen8_pd_index(page,2);
+    if(!vm->root->entry[top])vm->root->entry[top]=calloc(1,sizeof(struct i915_page_directory));
+    assert(vm->root->entry[top]);return vm->root->entry[top];
+}
+static struct i915_page_table *fixture_pt(struct i915_address_space *vm,u64 page)
+{
+    struct i915_page_directory *pd=fixture_pd(vm,page);unsigned n=gen8_pd_index(page,1);
+    if(!pd->entry[n]) {
+        struct i915_page_table *pt=calloc(1,sizeof(*pt));assert(pt);
+        for(unsigned i=0;i<512;++i)pt->words[i]=0xdead0000dead0000ULL;
+        pd->entry[n]=pt;
+    }
+    assert(pd->entry[n]);return pd->entry[n];
+}
+int fixture_dma_verify_pte(void *ptr,uint64_t start_page,unsigned pat,unsigned flags,unsigned sizes,unsigned *actual_sizes)
+{
+    struct fixture_context *c=ptr;assert(c->active);
+    struct i915_ppgtt ppgtt={0};ppgtt.vm.pte_encode=gen12_pte_encode;
+    ppgtt.vm.root=calloc(1,sizeof(struct i915_page_directory));assert(ppgtt.vm.root);
+    u64 pages=0;for(struct scatterlist *sg=c->entries;sg;sg=sg->next) { assert(!(sg->dma_length&(PAGE_SIZE-1)));pages+=sg->dma_length/PAGE_SIZE; }
+    assert(pages && start_page+pages<(1ULL<<27));
+    for(u64 i=0;i<pages;++i)(void)fixture_pt(&ppgtt.vm,start_page+i);
+    struct sgt_dma iter={c->entries,c->entries[0].dma_address,c->entries[0].dma_address+c->entries[0].dma_length};
+    page_flushes=0;unsigned page_sizes=I915_GTT_PAGE_SIZE;
+    if(sizes==I915_GTT_PAGE_SIZE) {
+        u64 next=gen8_ppgtt_insert_pte(&ppgtt,ppgtt.vm.root,&iter,start_page,pat,flags);
+        assert(!next && !iter.sg);
+    } else {
+        struct i915_vma_resource res={0};res.start=start_page*PAGE_SIZE;res.node_size=pages*PAGE_SIZE;res.bi.page_sizes.sg=sizes;
+        gen8_ppgtt_insert_huge(&ppgtt.vm,&res,&iter,pat,flags);assert(!iter.sg);page_sizes=res.page_sizes_gtt;
+    }
+    *actual_sizes=page_sizes;int mismatches=0;
+    /* Expected address stream is the device-visible DMA output, not the
+     * original physical input. Check every mapped 4K address even for 2M PDEs. */
+    u64 page=start_page;const u64 low_flags=3ULL|((pat&1)?8ULL:0)|((pat&2)?16ULL:0)|((pat&4)?128ULL:0)|((pat&8)?(1ULL<<62):0);
+    const u64 expected_flags=(flags&PTE_READ_ONLY)?low_flags&~2ULL:low_flags;
+    for(struct scatterlist *sg=c->entries;sg;sg=sg->next)for(unsigned off=0;off<sg->dma_length;off+=PAGE_SIZE,++page) {
+        struct i915_page_directory *pd=fixture_pd(&ppgtt.vm,page);
+        u64 pde=pd->words[gen8_pd_index(page,1)];u64 got,want=(sg->dma_address+off)|expected_flags;
+        if(flags&PTE_LM)want|=1ULL<<11;
+        if((sizes&I915_GTT_PAGE_SIZE_2M) && (pde&GEN8_PDE_PS_2M)) {
+            got=(pde&~((u64)GEN8_PDE_PS_2M))+(page&511)*PAGE_SIZE;
+        } else {
+            struct i915_page_table *pt=fixture_pt(&ppgtt.vm,page);
+            pt->checked[gen8_pd_index(page,0)]=true;got=pt->words[gen8_pd_index(page,0)];
+        }
+        if(got!=want)++mismatches;
+    }
+    if(!page_flushes)++mismatches;
+    for(unsigned top=0;top<512;++top)if(ppgtt.vm.root->entry[top]) {
+        struct i915_page_directory *pd=ppgtt.vm.root->entry[top];
+        for(unsigned i=0;i<512;++i)if(pd->entry[i]) {
+            struct i915_page_table *pt=pd->entry[i];bool modified=false;
+            for(unsigned j=0;j<512;++j) {
+                modified=modified || pt->checked[j];
+                if(!pt->checked[j] && pt->words[j]!=0xdead0000dead0000ULL)++mismatches;
+            }
+            if(modified && !fixture_was_flushed(pt->words))++mismatches;
+            if(pd->words[i] && !fixture_was_flushed(pd->words))++mismatches;
+            free(pt);
+        }
+        free(pd);
+    }
+    free(ppgtt.vm.root);return mismatches;
+}

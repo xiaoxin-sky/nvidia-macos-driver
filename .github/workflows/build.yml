@@ -214,9 +214,9 @@ jobs:
           python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-kernel-clock-test"], timeout=60, check=True)' \
             2>&1 | tee /tmp/nmx-kernel-clock-test.log
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_dma_fixture.py" \
-            --port "$X" --templates "$GITHUB_WORKSPACE/experimental/uhd770/tests" \
+            --port "$X" --drm "$S/kpi/drm-kmod" --templates "$GITHUB_WORKSPACE/experimental/uhd770/tests" \
             --output /tmp/nmx-dma-fixture
-          cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function \
+          cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function -Wno-sign-compare \
             -c /tmp/nmx-dma-fixture/dma-bus-test.c -o /tmp/nmx-dma-bus-test.o \
             2>&1 | tee /tmp/nmx-dma-c-compile.log
           c++ -std=c++17 -pthread -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function \
@@ -225,7 +225,7 @@ jobs:
           python3 -c 'import subprocess; subprocess.run(["/tmp/nmx-dma-test"], timeout=60, check=True)' \
             2>&1 | tee /tmp/nmx-dma-test.log
           cc -std=c11 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
-            -Wno-unused-parameter -Wno-unused-function -c /tmp/nmx-dma-fixture/dma-bus-test.c \
+            -Wno-unused-parameter -Wno-unused-function -Wno-sign-compare -c /tmp/nmx-dma-fixture/dma-bus-test.c \
             -o /tmp/nmx-dma-asan-bus.o 2>&1 | tee /tmp/nmx-dma-asan-c-compile.log
           c++ -std=c++17 -pthread -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
             -Wno-unused-parameter -Wno-unused-function /tmp/nmx-dma-fixture/dma-native-test.cpp \

@@ -89,6 +89,7 @@ void fixture_dma_destroy(void *);
 bool fixture_dma_identity(void *,uint64_t,uint64_t);
 void fixture_dma_fail_alloc(unsigned);
 unsigned fixture_dma_live_allocations(void);
+int fixture_dma_verify_pte(void *,uint64_t,unsigned,unsigned,unsigned,unsigned *);
 struct mtx { void *native; };
 void fixture_mutex_init(mtx *m) { m->native=new std::mutex; }
 void fixture_mutex_destroy(mtx *m) { delete static_cast<std::mutex *>(m->native); }
@@ -166,6 +167,39 @@ static void direct_native_bounds()
             "native range wrap/output initialization not enforced");
     require(nmx_xnu_dma_map(nullptr,0x1000,0,mask39,&out,&h)==EINVAL,"zero native DMA length accepted");clean();
 }
+static void pte_consumer()
+{
+    struct PteCase { uint64_t start;uint64_t a,b;unsigned alen,blen,sizes,wanted; };
+    constexpr unsigned k4=4096,k64=65536,m2=2097152;
+    const PteCase cases[]={
+        {0,0x100000000ULL,0x140000000ULL,k4,3*k4,k4,k4},
+        {511,0x100000000ULL,0x140000000ULL,k4,3*k4,k4,k4},
+        {262143,0x100000000ULL,0x140000000ULL,k4,3*k4,k4,k4},
+        {0,0x100000000ULL,0x180000000ULL,m2,0,k4|m2,m2},
+        {512,0x100000000ULL,0x180000000ULL,m2,3*k4,k4|m2,k4|m2},
+        {1,0x100000000ULL,0x180000000ULL,m2,0,k4|m2,k4},
+        {0,0x100000000ULL,0x180000000ULL,m2,0,k4|k64,k64},
+        {0,0x100000000ULL,0x180000000ULL,k64,0,k4|k64,k4}
+    };
+    for(bool mapped:{false,true})for(unsigned pat:{0U,1U,2U,3U})for(const auto &test:cases) {
+        reset(mapped);void *c=fixture_dma_context(mask39);
+        uint64_t pa[]={test.a,test.b},out[2]{};unsigned len[]={test.alen,test.blen};int n=test.blen?2:1;
+        require(fixture_dma_map_sg(c,pa,len,n,out)==n,"DMA setup for actual PTE consumer failed");
+        unsigned actual=0;
+        require(fixture_dma_verify_pte(c,test.start,pat,0,test.sizes,&actual)==0,
+                "actual Gen12 PTE insertion changed a mapped DMA address/PAT/page index");
+        require(actual==test.wanted,"actual 4K/64K/2M insertion selected unexpected page-size branch");
+        fixture_dma_destroy(c);clean();
+    }
+    // Encoder flags are tested as an interface contract, not advertised as an
+    // ADL read-only/local-memory feature: that hardware path uses ordinary RW SMEM.
+    for(unsigned flags:{1U,2U,3U}) {
+        reset(true);void *c=fixture_dma_context(mask39);uint64_t pa[]={0x100000000ULL},out[1]{};unsigned len[]={k4};
+        require(fixture_dma_map_sg(c,pa,len,1,out)==1,"DMA flag test setup failed");unsigned actual=0;
+        require(fixture_dma_verify_pte(c,511,3,flags,k4,&actual)==0,"Gen12 PTE encoder flags changed DMA bits");
+        fixture_dma_destroy(c);clean();
+    }
+}
 int main()
 {
     try {
@@ -175,6 +209,7 @@ int main()
         address_limits();std::puts("PASS physical/translated 39-bit DMA masks and identity fast-path limits");
         map_growth_and_allocation_failure();std::puts("PASS actual mapping-array growth and allocation rollback");
         direct_native_bounds();std::puts("PASS native overflow/zero-size and initialized failure outputs");
-        std::puts("Actual Linux/BSD/native DMA contracts passed; IOKit/allocator/flat S/G primitives modeled; no GPU executed.");return 0;
+        pte_consumer();std::puts("PASS actual DMA -> Gen12 PTE insertion across 4K/table/directory boundaries and 64K/2M/fallback branches");
+        std::puts("Actual Linux/BSD/native DMA and PTE consumer contracts passed; IOKit/allocator/S-G/hierarchy/cache-flush primitives modeled; no GPU executed.");return 0;
     } catch(const std::exception &e) { std::printf("FAIL DMA contract: %s\n",e.what());return 1; }
 }

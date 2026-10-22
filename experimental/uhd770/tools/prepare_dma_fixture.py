@@ -8,6 +8,7 @@ real hardware evidence; these tests never submit GPU work.
 import argparse
 from pathlib import Path
 import re
+from prepare_native_lock_fixture import macro
 
 
 def definition(text, name, structure=False):
@@ -15,19 +16,21 @@ def definition(text, name, structure=False):
     if structure:
         pattern = rf'^struct {name} \{{\n.*?^\}};'
     else:
-        pattern = rf'^(?:extern "C"\s+)?(?:static\s+)?(?:void\s*\*|void|int|bool|bus_dma_tag_t)\s*{name}\([^;{{}}]*\)\n\{{\n.*?^\}}'
+        pattern = rf'^(?:extern "C"\s+)?(?:static\s+)?(?:(?:__always_inline|inline)\s+)?(?:void\s*\*|void|int|bool|bus_dma_tag_t|u64|u32)\s*{name}\([^;{{}}]*\)\n\{{\n.*?^\}}'
     found = re.findall(pattern, text, re.M | re.S)
     if len(found) != 1:
         raise ValueError(f'DMA fixture source drift: {name}: {len(found)}')
     return found[0]
 
 
-def prepare(port, templates, output):
+def prepare(port, templates, output, drm):
     """Compile the actual upper mapping/rollback path with the native adapter.
 
     C and C++ stay separate, preserving real C allocation conversions and the
     shared native C ABI. The harness supplies device/page addresses; it does
-    not execute GEM page allocation, GPU page tables or an actual IOMapper.
+    not execute GEM page allocation or an actual IOMapper. Gen12 PTE encoding
+    and Gen8/12 4K/64K/2M insertion consume the actual mapped S/G addresses on a
+    modeled page-table hierarchy; cache flush is an observable model boundary.
     """
     output.mkdir(exist_ok=True, parents=True)
     bus = (port / 'bsdcompat/src/nmx_busdma.c').read_text(encoding='utf-8')
@@ -48,7 +51,24 @@ def prepare(port, templates, output):
     marker = '/* ACTUAL_LINUX_BSD_DMA */'
     if value.count(marker) != 1:
         raise ValueError('DMA C fixture marker count')
-    (output / 'dma-bus-test.c').write_text(value.replace(marker, '\n\n'.join(pieces)),
+    value = value.replace(marker, '\n\n'.join(pieces))
+    ppgtt = (drm / 'drivers/gpu/drm/i915/gt/gen8_ppgtt.c').read_text(encoding='utf-8')
+    gtt = (drm / 'drivers/gpu/drm/i915/gt/intel_gtt.h').read_text(encoding='utf-8')
+    pte = [macro(gtt, n) for n in ['I915_PDES', 'I915_PDE_MASK', 'GEN8_PAGE_PRESENT',
+           'GEN8_PAGE_RW', 'GEN12_PPGTT_PTE_LM', 'GEN12_PPGTT_PTE_PAT0', 'GEN12_PPGTT_PTE_PAT1',
+           'GEN12_PPGTT_PTE_PAT2', 'MTL_PPGTT_PTE_PAT3', 'PTE_READ_ONLY', 'PTE_LM',
+           'GEN8_PDE_IPS_64K', 'GEN8_PDE_PS_2M']]
+    pte += [macro(ppgtt, n) for n in ['GEN8_PAGE_SIZE', 'GEN8_PTE_SHIFT', 'GEN8_PDES',
+            'gen8_pd_shift', 'gen8_pd_index', '__gen8_pte_shift', '__gen8_pte_index']]
+    pte += [definition(gtt, 'i915_pde_index'), definition(ppgtt, 'gen12_pte_encode')]
+    values = {'/* ACTUAL_PTE_ENCODER */': '\n\n'.join(pte),
+              '/* ACTUAL_PPGTT_INSERT */': '\n\n'.join(definition(ppgtt, n) for n in
+                  ['gen8_ppgtt_insert_pte', 'gen8_ppgtt_insert_huge'])}
+    for marker, code in values.items():
+        if value.count(marker) != 1:
+            raise ValueError(f'DMA/PTE fixture marker: {marker}')
+        value = value.replace(marker, code)
+    (output / 'dma-bus-test.c').write_text(value,
                                           encoding='utf-8', newline='\n')
     pieces = [definition(native, 'nmx_dma_map', True)]
     pieces += [definition(native, name) for name in
@@ -64,7 +84,7 @@ def prepare(port, templates, output):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
-    for key in ['port', 'templates', 'output']:
+    for key in ['port', 'templates', 'output', 'drm']:
         p.add_argument('--' + key, type=Path, required=True)
     a = p.parse_args()
-    prepare(a.port, a.templates, a.output)
+    prepare(a.port, a.templates, a.output, a.drm)
