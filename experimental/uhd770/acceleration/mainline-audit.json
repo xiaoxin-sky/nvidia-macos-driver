@@ -61,7 +61,7 @@
     {
       "id": "completion",
       "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
-      "status": "TASKLET STATE REPAIR PASSED NATIVE MACOS/TSAN/KERNEL CHECKS; threaded BH/native mutex/CSB repair host-passed, native pending",
+      "status": "THREADED BH/NATIVE MUTEX/CSB REPAIR PASSED NATIVE MACOS/TSAN/KERNEL CHECKS; monotonic clock fixture repair pending",
       "remaining": "Verify current repair on native macOS; review remaining explicit preempt scopes, long PCODE polling, seqcount/IRQ-work and allocation paths; real GPU IRQ/breadcrumb/fence execution remains unverified",
       "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
       "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018",
@@ -87,9 +87,17 @@
         "implementation": "Per-thread threaded BH nesting replaces sched_pin/IRQ masking; real critical/FPU sections preserved; CSB fallback leaves short CPU critical poll before native uncore lock; native mutex owner probes atomic; CPU atomic-context query samples without migration and includes IRQ-off spin mutexes",
         "host_cases_passed": 7,
         "validation": "Actual native locking/BH/critical bodies plus actual CSB function and uncore read macros; real host mutex contention and parallel writers; native services, registry and MMIO modeled",
-        "native_status": "pending",
+        "native_status": "passed",
         "hardware_executed": false,
-        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39721909038"
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39721909038",
+        "native_evidence": {
+          "source": "16f571a1a7349a29361ceb581fbcf58932cbfd93",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39721909038",
+          "artifact_id": 12401299994,
+          "sha256": "7c22e28eacd1f5b4328cc83966487bf29f4d82a2de578c46174882c12e22b9dc",
+          "result": "7 actual native lock/BH/critical/CSB cases and 12 tasklet/i915 cases passed normally and under ThreadSanitizer; all 1250 kernel units and native KC preflight passed",
+          "hardware_executed": false
+        }
       },
       "kernel_clock_repair": {
         "repair": "Pinned FreeBSD LinuxKPI local_clock now calls nanouptime -> actual nmx_time uptime_ns -> mach_absolute_time, preserving monotonic GPU polling deadlines across calendar changes",
@@ -97,7 +105,7 @@
         "patch_sha256": "74bfab1205cd77248b0b136b44bbb74c5a01db26baf2f5ce7ff991d2df106984",
         "baseline": "kernel-clock-old.cpp\nFAIL kernel clock: local_clock still reads calendar time\n",
         "host_result": "kernel-clock-test.cpp\nPASS actual clock/uptime adapter with forward/backward calendar jumps\nGNU i915 wait expressions require native clang; not executed by Windows fixture.\nKernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.\n",
-        "native_status": "pending; native clang additionally executes actual i915 GNU wait macro, migration/success/timeout branches",
+        "native_status": "previous native fixture compilation failed: user clock_types header does not expose kernel clock_sec_t/nsec types and defines NSEC_PER_SEC as a macro. Fixture now models kernel primitive argument types and respects the SDK macro; retry pending.",
         "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
         "hardware_executed": false
       }
@@ -190,6 +198,14 @@
       "host_result": "kernel-clock-test.cpp\nPASS actual clock/uptime adapter with forward/backward calendar jumps\nGNU i915 wait expressions require native clang; not executed by Windows fixture.\nKernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.\n",
       "native_status": "pending; native clang additionally executes actual i915 GNU wait macro, migration/success/timeout branches",
       "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
+      "hardware_executed": false
+    },
+    "native_lock_evidence": {
+      "source": "16f571a1a7349a29361ceb581fbcf58932cbfd93",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39721909038",
+      "artifact_id": 12401299994,
+      "sha256": "7c22e28eacd1f5b4328cc83966487bf29f4d82a2de578c46174882c12e22b9dc",
+      "result": "7 actual native lock/BH/critical/CSB cases and 12 tasklet/i915 cases passed normally and under ThreadSanitizer; all 1250 kernel units and native KC preflight passed",
       "hardware_executed": false
     }
   }

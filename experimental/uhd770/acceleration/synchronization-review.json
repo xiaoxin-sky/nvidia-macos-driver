@@ -111,7 +111,7 @@
     }
   },
   "threaded_BH_and_native_locks": {
-    "status": "implemented and host-passed; native macOS pending",
+    "status": "native macOS/TSAN/kernel/KC passed for 16f571a",
     "policy": "PCI actions and tasklet callbacks run on kernel threads; native shared-state mutexes and tasklet RUN ownership provide serialization. Per-thread nesting survives blocking/migration. Real hard-ISR LinuxKPI BH entry is rejected; CPU-local/FPU critical exclusion remains unchanged.",
     "repairs": [
       "BH scopes no longer mask interrupts across nested native MTX_DEF/worker/taskqueue locks",
@@ -121,7 +121,15 @@
       "Thread-record final destruction asserts that BH scopes are balanced"
     ],
     "host_evidence": "native-lock-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nActual native mutex/BH/critical/CSB contracts passed; native primitives/MMIO modeled; no GPU executed.\n",
-    "limits": "Native lock/thread registry/timer/MMIO services are modeled; no real GPU or target panic reproduction. The native thread registry has its separate actual-source fixture."
+    "limits": "Native lock/thread registry/timer/MMIO services are modeled; no real GPU or target panic reproduction. The native thread registry has its separate actual-source fixture.",
+    "native_evidence": {
+      "source": "16f571a1a7349a29361ceb581fbcf58932cbfd93",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39721909038",
+      "artifact_id": 12401299994,
+      "sha256": "7c22e28eacd1f5b4328cc83966487bf29f4d82a2de578c46174882c12e22b9dc",
+      "result": "7 actual native lock/BH/critical/CSB cases and 12 tasklet/i915 cases passed normally and under ThreadSanitizer; all 1250 kernel units and native KC preflight passed",
+      "hardware_executed": false
+    }
   },
   "kernel_clock": {
     "repair": "Pinned FreeBSD LinuxKPI local_clock now calls nanouptime -> actual nmx_time uptime_ns -> mach_absolute_time, preserving monotonic GPU polling deadlines across calendar changes",
@@ -129,7 +137,7 @@
     "patch_sha256": "74bfab1205cd77248b0b136b44bbb74c5a01db26baf2f5ce7ff991d2df106984",
     "baseline": "kernel-clock-old.cpp\nFAIL kernel clock: local_clock still reads calendar time\n",
     "host_result": "kernel-clock-test.cpp\nPASS actual clock/uptime adapter with forward/backward calendar jumps\nGNU i915 wait expressions require native clang; not executed by Windows fixture.\nKernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.\n",
-    "native_status": "pending; native clang additionally executes actual i915 GNU wait macro, migration/success/timeout branches",
+    "native_status": "native fixture header/type conflict repaired; retry pending, no usable driver from failed run 39722716450",
     "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
     "hardware_executed": false
   }

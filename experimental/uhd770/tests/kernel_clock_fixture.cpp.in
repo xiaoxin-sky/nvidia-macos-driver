@@ -12,13 +12,17 @@
 #pragma warning(disable: 4100 4505)
 #endif
 using u64=uint64_t;
+/* kern/clock.h service types are kernel-only; mach/clock_types.h is a
+ * different user API. Model the LP64 kernel primitive arguments here. */
 #ifdef __APPLE__
-#include <mach/clock_types.h>
+using clock_sec_t=unsigned long;
 #else
 using clock_sec_t=uint64_t;
-using clock_nsec_t=uint32_t;
 #endif
+using clock_nsec_t=uint32_t;
+#ifndef NSEC_PER_SEC
 constexpr uint64_t NSEC_PER_SEC=1000000000ULL;
+#endif
 static uint64_t uptime=0,step=0,calendar=0;
 static unsigned calendar_reads=0;
 static volatile time_t time_second;
