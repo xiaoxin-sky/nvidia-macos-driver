@@ -1,0 +1,84 @@
+{
+  "date": "2026-10-22",
+  "scope": "Transitive tasklet, bottom-half, preemption and native locking contract; no target hardware success claimed",
+  "source_pins": {
+    "port": "7222618727449426631d13d0654f8347634717e9",
+    "drm": "c16de0f9fa84f70b9551f69fde837a7f3a73c0e9",
+    "freebsd": "7668705cb9837d4c3a6db9b3434b3a522220c8ea",
+    "patch_validation": {
+      "xkpi": {
+        "patched_files": 43,
+        "sha256": "d4d7b644fb69818c71205306d5f5ebee4f8501d0854f805cf32d49f5dc03988a",
+        "pristine_apply": "passed",
+        "staged_match": "all patched source text identical after CRLF/LF normalization"
+      },
+      "drm-kmod": {
+        "patched_files": 11,
+        "sha256": "7acf4dd594fac22bf75ba29ef499aa32f03ec938913a9614ed653160ee0a2e5e",
+        "pristine_apply": "passed",
+        "staged_match": "all patched source text identical after CRLF/LF normalization"
+      }
+    }
+  },
+  "tasklet": {
+    "implementation_commit": "f58bce1dd24799f8305c50bf0fbad9a8fb852ad9",
+    "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39719817740",
+    "native_state": "in progress at last verified observation; not yet passed",
+    "baseline_evidence": "tasklet-old.cpp\nFAIL inline-reschedule: inline submission callback lost reschedule\nFAIL disabled-schedule: schedule while disabled was lost\nFAIL queued-inline-flush: inline flush lost existing queue reservation\nFAIL queued-disable: wait includes queued/parked tasklet instead of only running callback\nFAIL i915-state: i915 does not see inline tasklet lock\nFAIL callback-disables: callback reschedule lost across disable\nPASS parallel-producers\nPASS normal-worker\nFAIL reinitialization: tasklet_setup did not clear previous state\nActual tasklet/i915 contracts: 7 failed; host primitives modeled; no GPU executed.\n",
+    "host_evidence": "PASS inline-reschedule\nPASS disabled-schedule\nPASS queued-inline-flush\nPASS queued-disable\nPASS i915-state\nPASS callback-disables\nPASS parallel-producers\nPASS normal-worker\nPASS reinitialization\nPASS queued-inline-handoff\nPASS disable-publication-race\nPASS live-workers\nActual tasklet/i915 contracts: 0 failed; host primitives modeled; no GPU executed.\n",
+    "lifetime_invariants": [
+      "BUSY reserves exactly one queue insertion; queue insertion accesses only the immortal worker after publication",
+      "EXEC/LOOP own the callback; INLINE_QUEUED owns both inline RUN and a separate queued invocation",
+      "A queued worker meeting INLINE_QUEUED transfers pending work to inline unlock without executing concurrently",
+      "PARKED preserves disabled pending work; shared short state lock serializes parking, enable and running-state observation",
+      "No worker dereferences a tasklet after releasing its final running or parked ownership",
+      "State spin lock never surrounds callbacks, sleepable queue mutexes or taskqueue_enqueue",
+      "Caller must quiesce producers before tasklet_kill/free; disabled pending work must be enabled to drain, as required by Linux tasklet semantics"
+    ],
+    "limits": "Kernel mutexes, atomics, intrusive queues and worker dispatch are host models; actual NMX taskqueue has its separate fixture. GPU IRQ, real scheduling/preemption and target cleanup remain unverified."
+  },
+  "unresolved_lower_contract": {
+    "severity": "blocks another hardware request",
+    "witnesses": [
+      {
+        "route": "linux spin_lock -> mtx_lock(MTX_DEF) -> local_bh_disable -> sched_pin -> nmx_critical_enter; nested spin_lock -> native lck_mtx_lock",
+        "finding": "Second acquisition may block with interrupts already masked; real code keeps critical nesting per CPU, invalid if a sleep/migration occurs."
+      },
+      {
+        "route": "i915_gem_fence_wait_priority -> local_bh_disable -> engine schedule -> scheduler locks",
+        "finding": "BH masking precedes acquisition even without a preceding spin_lock."
+      },
+      {
+        "route": "__intel_engine_flush_submission -> local_bh_disable -> tasklet callback/unlock -> worker queue mutex -> taskqueue_enqueue mutex",
+        "finding": "Tasklet state repair retains real pending work but deliberately does not claim to repair the IRQ-off/sleepable-queue conflict."
+      },
+      {
+        "route": "wa_csb_read -> preempt_disable -> intel_uncore_read64 -> fwtable_read64 -> GEN6_READ_HEADER -> spin_lock_irqsave",
+        "finding": "Explicit Linux preemption masking can reach the same native blocking mutex through register reads; changing BH alone is insufficient."
+      },
+      {
+        "route": "skl_pcode_request -> preempt_disable -> wait_for_atomic(COND, 50)",
+        "finding": "The current adapter can mask interrupts over a hardware polling window up to 50 ms."
+      },
+      {
+        "route": "linux_fpu.c fpu_enter -> critical_enter -> per-CPU xsave area -> fpu_leave",
+        "finding": "The native FPU/CPU-local exclusion is real; disabling critical_enter globally would break its ownership contract."
+      }
+    ],
+    "required_next_review": [
+      "Separate sleepable threaded IRQ/tasklet semantics from true native critical/FPU/CPU-local sections; no global no-op of critical_enter",
+      "Include explicit preempt-disabled i915 register/timing paths, seqcount writers and scheduler tasklet locks",
+      "Exercise actual native mutex entry with nested contention and actual BH/preempt scopes before selecting a policy",
+      "Audit allocation, callout/IRQ-work, queue and wake callbacks reached under those scopes; do not validate just the outer adapter"
+    ],
+    "actual_adapter_witness": {
+      "path": "D:/UHD770-driver-kit/build-audit/compute-contracts-20261022/critical-witness.cpp",
+      "generator": "D:/UHD770-driver-kit/build-audit/compute-contracts-20261022/prepare_critical_witness.py",
+      "result": "critical-witness.cpp\nUNRESOLVED nested spin_lock: native sleepable mutex slow path reached with interrupts disabled\nUNRESOLVED explicit BH scope: native sleepable mutex slow path reached with interrupts disabled\nUNRESOLVED explicit preempt scope: native sleepable mutex slow path reached with interrupts disabled\nControl: the same native mutex slow path is allowed with interrupts enabled.\nDiagnostic only: unresolved adapter conflict reproduced; no Darwin kernel or GPU executed.\n",
+      "meaning": "Real spin/BH/critical/native mutex bodies reach a modeled blocking native acquisition with interrupts off in all three routes. This diagnoses an unresolved software contract; it is not reproduction of the target panic or GPU failure."
+    }
+  },
+  "hardware_executed": false,
+  "usb_changed": false,
+  "new_reboot_requested": false
+}
