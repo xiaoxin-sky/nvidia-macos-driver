@@ -204,7 +204,7 @@
         }
       },
       "ggtt_hwsp_contract": {
-        "status": "source-verified GGTT/HWSP address chain, parent PDE encoding, context root programming, ADL breadcrumb selection, cache-flush primitives and driver-side TLB invalidation; pin lifetime, pin ordering and all hardware effects unverified",
+        "status": "source-verified GGTT/HWSP address chain, parent PDE encoding, context root programming, pin lifetime, ADL breadcrumb selection, cache-flush primitives and driver-side TLB invalidation; all hardware effects unverified",
         "detail": "experimental/uhd770/acceleration/dma-interface-review.json ggtt_hwsp_contract",
         "verified": [
           "ADL-S (graphics 12, IP < 12.55) binds gen12_emit_fini_breadcrumb_rcs: PIPE_CONTROL with L3 flush, depth stall, TLB invalidate, then a global-GTT qword store",
@@ -212,11 +212,10 @@
           "the CPU polls a hardcoded WB mapping; observation depends on the shared LLC (has_llc = 1)",
           "drm_clflush_virt_range compiles the CONFIG_X86 branch and issues real clflushopt with mb() fences; line size is initialised, so the loop cannot be degenerate",
           "driver-side TLB invalidation is upstream code with the Wa_2207587034 adl-s workaround, forcewake held only across the writes, and the 100us/4ms ACK waits taken after both locks are released",
-          "parent PDEs and the context root are built from sg_dma_address and split into CTX_PDP0_UDW/LDW by the 4-level branch; no CPU physical address or 32-bit truncation is on that path"
+          "parent PDEs and the context root are built from sg_dma_address and split into CTX_PDP0_UDW/LDW by the 4-level branch; no CPU physical address or 32-bit truncation is on that path",
+          "ring, context state and HWSP are GGTT-pinned for their users' lifetime with PIN_OFFSET_BIAS, and i915_ggtt_offset asserts the node is allocated and fits in 32 bits"
         ],
         "open": [
-          "GGTT pin lifetime for ring/context/HWSP across eviction",
-          "pin ordering of the top page-directory object relative to context initialisation",
           "hardware TLB ACK inside the 100us/4ms windows (target only)",
           "GPU-side GTT lookup, page-walk and seqno write (target only)"
         ],

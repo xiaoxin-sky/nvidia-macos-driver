@@ -179,15 +179,26 @@
           "drm: intel_engine_cs.c:1232-1243 tlb_inv.mcr is set only for the xehp register layout, so ADL takes the non-MCR path through __intel_wait_for_register_fw"
         ],
         "finding": "The ADL-S workaround is present and the ACK waits are performed after both locks are dropped, so the 4ms sleepable wait is legal (might_sleep_if in intel_uncore.c:2737). The port only supplies the surfaces this path uses: uncached MMIO (verified above), usleep_range (linuxkpi delay.h:82), the audited spinlock, and the delayed-work put for forcewake. Whether the hardware clears the invalidate bit inside those windows is the target-only half."
+      },
+      {
+        "edge": "ring, context state and HWSP stay pinned in the GGTT for as long as the GPU may name them",
+        "anchors": [
+          "drm: gt/intel_ring.c:35-83 intel_ring_pin is reference counted on ring->pin_count; the first pin calls i915_ggtt_pin with PIN_OFFSET_BIAS | i915_ggtt_pin_bias(vma) plus PIN_HIGH (or PIN_MAPPABLE for stolen), then maps the object and makes it unshrinkable",
+          "drm: gt/intel_ring.c:94-109 intel_ring_unpin drops the reference and only on the last one unsets ggtt_write, unmaps, makes the object purgeable and unpins the vma",
+          "drm: gt/intel_timeline.c:38-55 the timeline's active node pins tl->hwsp_ggtt when the timeline becomes active and unpins it in __timeline_retire",
+          "drm: gt/intel_context.c:120 the context state vma is pinned with the same bias flags",
+          "drm: i915_vma.h:173-186 i915_ggtt_offset asserts the vma is a GGTT vma and that its node is allocated, asserts the whole node fits in 32 bits, and returns the low 32 bits of i915_vma_offset"
+        ],
+        "finding": "Every address a command names is the offset of a vma that is pinned for the lifetime of its user, and a pinned vma is not evicted, so the offset cannot change underneath the GPU. The PIN_OFFSET_BIAS keeps these buffers away from GGTT offset zero, which is the documented ring-wrap hang workaround; i915_ggtt_offset asserts the node exists and that truncating to 32 bits loses nothing."
       }
     ],
     "open": [
+      "whether the GPU actually dereferences these pinned offsets is target-only",
       "whether the hardware completes the invalidation within the 100us/4ms windows is target-only",
-      "Parent PDE/root programming and the context root address (ASSIGN_CTX_PML4) still not traced against the actual allocated page-table objects",
-      "GGTT pin lifetime for ring, context state and HWSP: pin/offset validity across eviction is not yet reviewed",
       "Whether the GPU actually performs the GTT lookup and writes the seqno is target-only"
     ],
-    "hardware_executed": false
+    "hardware_executed": false,
+    "parent_pde_and_root_recorded_in": "ppgtt_root_and_pde"
   },
   "ppgtt_root_and_pde": {
     "status": "source-verified parent PDE encoding and context root programming; page-walk, pin ordering and all hardware effects unverified",
