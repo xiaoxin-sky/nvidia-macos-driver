@@ -6611,3 +6611,123 @@
 +	free(ida->free_bitmap, M_IDR);
 +	ida->free_bitmap = NULL;
 +}
+--- a/fork_linux_page.py
++++ b/fork_linux_page.py
+@@ -119,23 +119,29 @@
+ ''')
+ 
+ replace_func("vmmap_add(void *addr, unsigned long size)\n", r'''
+-static void
++static int
+ vmmap_add(void *addr, unsigned long size, void *handle)
+ {
+ 	struct vmmap *vmmap;
+ 
+ 	vmmap = kmalloc(sizeof(*vmmap), GFP_KERNEL);
++	if (vmmap == NULL)
++		return (-ENOMEM);
+ 	mtx_lock(&vmmaplock);
+ 	vmmap->vm_size = size;
+ 	vmmap->vm_addr = addr;
+ 	vmmap->vm_handle = handle;
+ 	LIST_INSERT_HEAD(&vmmaphead[VM_HASH(addr)], vmmap, vm_next);
+ 	mtx_unlock(&vmmaplock);
++
++	return (0);
+ }
+ ''')
+ 
+ # _ioremap_attr: keep LinuxKPI's body, record no IOKit handle (pmap_unmapdev releases by address)
+-replace_once("\tvmmap_add(addr, size);\n\n\treturn (addr);\n}\n#endif\n", "\tvmmap_add(addr, size, NULL);\n\n\treturn (addr);\n}\n#endif\n")
++replace_once("\tvmmap_add(addr, size);\n\n\treturn (addr);\n}\n#endif\n",
++             "\tif (vmmap_add(addr, size, NULL) != 0) {\n\t\tpmap_unmapdev(addr, size);\n"
++             "\t\treturn (NULL);\n\t}\n\n\treturn (addr);\n}\n#endif\n")
+ 
+ replace_func("vmap(struct page **pages, unsigned int count, unsigned long flags, int prot)\n", r'''
+ /*
+@@ -165,7 +171,10 @@
+ 	kfree(phys);
+ 	if (addr == NULL)
+ 		return (NULL);
+-	vmmap_add(addr, (unsigned long)count * PAGE_SIZE, handle);
++	if (vmmap_add(addr, (unsigned long)count * PAGE_SIZE, handle) != 0) {
++		nmx_xnu_unmap(handle);
++		return (NULL);
++	}
+ 	return (addr);
+ }
+ ''')
+@@ -190,7 +199,10 @@
+ 	kfree(phys);
+ 	if (addr == NULL)
+ 		return (NULL);
+-	vmmap_add(addr, (unsigned long)count * PAGE_SIZE, handle);
++	if (vmmap_add(addr, (unsigned long)count * PAGE_SIZE, handle) != 0) {
++		nmx_xnu_unmap(handle);
++		return (NULL);
++	}
+ 	return (addr);
+ }
+ ''')
+--- a/override/src/linux_page.c
++++ b/override/src/linux_page.c
+@@ -267,18 +267,22 @@
+ 	return (vmmap != NULL);
+ }
+ 
+-static void
++static int
+ vmmap_add(void *addr, unsigned long size, void *handle)
+ {
+ 	struct vmmap *vmmap;
+ 
+ 	vmmap = kmalloc(sizeof(*vmmap), GFP_KERNEL);
++	if (vmmap == NULL)
++		return (-ENOMEM);
+ 	mtx_lock(&vmmaplock);
+ 	vmmap->vm_size = size;
+ 	vmmap->vm_addr = addr;
+ 	vmmap->vm_handle = handle;
+ 	LIST_INSERT_HEAD(&vmmaphead[VM_HASH(addr)], vmmap, vm_next);
+ 	mtx_unlock(&vmmaplock);
++
++	return (0);
+ }
+ 
+ static struct vmmap *
+@@ -306,7 +310,10 @@
+ 	addr = pmap_mapdev_attr(phys_addr, size, attr);
+ 	if (addr == NULL)
+ 		return (NULL);
+-	vmmap_add(addr, size, NULL);
++	if (vmmap_add(addr, size, NULL) != 0) {
++		pmap_unmapdev(addr, size);
++		return (NULL);
++	}
+ 
+ 	return (addr);
+ }
+@@ -382,7 +389,10 @@
+ 	kfree(phys);
+ 	if (addr == NULL)
+ 		return (NULL);
+-	vmmap_add(addr, (unsigned long)count * PAGE_SIZE, handle);
++	if (vmmap_add(addr, (unsigned long)count * PAGE_SIZE, handle) != 0) {
++		nmx_xnu_unmap(handle);
++		return (NULL);
++	}
+ 	return (addr);
+ }
+ 
+@@ -407,7 +417,10 @@
+ 	kfree(phys);
+ 	if (addr == NULL)
+ 		return (NULL);
+-	vmmap_add(addr, (unsigned long)count * PAGE_SIZE, handle);
++	if (vmmap_add(addr, (unsigned long)count * PAGE_SIZE, handle) != 0) {
++		nmx_xnu_unmap(handle);
++		return (NULL);
++	}
+ 	return (addr);
+ }
+ 

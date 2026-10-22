@@ -1,0 +1,374 @@
+/* Actual LinuxKPI kernel-mapping helpers (override/src/linux_page.c) joined to the
+ * actual device-mapping registry (bsdcompat/src/nmx_page.c), both taken from the
+ * patched pinned port by prepare_page_map_fixture.py.
+ *
+ * What runs unchanged: vmmap_add/vmmap_remove, is_vmalloc_addr, _ioremap_attr,
+ * iounmap, vmap, linuxkpi_vmap_pfn, vunmap, and pmap_mapdev_attr/pmap_unmapdev.
+ *
+ * What is modeled here: the allocators (kmalloc and FreeBSD's typed malloc are
+ * counters so a failure can be injected), the mutexes (host pthreads, one thread),
+ * the list primitives, and the IOKit primitives nmx_xnu_map_phys/map_pages/unmap
+ * (which stand in for IOMemoryDescriptor/IOMemoryMap and only hand out tokens).
+ * No GPU, kernel extension, IOMMU or IOMemoryMap is created, so this proves the
+ * registration/rollback accounting, not that a real mapping reaches the device.
+ */
+#include <assert.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef uint64_t vm_paddr_t;
+typedef unsigned long vm_size_t;
+typedef unsigned long gfp_t;
+typedef unsigned long pgprot_t;
+
+#define PAGE_SHIFT 12
+#define PAGE_SIZE (1UL << PAGE_SHIFT)
+#define PAGE_MASK (PAGE_SIZE - 1)
+#define ptoa(x) ((uint64_t)(x) << PAGE_SHIFT)
+#define GFP_KERNEL 0
+#define VM_MEMATTR_DEFAULT 0
+
+/* One modelled mutex per registry, as the port's MTX_SYSINIT would create. */
+struct mtx { pthread_mutex_t native; };
+static void mtx_lock(struct mtx *m) { assert(pthread_mutex_lock(&m->native) == 0); }
+static void mtx_unlock(struct mtx *m) { assert(pthread_mutex_unlock(&m->native) == 0); }
+static struct mtx vmmaplock = { PTHREAD_MUTEX_INITIALIZER };
+static struct mtx devmap_mtx = { PTHREAD_MUTEX_INITIALIZER };
+
+/* Only the list operations the actual helpers use. FreeBSD's LIST_ENTRY takes
+ * the bare type name and supplies `struct` itself. */
+#define LIST_ENTRY(type) struct { struct type *le_next; struct type **le_prev; }
+#define LIST_FOREACH(var, head, field) \
+    for ((var) = (head)->lh_first; (var); (var) = (var)->field.le_next)
+#define LIST_INSERT_HEAD(head, elm, field) do { \
+    (elm)->field.le_next = (head)->lh_first; \
+    if ((head)->lh_first != NULL) \
+        (head)->lh_first->field.le_prev = &(elm)->field.le_next; \
+    (head)->lh_first = (elm); \
+    (elm)->field.le_prev = &(head)->lh_first; \
+} while (0)
+#define LIST_REMOVE(elm, field) do { \
+    if ((elm)->field.le_next != NULL) \
+        (elm)->field.le_next->field.le_prev = (elm)->field.le_prev; \
+    *(elm)->field.le_prev = (elm)->field.le_next; \
+} while (0)
+
+static int live_kmalloc;          /* kmalloc blocks not yet released by kfree */
+static int live_typed;            /* FreeBSD typed-malloc blocks (device records) */
+static int kmalloc_budget = -1;   /* -1: never fail; else fail when it reaches 0 */
+static int kmalloc_calls;
+
+static void kfree(const void *ptr)
+{
+    if (ptr == NULL)
+        return;
+    assert(live_kmalloc > 0);
+    live_kmalloc--;
+    free((void *)ptr);
+}
+
+/* FreeBSD's typed allocator, under host names so libc's stay reachable. */
+static void *nmx_typed_alloc(unsigned long size)
+{
+    void *p = calloc(1, size);
+    assert(p != NULL);
+    live_typed++;
+    return p;
+}
+
+static void nmx_typed_free(void *ptr)
+{
+    if (ptr == NULL)
+        return;
+    assert(live_typed > 0);
+    live_typed--;
+    free(ptr);
+}
+
+/* The actual pmap_mapdev_attr/pmap_unmapdev keep their FreeBSD signatures. */
+#define malloc(size, type, flags) nmx_typed_alloc(size)
+#define free(ptr, type) nmx_typed_free(ptr)
+
+static void *kmalloc(size_t size, gfp_t flags)
+{
+    void *p;
+
+    (void)flags;
+    kmalloc_calls++;
+    if (kmalloc_budget >= 0) {
+        if (kmalloc_budget == 0) {
+            kmalloc_budget = -1;
+            return NULL;
+        }
+        kmalloc_budget--;
+    }
+    p = calloc(1, size);
+    assert(p != NULL);
+    live_kmalloc++;
+    return p;
+}
+
+/* IOKit stand-ins: tokens only, so a leaked mapping is a nonzero counter. */
+static int map_phys_calls, map_pages_calls, unmap_calls;
+static uint64_t expect_phys_pa, expect_phys_size;
+static size_t expect_pages_count;
+static int unexpected_native_calls;
+
+static void *nmx_xnu_map_phys(uint64_t pa, size_t size, int cache, void **handle)
+{
+    (void)cache;
+    map_phys_calls++;
+    if (pa != expect_phys_pa || size != expect_phys_size) {
+        unexpected_native_calls++;
+        return NULL;
+    }
+    *handle = (void *)(uintptr_t)(0x1000 + map_phys_calls);
+    return (void *)(uintptr_t)(0x200000 + map_phys_calls * 0x1000);
+}
+
+static void *nmx_xnu_map_pages(const uint64_t *pages, size_t npages, int cache, void **handle)
+{
+    (void)cache;
+    map_pages_calls++;
+    if (pages == NULL || npages != expect_pages_count) {
+        unexpected_native_calls++;
+        return NULL;
+    }
+    *handle = (void *)(uintptr_t)(0x3000 + map_pages_calls);
+    return (void *)(uintptr_t)(0x300000 + map_pages_calls * 0x1000);
+}
+
+static void nmx_xnu_unmap(void *handle)
+{
+    uintptr_t token = (uintptr_t)handle;
+
+    assert(handle != NULL);
+    assert(token > 0x1000 && token < 0x4000);
+    unmap_calls++;
+}
+
+struct page { struct { int pat_mode; } md; };
+#define VM_PAGE_TO_PHYS(page) ((uint64_t)(uintptr_t)(page))
+
+static int pgprot2cachemode(pgprot_t prot) { return (int)prot; }
+
+/* NMX_ACTUAL_PAGE_MAP_IMPLEMENTATION */
+
+static int vmmap_live(void)
+{
+    int bucket, live = 0;
+
+    for (bucket = 0; bucket < VMMAP_HASH_SIZE; bucket++)
+        for (struct vmmap *entry = vmmaphead[bucket].lh_first;
+             entry != NULL; entry = entry->vm_next.le_next)
+            live++;
+    return live;
+}
+
+static void pass(const char *text)
+{
+    printf("PASS %s\n", text);
+    fflush(stdout);
+}
+
+static void reset_counters(void)
+{
+    assert(vmmap_live() == 0);
+    assert(live_kmalloc == 0);
+    assert(live_typed == 0);
+    kmalloc_budget = -1;
+    kmalloc_calls = 0;
+    map_phys_calls = map_pages_calls = unmap_calls = 0;
+    unexpected_native_calls = 0;
+    expect_phys_pa = expect_phys_size = 0;
+    expect_pages_count = 0;
+}
+
+static void expect_all_released(void)
+{
+    assert(vmmap_live() == 0);
+    assert(live_kmalloc == 0);
+    assert(live_typed == 0);
+    assert(unexpected_native_calls == 0);
+}
+
+static void test_device_mapping_success(void)
+{
+    void *addr;
+
+    reset_counters();
+    expect_phys_pa = 0xf0000000;
+    expect_phys_size = 2 * PAGE_SIZE;
+    addr = _ioremap_attr(expect_phys_pa, expect_phys_size, 0);
+    assert(addr != NULL);
+    assert(is_vmalloc_addr(addr) != 0);
+    assert(vmmap_live() == 1);
+    assert(map_phys_calls == 1);
+    assert(unmap_calls == 0);
+    assert(kmalloc_calls == 1);   /* only the vmmap record */
+    iounmap(addr);
+    assert(is_vmalloc_addr(addr) == 0);
+    assert(unmap_calls == 1);
+    expect_all_released();
+    pass("device mapping registers by address and iounmap releases it once");
+}
+
+static void test_device_mapping_registration_failure(void)
+{
+    void *addr;
+
+    reset_counters();
+    expect_phys_pa = 0xf1000000;
+    expect_phys_size = PAGE_SIZE;
+    kmalloc_budget = 0;        /* the vmmap record is the first kmalloc */
+    addr = _ioremap_attr(expect_phys_pa, expect_phys_size, 0);
+    assert(addr == NULL);
+    assert(map_phys_calls == 1);
+    assert(unmap_calls == 1);  /* the device mapping was given back */
+    expect_all_released();
+    pass("refused device-map registration unmaps through pmap_unmapdev");
+}
+
+static void test_vmap_success(void)
+{
+    struct page pages[2];
+    struct page *list[2];
+    void *addr;
+
+    pages[0].md.pat_mode = 0;
+    pages[1].md.pat_mode = 0;
+    list[0] = &pages[0];
+    list[1] = &pages[1];
+    reset_counters();
+    expect_pages_count = 2;
+    addr = vmap(list, 2, 0, 0);
+    assert(addr != NULL);
+    assert(is_vmalloc_addr(addr) != 0);
+    assert(vmmap_live() == 1);
+    assert(map_pages_calls == 1);
+    assert(kmalloc_calls == 2);   /* the physical array and the vmmap record */
+    vunmap(addr);
+    assert(is_vmalloc_addr(addr) == 0);
+    assert(unmap_calls == 1);
+    expect_all_released();
+    pass("vmap registers the IOKit mapping and vunmap releases it once");
+}
+
+static void test_vmap_registration_failure(void)
+{
+    struct page pages[2];
+    struct page *list[2];
+    void *addr;
+
+    pages[0].md.pat_mode = 0;
+    pages[1].md.pat_mode = 0;
+    list[0] = &pages[0];
+    list[1] = &pages[1];
+    reset_counters();
+    expect_pages_count = 2;
+    kmalloc_budget = 1;        /* the physical array succeeds, the record fails */
+    addr = vmap(list, 2, 0, 0);
+    assert(addr == NULL);
+    assert(map_pages_calls == 1);
+    assert(unmap_calls == 1);  /* the IOKit mapping was given back */
+    expect_all_released();
+    pass("refused vmap registration unmaps through nmx_xnu_unmap");
+}
+
+static void test_vmap_pfn_success(void)
+{
+    unsigned long pfns[3];
+    void *addr;
+
+    reset_counters();
+    expect_pages_count = 3;
+    assert(vmmap_live() == 0);
+    pfns[0] = 0x100;
+    pfns[1] = 0x101;
+    pfns[2] = 0x200;
+    addr = linuxkpi_vmap_pfn(pfns, 3, 0);
+    assert(addr != NULL);
+    assert(is_vmalloc_addr(addr) != 0);
+    assert(vmmap_live() == 1);
+    assert(map_pages_calls == 1);
+    vunmap(addr);
+    assert(unmap_calls == 1);
+    expect_all_released();
+    pass("pfn vmap registers and vunmap releases it once");
+}
+
+static void test_vmap_pfn_registration_failure(void)
+{
+    unsigned long pfns[4];
+    void *addr;
+
+    reset_counters();
+    expect_pages_count = 4;
+    pfns[0] = 0x300;
+    pfns[1] = 0x301;
+    pfns[2] = 0x302;
+    pfns[3] = 0x400;
+    kmalloc_budget = 1;
+    addr = linuxkpi_vmap_pfn(pfns, 4, 0);
+    assert(addr == NULL);
+    assert(map_pages_calls == 1);
+    assert(unmap_calls == 1);
+    expect_all_released();
+    pass("refused pfn vmap registration unmaps through nmx_xnu_unmap");
+}
+
+static void test_failure_does_not_poison_the_next_mapping(void)
+{
+    void *failed, *addr;
+
+    reset_counters();
+    expect_phys_pa = 0xf2000000;
+    expect_phys_size = PAGE_SIZE;
+    kmalloc_budget = 0;
+    failed = _ioremap_attr(expect_phys_pa, expect_phys_size, 0);
+    assert(failed == NULL);
+    assert(vmmap_live() == 0);
+    assert(unmap_calls == 1);
+    kmalloc_budget = -1;
+    addr = _ioremap_attr(expect_phys_pa, expect_phys_size, 0);
+    assert(addr != NULL);
+    assert(is_vmalloc_addr(addr) != 0);
+    assert(map_phys_calls == 2);
+    iounmap(addr);
+    assert(unmap_calls == 2);
+    expect_all_released();
+    pass("a refused registration leaves the registry usable");
+}
+
+static void test_unbalanced_release_is_not_silent(void)
+{
+    /* vunmap/iounmap must not call the IOKit release for an unknown address:
+     * a double unmap would otherwise free another mapping's handle. */
+    reset_counters();
+    iounmap((void *)(uintptr_t)0xdead0000);
+    vunmap((void *)(uintptr_t)0xdead0000);
+    assert(unmap_calls == 0);
+    assert(live_kmalloc == 0);
+    assert(live_typed == 0);
+    assert(vmmap_live() == 0);
+    pass("unknown addresses do not trigger a native release");
+}
+
+int main(void)
+{
+    test_device_mapping_success();
+    test_device_mapping_registration_failure();
+    test_vmap_success();
+    test_vmap_registration_failure();
+    test_vmap_pfn_success();
+    test_vmap_pfn_registration_failure();
+    test_failure_does_not_poison_the_next_mapping();
+    test_unbalanced_release_is_not_silent();
+    printf("Actual vmmap registration, rollback and native release accounting passed; "
+           "IOKit mapping primitives, allocator failures and mutexes are modelled; "
+           "no GPU or real IOMemoryMap was created.\n");
+    return 0;
+}
