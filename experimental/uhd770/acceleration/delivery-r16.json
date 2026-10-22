@@ -8,7 +8,15 @@
     "bytes": 62890492,
     "sha256": "4ee0488be045b3d7f097810146dfe25d48baa805f20c318056c0e55ef390a899",
     "delivery_dir": "D:\\UHD770-driver-kit\\build-audit\\delivery-20261022-r16",
-    "usb_written": false
+    "usb_written": true,
+    "usb_path": "F:\\UHD770-当前使用\\UHD770-MVP-manual-20261022-r16.zip",
+    "usb_digest_verified": true,
+    "usb_pointer_files": [
+      "F:\\00-r16-从这里开始.txt",
+      "F:\\00-先看这里.txt",
+      "F:\\UHD770-当前使用\\使用说明.txt",
+      "F:\\UHD770-当前使用\\r16-操作步骤.txt"
+    ]
   },
   "change_since_previous_delivery": {
     "kernel": "vmmap registration failure now returns -ENOMEM and each caller rolls back with the primitive that matches its registry (pmap_unmapdev for the device path, nmx_xnu_unmap for vmap); plus the new ring space/wrap fixture, which changes no runtime behaviour",
@@ -57,7 +65,9 @@
     "the packaged SHA256SUMS was re-verified file by file: 0 mismatches",
     "the kext binary in the package is byte identical to the CI artifact binary",
     "the probe binary in the package is byte identical to the 991e460 artifact binary",
-    "the booting EFI config digest still matches 22a185d96105258fc24b0d0ca842206dc36fc885fbb8b7d0559e58bf1ae2f6f9, so no boot configuration was changed"
+    "the booting EFI config digest still matches 22a185d96105258fc24b0d0ca842206dc36fc885fbb8b7d0559e58bf1ae2f6f9, so no boot configuration was changed",
+    "the copy on the USB was hashed after writing and matches the packaged digest; the boot EFI config digest was re-checked after delivery and is unchanged, so the boot configuration was not touched",
+    "the previous USB pointer files were copied into the delivery folder before being replaced, so the earlier instructions are still recoverable"
   ],
   "how_to_confirm_the_loaded_version": [
     "before running: shasum -a 256 on the installed NMXGPU and on probe/uhd770-compute-probe, compared with the two binary_sha256 values above",

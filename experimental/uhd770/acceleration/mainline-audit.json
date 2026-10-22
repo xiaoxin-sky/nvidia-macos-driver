@@ -668,7 +668,9 @@
     "sha256": "4ee0488be045b3d7f097810146dfe25d48baa805f20c318056c0e55ef390a899",
     "record": "experimental/uhd770/acceleration/delivery-r16.json",
     "scope": "one macOS session on 8086:4680: prepare, reboot through the same USB, run Run-UHD770-Test.command manually, then bring the report back",
-    "not_requested_yet": "the user has not been asked to reboot; the package is staged for a single concentrated round when they choose"
+    "not_requested_yet": "the package is staged on the USB and the boot configuration was not touched, but no reboot has been requested; the user runs one concentrated session when they choose",
+    "staged_on_usb": true,
+    "usb_path": "F:\\UHD770-当前使用\\UHD770-MVP-manual-20261022-r16.zip"
   },
   "completion_limit": "Windows/CI cannot prove target GPU execution. Keep the goal active until actual target execution/readback/clean exit evidence is available.",
   "latest_host_verification": {
