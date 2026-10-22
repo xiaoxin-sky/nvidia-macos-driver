@@ -239,6 +239,25 @@
       },
       "what_it_reframes": "the last target failure was not a compute or completion failure: the MVP is blocked at DRM node discovery/open, upstream of every step T2 to T7 reviewed",
       "what_changed_afterwards": "the opened-fd identity and cross-node/minor identity work landed after those runs, so r16 may open the node; if the same -19 reappears the next step is the node open path, not compute"
+    },
+    "discovery_open_path_check": {
+      "question": "is the -19 the last target run hit still reachable in the current tree",
+      "where_ENODEV_can_come_from": [
+        "linux_dev_fdopen returns ENODEV when the cdev's si_drv1 is NULL or the file has no vnode and then nmx_cdev_open prints 'NullMoth devfs: open id=... path=... callback=... error=-19'",
+        "drm_open returns ENODEV when the minor it is asked for is not registered"
+      ],
+      "current_tree_state": [
+        "make_dev_va stores si_drv1 from mda_si_drv1 (override/src/nmx_linux_cdev.c:74) and drm_dev_alias passes the linux_cdev (override/src/nmx_drm_os.c:114), so the guard's first condition is satisfied",
+        "nmx_cdev_open installs f_vnode on the file before calling d_fdopen (override/src/nmx_linux_cdev.c:285), so the second condition is satisfied",
+        "minor->dev is set when the minor is allocated (drm_drv.c:154) and the device node is only created later, from drm_sysfs_device_add during registration (drm_sysfs.c:380), so an open cannot find an unbound minor through that route",
+        "node creation prints on failure and nmx_cdev_open prints on any callback error, so a refusal through this layer leaves a kernel log line"
+      ],
+      "r14_evidence": [
+        "the captured kernel streams contain 'NullMoth xkpi: 8086:4680: matched by drmn/8086', so the device matched",
+        "they contain no 'NullMoth devfs: open' line, so the -19 did not report through the port's own failure path",
+        "conclusion: the -19 cannot be attributed to a current-code path from this evidence; either that build lacked the print or the refusal came from the devfs layer before nmx_cdev_open"
+      ],
+      "discriminator_for_the_next_run": "if a device open is refused again, the presence of the port's own 'NullMoth devfs: open ... error=' line says which callback refused it; its absence says the refusal happened before the port's open path"
     }
   }
 }
