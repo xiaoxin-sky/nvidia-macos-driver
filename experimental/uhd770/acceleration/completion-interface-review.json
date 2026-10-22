@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-22",
+  "scope": "Joined GPU completion software contracts before requesting another hardware test",
+  "verification": {
+    "status": "11 joined host groups passed; native macOS/TSan/ASan/UBSan pending",
+    "route": "Injected GT interrupt identity -> actual GT engine selection/execlists IRQ -> actual irq_work and NMX taskqueue worker -> actual i915 HWSP completion predicate/breadcrumbs -> actual dma_fence callback -> actual DRM ordinary syncobj wait -> actual Linux schedule/wake -> actual native sleepqueue/Mach adapter",
+    "actual_code": [
+      "GT identity macros/pick_gt/gen11_gt_identity_handler/intel_engine_cs_irq/execlists_irq_handler",
+      "intel_engine_signal_breadcrumbs; Linux irq_work init/queue/callback/sync; NMX taskqueue enqueue/active worker/drain/free",
+      "i915 request sequence predicate, enable/insert breadcrumb, signal_irq_work and callback notification",
+      "dma_fence init/add/remove/get/put/RCU lookup/signaled and signal routines; DRM ordinary syncobj wait/cleanup",
+      "Linux schedule state/wakeup and native sleepqueue registration/block/result/cleanup"
+    ],
+    "covered": [
+      "sleeping application wakeup from a completed HWSP status",
+      "registered-before-block early completion and completion before callback attachment",
+      "older HWSP status remains incomplete and reaches real timeout",
+      "32-bit HWSP sequence wraparound",
+      "native interruption preserves incomplete fence and removes callback/storage",
+      "wrong engine instance/empty identity does not dispatch completion",
+      "repeated interrupt dispatch does not duplicate ownership/callbacks",
+      "three sequential requests reuse a context with balanced references",
+      "WAIT_ALL ordinary single-fence branch",
+      "first/second syncobj wait allocation failures release earlier allocations"
+    ],
+    "host_log": "completion-test.cpp\nPASS HWSP-irqwork-queue-breadcrumb-fence-syncobj-native-sleep\nPASS registered-before-block completion\nPASS older-HWSP cannot signal; real timeout and cleanup\nPASS HWSP sequence wraparound\nPASS completion before callback attachment\nPASS native interruption preserves incomplete fence\nPASS actual GT identity and execlists IRQ engine selection\nPASS repeated IRQ cannot duplicate callback/ownership\nPASS sequential requests reuse context with balanced references\nPASS WAIT_ALL ordinary fence completion\nPASS syncobj wait allocation failures release prior storage\nActual queue/irqwork/i915-breadcrumb/fence/syncobj/Linux/native-sleep contracts passed; hardware/native primitive/RCU storage boundaries modeled; no GPU executed.\n",
+    "negative_control": {
+      "mutation": "drop actual syncobj_wait_fence_func wake_up_process only",
+      "exit": 7,
+      "result": "NEGATIVE_CONTROL_DETECTED: fence signaled but syncobj wake callback was lost",
+      "limit": "Deliberate software negative control; process exits without fixture teardown to preserve failure evidence, never GPU proof"
+    },
+    "boundaries": [
+      "No actual GPU execution: HWSP writes and interrupt identities are injected hardware inputs",
+      "Native PCI event-source registration/MMIO bank/identity reads are outside this joined fixture",
+      "Primitive locks/Mach wait service, RCU/refcounts, intrusive list and allocator storage are host models; separate fixtures cover actual native ownership/RCU implementation",
+      "Tasklet context-switch/error recovery branches, media GT, timeline fence chains, multiple syncobj wait arrays and GPU command generation/readback remain separate review requirements",
+      "Request/context primary storage stays owned by the fixture; real GPU/BO/VM/kernel teardown is not proved by balanced fixture references"
+    ],
+    "result_limit": "This is software completion-interface evidence. It does not prove that the UHD770 executes a batch, writes the HWSP/output, delivers a physical IRQ or exits cleanly on the target macOS.",
+    "hardware_executed": false,
+    "new_user_reboot_requested": false
+  }
+}

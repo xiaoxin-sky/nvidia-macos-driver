@@ -64,7 +64,7 @@
       "id": "memory",
       "route": "GEM create -> backing pages -> DMA/IOMMU -> PPGTT/GGTT -> NMX mmap -> IOKit user map",
       "status": "SHARED MM AND JOINED S/G-DMA CHECKS PASSED NATIVE; shared-lock/IDR repair host-passed, native pending",
-      "remaining": "Current WW progress repair and expanded PTE fixture need native verification; review actual GEM internal backing/map_pt_dma, parent PDE/root and TLB interfaces; target DMA/coherency still unverified",
+      "remaining": "Review actual GEM internal backing/map_pt_dma, parent PDE/root and TLB interfaces plus native cache aliases; target DMA/coherency still unverified",
       "source_findings": [
         "PROC_LOCK only refreshes signals, so process p_lkpi_mm publication/acquisition lacks its expected lock",
         "linux_mm_dtor clears current process mm rather than locating the original mm owner",
@@ -132,7 +132,7 @@
         }
       },
       "PTE_consumer": {
-        "status": "joined DMA-to-PTE source fixture host-passed; native macOS/ASan/UBSan pending",
+        "status": "native macOS/ASan/UBSan/kernel/KC passed; actual GPU visibility not proved",
         "actual_source": "gen12_pte_encode, gen8_ppgtt_insert_pte and gen8_ppgtt_insert_huge, with pinned masks/index macros; fed by actual Linux/BSD/native DMA mapping output",
         "cases": "2 mapping modes x 4 ADL PAT indexes x 8 placement/page-size cases, plus 3 encoder-flag cases; all previously verified DMA failure/rollback groups retained",
         "covered": [
@@ -157,7 +157,15 @@
         "host_log": "dma-bus-test.c\ndma-native-test.cpp\nPASS actual S/G -> BSD -> native identity DMA\nPASS actual S/G -> BSD -> IODMACommand 39-bit IOVA\nPASS descriptor/command/prepare/segment/handle failures roll back prior S/G mappings\nPASS physical/translated 39-bit DMA masks and identity fast-path limits\nPASS actual mapping-array growth and allocation rollback\nPASS native overflow/zero-size and initialized failure outputs\nPASS actual DMA -> Gen12 PTE insertion across 4K/table/directory boundaries and 64K/2M/fallback branches\nActual Linux/BSD/native DMA and PTE consumer contracts passed; IOKit/allocator/S-G/hierarchy/cache-flush primitives modeled; no GPU executed.\n",
         "limits": "Flat S/G linkage, page-table hierarchy/allocation and cache flush services are models. Native GPU VA allocation, root PDE programming, TLB invalidation, actual CPU/GPU cache coherence and device execution are not proved. Encoder RO/LM flags are interface tests, not advertised ADL hardware features.",
         "hardware_executed": false,
-        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39735584845"
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39735584845",
+        "native_evidence": {
+          "source": "98ce2cb8640919a19678c985854767f0ea25171d",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39735584845",
+          "artifact_id": 12407866922,
+          "sha256": "5920664ac58d7b85a5cfe0c94ccbd01de45a52663161692e070f1985ad38860e",
+          "result": "Actual Linux/BSD/native DMA -> Gen12 PTE consumer tests passed on macOS normally and under ASan/UBSan; all 1250 kernel units/native KC preflight passed",
+          "hardware_executed": false
+        }
       }
     },
     {
@@ -167,7 +175,7 @@
       "remaining": "nested ioctl data, object address/length/pinning and fence lifetime; actual execution requires UHD770",
       "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json",
       "WW_reservation_progress": {
-        "status": "implemented and 25 joined host cases passed; native macOS pending",
+        "status": "native 25-case TSan/ASan/UBSan/kernel/KC passed",
         "baseline": "Actual legacy pairwise WW core with otherwise-current owner/context helpers fails the three-thread cycle and needs test-only interruption to terminate. This is a software regression, not a reproduction of the target GPU panic.",
         "baseline_log": "ww-pairwise-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nPASS WW-context-lifetime\nPASS WW-native-CV-handoff\nPASS WW-native-CV-early-wake\nPASS WW-interrupted-wait\nPASS WW-cycle-two\nFAIL WW-cycle-three: WW cycle required forced cancellation instead of returning EDEADLK\n",
         "baseline_core_sha256": "5c056ccfe78747ec37f5392e10485f814ea29d768f94de4477385b77cc062133",
@@ -184,15 +192,23 @@
         "limits": "Mach wait primitives, allocator/registry, intrusive-list storage and MMIO are host models. The baseline canceller is only a failure escape and never an accepted pass. Native clang uses the original GNU trylock macro; Windows changes only that expression wrapper. No GPU is executed.",
         "hardware_executed": false,
         "new_hardware_test_requested": false,
-        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928"
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928",
+        "native_evidence": {
+          "source": "6cdabda3b73e87d40fef91e897f1e831e953b4b5",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928",
+          "artifact_id": 12407512045,
+          "sha256": "d8521c074b635a599d82274f918073070d802b979dec8feeca542bf0773d8553",
+          "result": "25 actual Linux/native WW/CV/IDR/BH/critical/CSB groups passed on macOS normally, under TSan and ASan/UBSan; all 1250 kernel units and native KC preflight passed",
+          "hardware_executed": false
+        }
       },
-      "PTE_consumer_review": "Actual Gen12 encoding and 4K/64K/2M insert consumers joined to mapped DMA output; host-passed, native pending; allocation, parent/root programming and actual GPU execution are separate."
+      "PTE_consumer_review": "Actual mapped DMA -> Gen12 encoding and 4K/64K/2M insert consumers passed native macOS/ASan/UBSan; allocation, parent/root programming and actual GPU execution remain separate."
     },
     {
       "id": "completion",
       "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
-      "status": "THREADED BH/NATIVE MUTEX/CSB, MONOTONIC CLOCK AND PCODE RETRY PASSED NATIVE MACOS CHECKS; real IRQ/fence pending",
-      "remaining": "Verify current WW/CV extension; join real GPU identity/HWSP completion and breadcrumb/irq_work/fence/syncobj paths rather than infer completion from isolated queue/wait tests. Target IRQ/fence proof remains absent.",
+      "status": "LOWER LOCK/WAIT AND WW CONTRACTS NATIVE-PASSED; joined GT/breadcrumb/fence/syncobj/software-wait chain host-passed, native pending",
+      "remaining": "Validate current joined completion fixture natively; inspect PCI/MMIO delivery and timeline/command/HWSP generation boundaries; actual GPU IRQ/output/clean exit remains unverified",
       "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
       "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018",
       "next_review": "Complete remaining critical-scope transitive audit and actual GPU context/memory/submission/visibility/cleanup contracts; no hardware request merely for a passing build",
@@ -265,7 +281,7 @@
         }
       },
       "WW_native_CV_extension": {
-        "status": "implemented and 25 joined host cases passed; native macOS pending",
+        "status": "native 25-case TSan/ASan/UBSan/kernel/KC passed",
         "baseline": "Actual legacy pairwise WW core with otherwise-current owner/context helpers fails the three-thread cycle and needs test-only interruption to terminate. This is a software regression, not a reproduction of the target GPU panic.",
         "baseline_log": "ww-pairwise-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nPASS WW-context-lifetime\nPASS WW-native-CV-handoff\nPASS WW-native-CV-early-wake\nPASS WW-interrupted-wait\nPASS WW-cycle-two\nFAIL WW-cycle-three: WW cycle required forced cancellation instead of returning EDEADLK\n",
         "baseline_core_sha256": "5c056ccfe78747ec37f5392e10485f814ea29d768f94de4477385b77cc062133",
@@ -282,9 +298,57 @@
         "limits": "Mach wait primitives, allocator/registry, intrusive-list storage and MMIO are host models. The baseline canceller is only a failure escape and never an accepted pass. Native clang uses the original GNU trylock macro; Windows changes only that expression wrapper. No GPU is executed.",
         "hardware_executed": false,
         "new_hardware_test_requested": false,
-        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928"
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928",
+        "native_evidence": {
+          "source": "6cdabda3b73e87d40fef91e897f1e831e953b4b5",
+          "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928",
+          "artifact_id": 12407512045,
+          "sha256": "d8521c074b635a599d82274f918073070d802b979dec8feeca542bf0773d8553",
+          "result": "25 actual Linux/native WW/CV/IDR/BH/critical/CSB groups passed on macOS normally, under TSan and ASan/UBSan; all 1250 kernel units and native KC preflight passed",
+          "hardware_executed": false
+        }
       },
-      "next_transitive_route": "Native PCI IOInterruptEventSource -> nmx_bus intr_trampoline -> Linux irq handler -> gen11 GT identity decode -> execlists tasklet/breadcrumb irq_work -> dma_fence callback -> real syncobj wait/sleepqueue. Worker queues and lower waits have separate fixtures, but this joined GPU completion path is not yet verified."
+      "next_transitive_route": "Native PCI IOInterruptEventSource -> nmx_bus intr_trampoline -> Linux irq handler -> gen11 GT identity decode -> execlists tasklet/breadcrumb irq_work -> dma_fence callback -> real syncobj wait/sleepqueue. Worker queues and lower waits have separate fixtures, but this joined GPU completion path is not yet verified.",
+      "joined_completion": {
+        "status": "11 joined host groups passed; native macOS/TSan/ASan/UBSan pending",
+        "route": "Injected GT interrupt identity -> actual GT engine selection/execlists IRQ -> actual irq_work and NMX taskqueue worker -> actual i915 HWSP completion predicate/breadcrumbs -> actual dma_fence callback -> actual DRM ordinary syncobj wait -> actual Linux schedule/wake -> actual native sleepqueue/Mach adapter",
+        "actual_code": [
+          "GT identity macros/pick_gt/gen11_gt_identity_handler/intel_engine_cs_irq/execlists_irq_handler",
+          "intel_engine_signal_breadcrumbs; Linux irq_work init/queue/callback/sync; NMX taskqueue enqueue/active worker/drain/free",
+          "i915 request sequence predicate, enable/insert breadcrumb, signal_irq_work and callback notification",
+          "dma_fence init/add/remove/get/put/RCU lookup/signaled and signal routines; DRM ordinary syncobj wait/cleanup",
+          "Linux schedule state/wakeup and native sleepqueue registration/block/result/cleanup"
+        ],
+        "covered": [
+          "sleeping application wakeup from a completed HWSP status",
+          "registered-before-block early completion and completion before callback attachment",
+          "older HWSP status remains incomplete and reaches real timeout",
+          "32-bit HWSP sequence wraparound",
+          "native interruption preserves incomplete fence and removes callback/storage",
+          "wrong engine instance/empty identity does not dispatch completion",
+          "repeated interrupt dispatch does not duplicate ownership/callbacks",
+          "three sequential requests reuse a context with balanced references",
+          "WAIT_ALL ordinary single-fence branch",
+          "first/second syncobj wait allocation failures release earlier allocations"
+        ],
+        "host_log": "completion-test.cpp\nPASS HWSP-irqwork-queue-breadcrumb-fence-syncobj-native-sleep\nPASS registered-before-block completion\nPASS older-HWSP cannot signal; real timeout and cleanup\nPASS HWSP sequence wraparound\nPASS completion before callback attachment\nPASS native interruption preserves incomplete fence\nPASS actual GT identity and execlists IRQ engine selection\nPASS repeated IRQ cannot duplicate callback/ownership\nPASS sequential requests reuse context with balanced references\nPASS WAIT_ALL ordinary fence completion\nPASS syncobj wait allocation failures release prior storage\nActual queue/irqwork/i915-breadcrumb/fence/syncobj/Linux/native-sleep contracts passed; hardware/native primitive/RCU storage boundaries modeled; no GPU executed.\n",
+        "negative_control": {
+          "mutation": "drop actual syncobj_wait_fence_func wake_up_process only",
+          "exit": 7,
+          "result": "NEGATIVE_CONTROL_DETECTED: fence signaled but syncobj wake callback was lost",
+          "limit": "Deliberate software negative control; process exits without fixture teardown to preserve failure evidence, never GPU proof"
+        },
+        "boundaries": [
+          "No actual GPU execution: HWSP writes and interrupt identities are injected hardware inputs",
+          "Native PCI event-source registration/MMIO bank/identity reads are outside this joined fixture",
+          "Primitive locks/Mach wait service, RCU/refcounts, intrusive list and allocator storage are host models; separate fixtures cover actual native ownership/RCU implementation",
+          "Tasklet context-switch/error recovery branches, media GT, timeline fence chains, multiple syncobj wait arrays and GPU command generation/readback remain separate review requirements",
+          "Request/context primary storage stays owned by the fixture; real GPU/BO/VM/kernel teardown is not proved by balanced fixture references"
+        ],
+        "result_limit": "This is software completion-interface evidence. It does not prove that the UHD770 executes a batch, writes the HWSP/output, delivers a physical IRQ or exits cleanly on the target macOS.",
+        "hardware_executed": false,
+        "new_user_reboot_requested": false
+      }
     },
     {
       "id": "visibility",
@@ -365,7 +429,7 @@
         "staged_match": "all patched source text identical after CRLF/LF normalization"
       }
     },
-    "current_native_ci_status": "WW run 39734727928 and expanded DMA/PTE run 39735584845 are live at the last API observations; do not replace them solely because a wait expires",
+    "current_native_ci_status": "Joined completion fixture is host-passed and awaiting native dispatch; both prior WW and PTE runs have verified successful artifact evidence",
     "new_user_test_requested": false,
     "usb_package_changed": false,
     "kernel_clock": {
@@ -500,6 +564,62 @@
       "limits": "Flat S/G linkage, page-table hierarchy/allocation and cache flush services are models. Native GPU VA allocation, root PDE programming, TLB invalidation, actual CPU/GPU cache coherence and device execution are not proved. Encoder RO/LM flags are interface tests, not advertised ADL hardware features.",
       "hardware_executed": false,
       "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39735584845"
+    },
+    "ww_native_evidence": {
+      "source": "6cdabda3b73e87d40fef91e897f1e831e953b4b5",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928",
+      "artifact_id": 12407512045,
+      "sha256": "d8521c074b635a599d82274f918073070d802b979dec8feeca542bf0773d8553",
+      "result": "25 actual Linux/native WW/CV/IDR/BH/critical/CSB groups passed on macOS normally, under TSan and ASan/UBSan; all 1250 kernel units and native KC preflight passed",
+      "hardware_executed": false
+    },
+    "pte_native_evidence": {
+      "source": "98ce2cb8640919a19678c985854767f0ea25171d",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39735584845",
+      "artifact_id": 12407866922,
+      "sha256": "5920664ac58d7b85a5cfe0c94ccbd01de45a52663161692e070f1985ad38860e",
+      "result": "Actual Linux/BSD/native DMA -> Gen12 PTE consumer tests passed on macOS normally and under ASan/UBSan; all 1250 kernel units/native KC preflight passed",
+      "hardware_executed": false
+    },
+    "joined_completion": {
+      "status": "11 joined host groups passed; native macOS/TSan/ASan/UBSan pending",
+      "route": "Injected GT interrupt identity -> actual GT engine selection/execlists IRQ -> actual irq_work and NMX taskqueue worker -> actual i915 HWSP completion predicate/breadcrumbs -> actual dma_fence callback -> actual DRM ordinary syncobj wait -> actual Linux schedule/wake -> actual native sleepqueue/Mach adapter",
+      "actual_code": [
+        "GT identity macros/pick_gt/gen11_gt_identity_handler/intel_engine_cs_irq/execlists_irq_handler",
+        "intel_engine_signal_breadcrumbs; Linux irq_work init/queue/callback/sync; NMX taskqueue enqueue/active worker/drain/free",
+        "i915 request sequence predicate, enable/insert breadcrumb, signal_irq_work and callback notification",
+        "dma_fence init/add/remove/get/put/RCU lookup/signaled and signal routines; DRM ordinary syncobj wait/cleanup",
+        "Linux schedule state/wakeup and native sleepqueue registration/block/result/cleanup"
+      ],
+      "covered": [
+        "sleeping application wakeup from a completed HWSP status",
+        "registered-before-block early completion and completion before callback attachment",
+        "older HWSP status remains incomplete and reaches real timeout",
+        "32-bit HWSP sequence wraparound",
+        "native interruption preserves incomplete fence and removes callback/storage",
+        "wrong engine instance/empty identity does not dispatch completion",
+        "repeated interrupt dispatch does not duplicate ownership/callbacks",
+        "three sequential requests reuse a context with balanced references",
+        "WAIT_ALL ordinary single-fence branch",
+        "first/second syncobj wait allocation failures release earlier allocations"
+      ],
+      "host_log": "completion-test.cpp\nPASS HWSP-irqwork-queue-breadcrumb-fence-syncobj-native-sleep\nPASS registered-before-block completion\nPASS older-HWSP cannot signal; real timeout and cleanup\nPASS HWSP sequence wraparound\nPASS completion before callback attachment\nPASS native interruption preserves incomplete fence\nPASS actual GT identity and execlists IRQ engine selection\nPASS repeated IRQ cannot duplicate callback/ownership\nPASS sequential requests reuse context with balanced references\nPASS WAIT_ALL ordinary fence completion\nPASS syncobj wait allocation failures release prior storage\nActual queue/irqwork/i915-breadcrumb/fence/syncobj/Linux/native-sleep contracts passed; hardware/native primitive/RCU storage boundaries modeled; no GPU executed.\n",
+      "negative_control": {
+        "mutation": "drop actual syncobj_wait_fence_func wake_up_process only",
+        "exit": 7,
+        "result": "NEGATIVE_CONTROL_DETECTED: fence signaled but syncobj wake callback was lost",
+        "limit": "Deliberate software negative control; process exits without fixture teardown to preserve failure evidence, never GPU proof"
+      },
+      "boundaries": [
+        "No actual GPU execution: HWSP writes and interrupt identities are injected hardware inputs",
+        "Native PCI event-source registration/MMIO bank/identity reads are outside this joined fixture",
+        "Primitive locks/Mach wait service, RCU/refcounts, intrusive list and allocator storage are host models; separate fixtures cover actual native ownership/RCU implementation",
+        "Tasklet context-switch/error recovery branches, media GT, timeline fence chains, multiple syncobj wait arrays and GPU command generation/readback remain separate review requirements",
+        "Request/context primary storage stays owned by the fixture; real GPU/BO/VM/kernel teardown is not proved by balanced fixture references"
+      ],
+      "result_limit": "This is software completion-interface evidence. It does not prove that the UHD770 executes a batch, writes the HWSP/output, delivers a physical IRQ or exits cleanly on the target macOS.",
+      "hardware_executed": false,
+      "new_user_reboot_requested": false
     }
   }
 }

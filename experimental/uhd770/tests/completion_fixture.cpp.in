@@ -1,0 +1,418 @@
+/* Joined software completion chain. MMIO/IRQ delivery and HWSP writes are
+ * injected at the hardware boundary. Queue, breadcrumb, fence, syncobj and
+ * Linux/native wait state machines are actual source. Native primitive locks,
+ * RCU/refcount services, allocators and object storage remain host models. */
+/* ACTUAL_SLEEP_CHAIN */
+
+using u32=uint32_t;
+using u8=uint8_t;
+using u16=uint16_t;
+using s32=int32_t;
+using u64=uint64_t;
+using ktime_t=int64_t;
+using thread_t=std::thread::id;
+using task_fn_t=void(void *,int);
+using taskqueue_enqueue_fn=void(*)(void *);
+constexpr int TASK_ENQUEUED=1,TASK_NOENQUEUE=2,TASKQUEUE_FAIL_IF_PENDING=1,TASKQUEUE_FAIL_IF_CANCELING=2,TQ_EXITING=1;
+struct mtx { struct lock_object lock_object; };
+static void mtx_init(mtx *m) { m->lock_object.native=new std::mutex;m->lock_object.held=false; }
+static void mtx_lock(mtx *m) { m->lock_object.native->lock();assert(!m->lock_object.held);m->lock_object.held=true; }
+static void mtx_unlock(mtx *m) { assert(m->lock_object.held);m->lock_object.held=false;m->lock_object.native->unlock(); }
+static void mtx_destroy(mtx *m) { assert(!m->lock_object.held);delete m->lock_object.native;m->lock_object.native=nullptr; }
+using spinlock_t=mtx;
+#define spin_lock(m) mtx_lock(m)
+#define spin_unlock(m) mtx_unlock(m)
+#define msleep(chan,m,pri,msg,timo) nmx_sleep((chan),&(m)->lock_object,(pri),(msg),(timo))
+#define wakeup(c) nmx_wakeup(c)
+#define wakeup_one(c) nmx_wakeup_one(c)
+static std::atomic<unsigned> native_worker_exits{0};
+static void nmx_thread_exit_cleanup() { ++native_worker_exits; }
+static thread_t current_thread() { return std::this_thread::get_id(); }
+static void thread_terminate(thread_t) {}
+struct taskqueue;
+static void completion_queue_free(taskqueue *);
+static std::shared_mutex rcu_mutex;
+static thread_local unsigned rcu_depth=0;
+static void rcu_read_lock() { if(rcu_depth++==0)rcu_mutex.lock_shared(); }
+static void rcu_read_unlock() { assert(rcu_depth);if(--rcu_depth==0)rcu_mutex.unlock_shared(); }
+static void synchronize_rcu() { assert(!rcu_depth);std::unique_lock<std::shared_mutex> g(rcu_mutex); }
+struct workqueue_model { struct taskqueue *taskqueue; };
+static workqueue_model *system_wq;
+#define LKPI_IRQ_WORK_TQ (system_wq->taskqueue)
+#define TASK_INIT(t,p,fn,arg) do { std::memset((t),0,sizeof(*(t)));(t)->ta_priority=(p);(t)->ta_func=(fn);(t)->ta_context=(arg); } while(0)
+struct llist_node { llist_node *next; };
+struct irq_work;
+using irq_work_func_t=void(*)(struct irq_work *);
+/* ACTUAL_QUEUE_IRQWORK */
+static void completion_queue_free(taskqueue *q) { assert(!q->tq_alive && !q->tq_active);delete q; }
+
+// READ/WRITE_ONCE and atomic bit operations are native model primitives. Their
+// shared lock prevents C++ data races in the injected hardware/status storage.
+static std::mutex once_lock;
+template<class T> static T once_read(const T *p) { std::lock_guard<std::mutex> g(once_lock);return *p; }
+template<class T,class U> static void once_write(T *p,U v) { std::lock_guard<std::mutex> g(once_lock);*p=static_cast<T>(v); }
+#define READ_ONCE(v) once_read(&(v))
+#define WRITE_ONCE(v,x) once_write(&(v),(x))
+#ifdef NULL
+#undef NULL
+#endif
+#define NULL nullptr
+#define typeof(x) decltype(x)
+#define __user
+#define __rcu
+#define container_of(p,t,m) reinterpret_cast<std::remove_reference_t<t> *>(reinterpret_cast<char *>(p)-offsetof(std::remove_reference_t<t>,m))
+struct list_head { list_head *next,*prev; };
+// RCU list storage is modeled with atomic snapshots under this primitive
+// mutex; it does not serialize the actual driver callbacks/queue algorithms.
+static std::recursive_mutex list_lock;
+static list_head *list_next(const list_head *p) { std::lock_guard<std::recursive_mutex> g(list_lock);return p->next; }
+static list_head *list_prev(const list_head *p) { std::lock_guard<std::recursive_mutex> g(list_lock);return p->prev; }
+static void INIT_LIST_HEAD(list_head *p) { std::lock_guard<std::recursive_mutex> g(list_lock);p->next=p->prev=p; }
+static bool list_empty(const list_head *p) { return list_next(p)==p; }
+static void __list_add(list_head *p,list_head *prev,list_head *next) { next->prev=p;p->next=next;p->prev=prev;prev->next=p; }
+static void list_add(list_head *p,list_head *head) { std::lock_guard<std::recursive_mutex> g(list_lock);__list_add(p,head,head->next); }
+static void list_add_tail(list_head *p,list_head *head) { std::lock_guard<std::recursive_mutex> g(list_lock);__list_add(p,head->prev,head); }
+static void list_del(list_head *p) { std::lock_guard<std::recursive_mutex> g(list_lock);p->next->prev=p->prev;p->prev->next=p->next; }
+static void list_del_init(list_head *p) { std::lock_guard<std::recursive_mutex> g(list_lock);list_del(p);INIT_LIST_HEAD(p); }
+static void list_replace(list_head *old,list_head *p) { std::lock_guard<std::recursive_mutex> g(list_lock);p->next=old->next;p->next->prev=p;p->prev=old->prev;p->prev->next=p; }
+#define list_add_rcu(p,h) list_add((p),(h))
+#define list_del_rcu(p) list_del(p)
+#define list_entry(p,t,m) container_of((p),t,m)
+#define list_next_entry(p,m) list_entry(list_next(&(p)->m),typeof(*(p)),m)
+#define list_prev_entry(p,m) list_entry(list_prev(&(p)->m),typeof(*(p)),m)
+#define list_is_last(p,h) (list_next(p)==(h))
+#define list_is_first(p,h) (list_prev(p)==(h))
+#define list_for_each_prev(p,h) for((p)=list_prev(h);(p)!=(h);(p)=list_prev(p))
+template<class T> static T *list_value(list_head *p,const list_head *head,size_t offset)
+{
+    return p==head?nullptr:reinterpret_cast<T *>(reinterpret_cast<char *>(p)-offset);
+}
+#define LIST_VALUE(p,h,node,m) list_value<std::remove_pointer_t<decltype(p)>>((node),(h),offsetof(std::remove_pointer_t<decltype(p)>,m))
+#define list_for_each_entry_rcu(p,h,m) for((p)=LIST_VALUE(p,h,list_next(h),m);(p);(p)=LIST_VALUE(p,h,list_next(&(p)->m),m))
+#define list_for_each_entry_safe(p,n,h,m) for((p)=LIST_VALUE(p,h,list_next(h),m),(n)=nullptr;(p)?((n)=LIST_VALUE(p,h,list_next(&(p)->m),m),true):false;(p)=(n))
+struct llist_head { llist_node *first=nullptr;std::mutex lock; };
+static bool llist_empty(llist_head *p) { std::lock_guard<std::mutex> g(p->lock);return !p->first; }
+static llist_node *llist_del_all(llist_head *p) { std::lock_guard<std::mutex> g(p->lock);auto *head=p->first;p->first=nullptr;return head; }
+static bool llist_add(llist_node *n,llist_head *p) { std::lock_guard<std::mutex> g(p->lock);bool empty=!p->first;n->next=p->first;p->first=n;return empty; }
+#define llist_entry(p,t,m) container_of((p),t,m)
+#define llist_for_each_safe(p,n,head) for((p)=(head),(n)=nullptr;(p)?((n)=(p)->next,true):false;(p)=(n))
+using atomic_t=std::atomic<int>;
+static void atomic_inc(atomic_t *p) { ++*p; }
+static void atomic_dec(atomic_t *p) { --*p; }
+static bool test_bit(unsigned bit,const uint64_t *p) { std::lock_guard<std::mutex> g(once_lock);return *p&(1ULL<<bit); }
+static void set_bit(unsigned bit,uint64_t *p) { std::lock_guard<std::mutex> g(once_lock);*p|=1ULL<<bit; }
+static bool test_and_set_bit(unsigned bit,uint64_t *p) { std::lock_guard<std::mutex> g(once_lock);bool old=*p&(1ULL<<bit);*p|=1ULL<<bit;return old; }
+static bool test_and_clear_bit(unsigned bit,uint64_t *p) { std::lock_guard<std::mutex> g(once_lock);bool old=*p&(1ULL<<bit);*p&=~(1ULL<<bit);return old; }
+/* ACTUAL_FENCE_FLAGS */
+struct kref { std::atomic<unsigned> refs{1}; };
+static void kref_init(kref *p) { p->refs=1; }
+static void kref_get(kref *p) { assert(p->refs.fetch_add(1)); }
+static bool kref_get_unless_zero(kref *p) { unsigned n=p->refs.load();while(n && !p->refs.compare_exchange_weak(n,n+1)){}return n!=0; }
+static void kref_put(kref *p,void (*release)(kref *)) { assert(p->refs);if(p->refs.fetch_sub(1)==1)release(p); }
+struct dma_fence;
+struct dma_fence_cb;
+using dma_fence_func_t=void(*)(dma_fence *,dma_fence_cb *);
+struct dma_fence_cb { list_head node;dma_fence_func_t func=nullptr; };
+struct dma_fence_ops { bool (*enable_signaling)(dma_fence *);bool (*signaled)(dma_fence *);void (*set_deadline)(dma_fence *,ktime_t); };
+struct dma_fence { spinlock_t *lock;const dma_fence_ops *ops;kref refcount;uint64_t flags=0,seqno=0,context=0;list_head cb_list;ktime_t timestamp=0;int error=0; };
+static void dma_fence_release(kref *) { assert(false && "fixture primary fence ownership was lost"); }
+static ktime_t ktime_get() { return static_cast<ktime_t>(mach_absolute_time()); }
+int dma_fence_signal_locked(dma_fence *);
+bool dma_fence_is_signaled(dma_fence *);
+dma_fence *dma_fence_get(dma_fence *);
+void dma_fence_put(dma_fence *);
+static dma_fence *dma_fence_get_stub() { assert(false && "timeline stub is outside ordinary-fence test scope");return nullptr; }
+static int dma_fence_chain_find_seqno(dma_fence **f,uint64_t point) { assert(*f && point==0);return 0; }
+#define rcu_dereference(p) READ_ONCE(p)
+#define rcu_access_pointer(p) READ_ONCE(p)
+#define rcu_pointer_handoff(p) (p)
+#define rcu_dereference_protected(p,c) READ_ONCE(p)
+#define lockdep_assert_held(p) do {} while(0)
+#define lockdep_assert_none_held_once() do {} while(0)
+#define might_sleep() assert(irq_enabled && !held_spins)
+#define trace_dma_fence_signaled(f) do {} while(0)
+#define GEM_BUG_ON(v) assert(!(v))
+#define GEM_WARN_ON(v) (v)
+#define unlikely(v) (v)
+#define likely(v) (v)
+#define __maybe_unused
+#define BIT(n) (1U<<(n))
+#define REG_BIT(n) BIT(n)
+#define GENMASK(h,l) ((~0U<<(l))&(~0U>>(31-(h))))
+/* ACTUAL_ENGINE_IRQ_DEFINES */
+using intel_wakeref_t=void *;
+struct intel_breadcrumbs;
+struct intel_engine_cs;
+struct i915_request;
+struct intel_timeline {};
+struct intel_context { spinlock_t signal_lock;list_head signal_link,signals;intel_timeline *timeline=nullptr;std::atomic<unsigned> refs{1}; };
+struct tasklet_boundary { std::atomic<unsigned> queued{0}; };
+struct engine_scheduler { void (*retire_inflight_request_prio)(i915_request *)=nullptr;tasklet_boundary tasklet; };
+struct intel_engine_cs {
+    intel_breadcrumbs *breadcrumbs;engine_scheduler *sched_engine;void *gt;
+    void (*irq_handler)(intel_engine_cs *,u16);
+    struct {u32 error_interrupt=0,yield=0;int timer=0;} execlists;
+};
+struct i915_request { dma_fence fence;spinlock_t lock;intel_context *context;intel_engine_cs *engine;list_head signal_link;llist_node signal_node;const u32 *hwsp_seqno;std::atomic<unsigned> refs{1}; };
+struct intel_breadcrumbs {
+    atomic_t active{1};spinlock_t signalers_lock;list_head signalers;llist_head signaled_requests;
+    atomic_t signaler_active{0};spinlock_t irq_lock;struct irq_work irq_work;
+    unsigned irq_enabled=0;intel_wakeref_t irq_armed=nullptr;intel_engine_cs *irq_engine;
+    bool (*irq_enable)(intel_breadcrumbs *);void (*irq_disable)(intel_breadcrumbs *);
+};
+static void intel_context_get(intel_context *c) { assert(c->refs.fetch_add(1)); }
+static void intel_context_put(intel_context *c) { assert(c->refs.fetch_sub(1)>1); }
+static void i915_request_get(i915_request *r) { assert(r->refs.fetch_add(1)); }
+static void i915_request_put(i915_request *r) { assert(r->refs.fetch_sub(1)>1); }
+static intel_wakeref_t intel_gt_pm_get_if_awake(void *p) { assert(p);return p; }
+static void intel_gt_pm_put_async(void *p,intel_wakeref_t token) { assert(p==token); }
+static bool intel_timeline_is_last(intel_timeline *,i915_request *) { return true; }
+static void intel_engine_add_retire(intel_engine_cs *,intel_timeline *) {}
+static bool signal_pending(task_struct *t) { return t->saved_signal!=0; }
+#define set_current_state(s) set_task_state(current,(s))
+#define __set_current_state(s) set_task_state(current,(s))
+#define schedule_timeout(t) linux_schedule_timeout(t)
+#define wake_up_process(t) wake_up_task((t),TASK_NORMAL)
+#define DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL 1U
+#define DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT 2U
+#define DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE 4U
+#define GFP_KERNEL 0
+static std::atomic<unsigned> wait_allocations{0};
+static thread_local unsigned wait_allocation_index=0,wait_fail_allocation=0;
+static void *completion_alloc(size_t n,size_t size)
+{
+    if(++wait_allocation_index==wait_fail_allocation)return nullptr;
+    void *p=std::calloc(n,size);if(p)++wait_allocations;return p;
+}
+static void completion_free(void *p) { if(p){assert(wait_allocations);--wait_allocations;std::free(p);} }
+#define kmalloc_array(n,s,flags) completion_alloc((n),(s))
+#define kcalloc(n,s,flags) completion_alloc((n),(s))
+#define kfree(p) completion_free(p)
+static int copy_from_user(void *out,const void *in,size_t n) { if(!in)return 1;std::memcpy(out,in,n);return 0; }
+struct drm_syncobj { spinlock_t lock;dma_fence *fence;list_head cb_list; };
+static void syncobj_wait_syncobj_func(drm_syncobj *,struct syncobj_wait_entry *);
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4244 4456) /* driver uses low-32 seqno and nested fence locals */
+#endif
+/* ACTUAL_COMPLETION_CHAIN */
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+struct intel_gt;
+struct irq_driver_boundary { struct intel_gt *media_gt=nullptr; };
+struct intel_gt { irq_driver_boundary *i915;intel_engine_cs *engine_class[MAX_ENGINE_CLASS+1][MAX_ENGINE_INSTANCE+1]{}; };
+static std::atomic<unsigned> ignored_irq_warnings{0};
+#define WARN_ONCE(...) (++ignored_irq_warnings)
+#define fallthrough [[fallthrough]]
+#define GSC0 0
+#define HAS_ENGINE(gt,id) (false)
+static void gen11_other_irq_handler(intel_gt *,u8,u16) { ++ignored_irq_warnings; }
+enum { RING_EIR=0,RING_EMR=1,RING_EXECLIST_STATUS_HI=2 };
+static u32 engine_read_boundary(intel_engine_cs *,int) { return 0; }
+static void engine_write_boundary(intel_engine_cs *,int,u32) {}
+#define ENGINE_READ(e,r) engine_read_boundary((e),(r))
+#define ENGINE_READ_FW(e,r) engine_read_boundary((e),(r))
+#define ENGINE_WRITE(e,r,v) engine_write_boundary((e),(r),(v))
+#define ENGINE_TRACE(...) do {} while(0)
+static int del_timer(int *t) { int old=*t;*t=0;return old; }
+static void tasklet_hi_schedule(tasklet_boundary *t) { ++t->queued; }
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4244) /* driver masks identity class/instance into u8 */
+#endif
+/* ACTUAL_ENGINE_IRQ_DISPATCH */
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+static bool enable_breadcrumb(dma_fence *f) { return i915_request_enable_breadcrumb(container_of(f,i915_request,fence)); }
+static const dma_fence_ops completion_ops{enable_breadcrumb,nullptr,nullptr};
+static bool hardware_irq_enable(intel_breadcrumbs *) { return true; }
+static void hardware_irq_disable(intel_breadcrumbs *) {}
+static std::atomic<unsigned> irq_runs{0};
+static void counted_breadcrumb(irq_work *w) { ++irq_runs;signal_irq_work(w); }
+struct Fixture {
+    taskqueue *queue;
+    workqueue_model wq;
+    std::thread worker;
+    engine_scheduler scheduler{};
+    intel_engine_cs engine{};
+    irq_driver_boundary irq_driver{};
+    intel_gt gt{};
+    intel_breadcrumbs bread{};
+    intel_context context{};
+    i915_request request{};
+    drm_syncobj sync{};
+    u32 hwsp=0;
+    explicit Fixture(uint32_t target=17)
+    {
+        queue=new taskqueue{};mtx_init(&queue->tq_mutex);STAILQ_INIT(&queue->tq_queue);
+        queue->tq_alive=1;queue->tq_tcount=1;queue->tq_enqueue=taskqueue_thread_enqueue;
+        queue->tq_context=&queue;wq.taskqueue=queue;system_wq=&wq;
+        engine.breadcrumbs=&bread;engine.sched_engine=&scheduler;engine.gt=&engine;
+        engine.irq_handler=execlists_irq_handler;gt.i915=&irq_driver;gt.engine_class[RENDER_CLASS][0]=&engine;
+        mtx_init(&bread.signalers_lock);mtx_init(&bread.irq_lock);INIT_LIST_HEAD(&bread.signalers);
+        bread.irq_engine=&engine;bread.irq_enable=hardware_irq_enable;bread.irq_disable=hardware_irq_disable;
+        init_irq_work(&bread.irq_work,counted_breadcrumb);
+        mtx_init(&context.signal_lock);INIT_LIST_HEAD(&context.signals);INIT_LIST_HEAD(&context.signal_link);
+        mtx_init(&request.lock);dma_fence_init(&request.fence,&completion_ops,&request.lock,1,target);
+        request.context=&context;request.engine=&engine;request.hwsp_seqno=&hwsp;INIT_LIST_HEAD(&request.signal_link);
+        set_bit(I915_FENCE_FLAG_ACTIVE,&request.fence.flags);
+        mtx_init(&sync.lock);sync.fence=&request.fence;INIT_LIST_HEAD(&sync.cb_list);
+        worker=std::thread([&] {cpu_id=13;taskqueue_thread_loop(queue,0);});
+    }
+    void hardware_complete(uint32_t value)
+    {
+        WRITE_ONCE(hwsp,value);gen11_gt_identity_handler(&gt,(RENDER_CLASS<<16)|GT_RENDER_USER_INTERRUPT);
+    }
+    int64_t wait(int64_t ticks,uint32_t flags=0)
+    {
+        drm_syncobj *s[]={&sync};uint32_t index=UINT32_MAX;
+        int64_t result=drm_syncobj_array_wait_timeout(s,nullptr,1,flags,ticks,&index,nullptr);
+        if(result>0 && !(flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL))assert(index==0);return result;
+    }
+    void cleanup(bool completed)
+    {
+        irq_work_sync(&bread.irq_work);
+        if(!completed && test_bit(I915_FENCE_FLAG_SIGNAL,&request.fence.flags)) {
+            // Producers are quiesced; finish the hardware model to drain the
+            // real driver reference, never to turn a failed wait into a pass.
+            hardware_complete(static_cast<uint32_t>(request.fence.seqno));irq_work_sync(&bread.irq_work);
+        }
+        bread.active=0;irq_work_queue(&bread.irq_work);irq_work_sync(&bread.irq_work);
+        assert(request.refs==1 && request.fence.refcount.refs==1 && context.refs==1);
+        assert(!bread.signaler_active && !bread.irq_armed && list_empty(&context.signals) && list_empty(&bread.signalers));
+        taskqueue_free(queue);worker.join();
+        mtx_destroy(&sync.lock);mtx_destroy(&request.lock);mtx_destroy(&context.signal_lock);
+        mtx_destroy(&bread.irq_lock);mtx_destroy(&bread.signalers_lock);system_wq=nullptr;
+        assert(!wait_allocations);std::lock_guard<std::mutex> g(wait_lock);assert(waiters.empty());
+    }
+};
+template<class F> static void until(F f)
+{
+    const auto end=Clock::now()+std::chrono::seconds(3);
+    while(!f()){assert(Clock::now()<end);std::this_thread::yield();}
+}
+static bool task_wait_registered(task_struct *t)
+{
+    std::lock_guard<std::mutex> g(wait_lock);
+    return std::any_of(waiters.begin(),waiters.end(),[&](Wait *w){return w->channel==t && w->result==THREAD_WAITING;});
+}
+static void wake_before_block(Fixture &f,uint32_t seqno)
+{
+    // A native wait is already registered at this point. Trigger the other
+    // worker and observe its wake; do not nest another kernel-style wait on
+    // this same thread while it already owns a Mach wait registration.
+    f.hardware_complete(seqno);
+    until([] {std::lock_guard<std::mutex> g(wait_lock);return wait_record.result==THREAD_AWAKENED;});
+}
+static void after_sleep_completion()
+{
+    Fixture f;task_struct *target=current;unsigned before=irq_runs;
+    std::thread producer([&]{cpu_id=7;until([&]{return task_wait_registered(target);});f.hardware_complete(17);});
+    auto result=f.wait(1000);producer.join();assert(result>0 && irq_runs>before);
+    assert(test_bit(DMA_FENCE_FLAG_SIGNALED_BIT,&f.request.fence.flags));f.cleanup(true);
+}
+static void early_completion()
+{
+    Fixture f;before_native_block=[&]{wake_before_block(f,17);};
+    assert(f.wait(1000)>0);assert(!before_native_block);f.cleanup(true);
+}
+static void no_premature_completion()
+{
+    Fixture f;f.hardware_complete(16);irq_work_sync(&f.bread.irq_work);
+    assert(f.wait(8)==-ETIME);assert(!test_bit(DMA_FENCE_FLAG_SIGNALED_BIT,&f.request.fence.flags));
+    assert(!wait_allocations);f.cleanup(false);
+}
+static void status_wraparound()
+{
+    Fixture f(0xfffffffeU);WRITE_ONCE(f.hwsp,0xfffffff0U);
+    before_native_block=[&]{wake_before_block(f,1);};
+    assert(f.wait(1000)>0);f.cleanup(true);
+}
+static void completed_before_wait()
+{
+    Fixture f;f.hardware_complete(17);irq_work_sync(&f.bread.irq_work);
+    assert(f.wait(1000)>0);f.cleanup(true);
+}
+static void interrupted_wait()
+{
+    Fixture f;immediate_result=THREAD_INTERRUPTED;
+    auto result=f.wait(1000);immediate_result=THREAD_WAITING;current->saved_signal=0;
+    assert(result==-ERESTARTSYS);assert(!test_bit(DMA_FENCE_FLAG_SIGNALED_BIT,&f.request.fence.flags));f.cleanup(false);
+}
+static void engine_irq_selection()
+{
+    Fixture f;task_struct *target=current;
+    std::thread producer([&] {
+        cpu_id=7;until([&]{return task_wait_registered(target);});
+        irq_work_sync(&f.bread.irq_work);
+        WRITE_ONCE(f.hwsp,17U);
+        gen11_gt_identity_handler(&f.gt,(RENDER_CLASS<<16)|(1U<<20)|GT_RENDER_USER_INTERRUPT);
+        gen11_gt_identity_handler(&f.gt,(RENDER_CLASS<<16));
+        irq_work_sync(&f.bread.irq_work);
+        assert(!test_bit(DMA_FENCE_FLAG_SIGNALED_BIT,&f.request.fence.flags));
+        gen11_gt_identity_handler(&f.gt,(RENDER_CLASS<<16)|GT_RENDER_USER_INTERRUPT);
+    });
+    assert(f.wait(1000)>0);producer.join();f.cleanup(true);
+}
+static void repeated_irq_delivery()
+{
+    Fixture f;task_struct *target=current;
+    std::thread producer([&] {
+        cpu_id=7;until([&]{return task_wait_registered(target);});
+        for(unsigned n=0;n<12;++n)f.hardware_complete(17);
+    });
+    assert(f.wait(1000)>0);producer.join();irq_work_sync(&f.bread.irq_work);
+    assert(f.request.refs==1 && f.context.refs==1 && f.request.fence.refcount.refs==1);f.cleanup(true);
+}
+static void sequential_requests_same_context()
+{
+    Fixture f;task_struct *target=current;
+    for(uint32_t seqno=17;seqno<20;++seqno) {
+        if(seqno!=17) {
+            irq_work_sync(&f.bread.irq_work);assert(f.request.refs==1 && f.request.fence.refcount.refs==1);
+            dma_fence_init(&f.request.fence,&completion_ops,&f.request.lock,1,seqno);
+            set_bit(I915_FENCE_FLAG_ACTIVE,&f.request.fence.flags);
+        }
+        std::thread producer([&] {cpu_id=7;until([&]{return task_wait_registered(target);});f.hardware_complete(seqno);});
+        assert(f.wait(1000)>0);producer.join();irq_work_sync(&f.bread.irq_work);
+        assert(f.context.refs==1 && list_empty(&f.context.signals) && f.request.fence.refcount.refs==1);
+    }
+    f.cleanup(true);
+}
+static void wait_all_single_fence()
+{
+    Fixture f;task_struct *target=current;
+    std::thread producer([&]{cpu_id=7;until([&]{return task_wait_registered(target);});f.hardware_complete(17);});
+    assert(f.wait(1000,DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL)>0);producer.join();f.cleanup(true);
+}
+static void wait_allocation_failures()
+{
+    for(unsigned fail:{1U,2U}) {
+        Fixture f;wait_allocation_index=0;wait_fail_allocation=fail;
+        assert(f.wait(1000)==-ENOMEM);wait_fail_allocation=0;
+        assert(!wait_allocations && !test_bit(DMA_FENCE_FLAG_SIGNALED_BIT,&f.request.fence.flags));f.cleanup(false);
+    }
+}
+int main()
+{
+    std::setvbuf(stdout,nullptr,_IONBF,0);assert(nmx_sleepq_init()==0);
+    const std::pair<const char *,void(*)()> cases[]={
+        {"HWSP-irqwork-queue-breadcrumb-fence-syncobj-native-sleep",after_sleep_completion},
+        {"registered-before-block completion",early_completion},
+        {"older-HWSP cannot signal; real timeout and cleanup",no_premature_completion},
+        {"HWSP sequence wraparound",status_wraparound},
+        {"completion before callback attachment",completed_before_wait},
+        {"native interruption preserves incomplete fence",interrupted_wait},
+        {"actual GT identity and execlists IRQ engine selection",engine_irq_selection},
+        {"repeated IRQ cannot duplicate callback/ownership",repeated_irq_delivery},
+        {"sequential requests reuse context with balanced references",sequential_requests_same_context},
+        {"WAIT_ALL ordinary fence completion",wait_all_single_fence},
+        {"syncobj wait allocation failures release prior storage",wait_allocation_failures}};
+    for(auto &test:cases){test.second();std::printf("PASS %s\n",test.first);}
+    nmx_sleepq_fini();
+    std::puts("Actual queue/irqwork/i915-breadcrumb/fence/syncobj/Linux/native-sleep contracts passed; hardware/native primitive/RCU storage boundaries modeled; no GPU executed.");
+}

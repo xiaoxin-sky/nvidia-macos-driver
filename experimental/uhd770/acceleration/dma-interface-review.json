@@ -35,7 +35,7 @@
   ],
   "new_hardware_test_requested": false,
   "pte_consumer": {
-    "status": "joined DMA-to-PTE source fixture host-passed; native macOS/ASan/UBSan pending",
+    "status": "native macOS/ASan/UBSan/kernel/KC passed; device visibility remains unverified",
     "actual_source": "gen12_pte_encode, gen8_ppgtt_insert_pte and gen8_ppgtt_insert_huge, with pinned masks/index macros; fed by actual Linux/BSD/native DMA mapping output",
     "cases": "2 mapping modes x 4 ADL PAT indexes x 8 placement/page-size cases, plus 3 encoder-flag cases; all previously verified DMA failure/rollback groups retained",
     "covered": [
@@ -61,7 +61,15 @@
     "limits": "Flat S/G linkage, page-table hierarchy/allocation and cache flush services are models. Native GPU VA allocation, root PDE programming, TLB invalidation, actual CPU/GPU cache coherence and device execution are not proved. Encoder RO/LM flags are interface tests, not advertised ADL hardware features.",
     "hardware_executed": false,
     "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39735584845",
-    "native_source": "98ce2cb8640919a19678c985854767f0ea25171d"
+    "native_source": "98ce2cb8640919a19678c985854767f0ea25171d",
+    "native_evidence": {
+      "source": "98ce2cb8640919a19678c985854767f0ea25171d",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39735584845",
+      "artifact_id": 12407866922,
+      "sha256": "5920664ac58d7b85a5cfe0c94ccbd01de45a52663161692e070f1985ad38860e",
+      "result": "Actual Linux/BSD/native DMA -> Gen12 PTE consumer tests passed on macOS normally and under ASan/UBSan; all 1250 kernel units/native KC preflight passed",
+      "hardware_executed": false
+    }
   },
   "source_trace_update": "i915 page-table backing alloc_pt_dma -> i915_gem_object_create_internal -> i915_gem_object_get_pages_internal -> i915_gem_gtt_prepare_pages uses the same S/G DMA path, rather than necessarily the separate scalar pctrie mapping path. Root allocation/map_pt_dma and actual GPU page-table visibility remain review requirements."
 }

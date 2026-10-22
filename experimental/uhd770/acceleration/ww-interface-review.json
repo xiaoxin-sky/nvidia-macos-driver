@@ -2,7 +2,7 @@
   "date": "2026-10-22",
   "scope": "WW reservation progress and native CV/locking interfaces used by GEM submission",
   "verification": {
-    "status": "implemented and 25 joined host cases passed; native macOS pending",
+    "status": "25 joined native macOS/TSan/ASan/UBSan/kernel/KC checks passed; GPU execution absent",
     "baseline": "Actual legacy pairwise WW core with otherwise-current owner/context helpers fails the three-thread cycle and needs test-only interruption to terminate. This is a software regression, not a reproduction of the target GPU panic.",
     "baseline_log": "ww-pairwise-test.cpp\nPASS nested-native-contention\nPASS BH-migration-and-critical\nPASS true-critical-guard\nPASS actual-CSB-uncore-fallback\nPASS parallel-native-owner\nPASS recursion-and-spin\nPASS BH-bounds\nPASS Linux-mutex-owner-probes\nPASS Linux-rwsem-contention\nPASS native-RW-contention\nPASS exclusive-sleep-recursion\nPASS downgrade-shared-sleep\nPASS other-owner-trylocks\nPASS IDR-thread-cache-migration\nPASS IDR-partial-prefill\nPASS IDR-parallel-preloads\nPASS WW-context-lifetime\nPASS WW-native-CV-handoff\nPASS WW-native-CV-early-wake\nPASS WW-interrupted-wait\nPASS WW-cycle-two\nFAIL WW-cycle-three: WW cycle required forced cancellation instead of returning EDEADLK\n",
     "baseline_core_sha256": "5c056ccfe78747ec37f5392e10485f814ea29d768f94de4477385b77cc062133",
@@ -20,7 +20,15 @@
     "hardware_executed": false,
     "new_hardware_test_requested": false,
     "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928",
-    "native_source": "6cdabda3b73e87d40fef91e897f1e831e953b4b5"
+    "native_source": "6cdabda3b73e87d40fef91e897f1e831e953b4b5",
+    "native_evidence": {
+      "source": "6cdabda3b73e87d40fef91e897f1e831e953b4b5",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39734727928",
+      "artifact_id": 12407512045,
+      "sha256": "d8521c074b635a599d82274f918073070d802b979dec8feeca542bf0773d8553",
+      "result": "25 actual Linux/native WW/CV/IDR/BH/critical/CSB groups passed on macOS normally, under TSan and ASan/UBSan; all 1250 kernel units and native KC preflight passed",
+      "hardware_executed": false
+    }
   },
   "next": [
     "Native compiler/TSan/memory/KC verification",
