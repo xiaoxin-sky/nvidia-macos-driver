@@ -916,6 +916,41 @@
         "repair": "Annotate the fixture-only shared state declaration with [[maybe_unused]], preserving its values and all production code; regenerated 11 host cases and targeted clang check passed. Native retry pending",
         "hardware_executed": false
       }
+    },
+    "superseded_note": "the native_tasklet and pristine_patch_validation entries above are the earlier snapshot for f58bce1; the fields below are the current measurement and the patch file counts grew as later batches added files",
+    "current": {
+      "kernel_code_source": "b5bb28c96aeaef0016f59a3213240eb58d3cde99",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39752294845",
+      "artifact_id": 12416011998,
+      "artifact_sha256": "c514ca1539d8dce5701f7d02b15d4e261518626bee2e0196d52bf705349a145d",
+      "fixtures_native": {
+        "ring space/wrap": "8 cases normally and 8 under ASan/UBSan",
+        "vmmap registration/rollback": "11 cases normally and 11 under ASan/UBSan",
+        "joined completion chain": "11 cases normally, under TSan and under ASan/UBSan",
+        "kernel build and KC preflight": "passed in the same run"
+      },
+      "patch_validation_remeasured": {
+        "xkpi": {
+          "patched_files": 60,
+          "pristine_apply": "passed",
+          "identical_to_reviewed_tree": 60
+        },
+        "drm-kmod": {
+          "patched_files": 13,
+          "pristine_apply": "passed",
+          "identical_to_reviewed_tree": 13
+        },
+        "freebsd": {
+          "patched_files": 6,
+          "pristine_apply": "passed",
+          "identical_to_reviewed_tree": 6
+        },
+        "method": "each patch applied to an LF mirror of the pinned tree and every touched file compared with the reviewed tree"
+      },
+      "software_gate": "experimental/uhd770/acceleration/software-gate.json",
+      "delivery": "experimental/uhd770/acceleration/delivery-r16.json (package staged on the USB, not run)",
+      "hardware_executed": false,
+      "new_user_reboot_requested": false
     }
   }
 }
