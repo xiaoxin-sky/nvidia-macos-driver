@@ -207,8 +207,8 @@
     {
       "id": "submission",
       "route": "ANV batch construction -> EXECBUFFER2 -> i915 request/engine scheduling -> real device",
-      "status": "NOT FULLY REVIEWED",
-      "remaining": "nested ioctl data, object address/length/pinning and fence lifetime; actual execution requires UHD770",
+      "status": "MMIO MAPPING, ACCESS-WIDTH, BARRIER AND EXECLISTS SUBMIT-REGISTER EDGES VERIFIED IN SOURCE; ring space, GGTT/HWSP addressing and GPU consumption still unverified",
+      "remaining": "Still open from the edge list: intel_ring_begin space/wrap for the RCS0 batch; agreement between the GGTT vma offset and the HWSP offset the completion path reads (T3); forcewake ACK settling on the target; whether the GPU consumes the ELSQ entry at all. Actual execution still requires UHD770.",
       "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json",
       "WW_reservation_progress": {
         "status": "25 joined host cases and native macOS/TSan/ASan/kernel/KC passed; actual GPU execution not proved",
@@ -238,7 +238,17 @@
           "hardware_executed": false
         }
       },
-      "PTE_consumer_review": "Actual mapped DMA -> Gen12 encoding and 4K/64K/2M insert consumers passed native macOS/ASan/UBSan; allocation, parent/root programming and actual GPU execution remain separate."
+      "PTE_consumer_review": "Actual mapped DMA -> Gen12 encoding and 4K/64K/2M insert consumers passed native macOS/ASan/UBSan; allocation, parent/root programming and actual GPU execution remain separate.",
+      "verified_edges": [
+        "mmio-mapping-cache (ioremap -> VM_MEMATTR_DEVICE -> NMX_CACHE_UC -> kIOMapInhibitCache)",
+        "mmio-access-semantics (volatile 32-bit readl/writel, no implicit fence)",
+        "barrier-semantics (wmb = sfence, mb = mfence, mmiowb = compiler barrier, as Linux x86)",
+        "elsq-submit-registers (RING_EXECLIST_SQ_CONTENTS pair then EL_CTRL_LOAD, forcewake domain from the control register)",
+        "context-image-visibility-before-submit (wmb() before the uncached descriptor; WB image relies on LLC)",
+        "execbuf-fence-array (VkFence path is I915_EXEC_FENCE_ARRAY, not the timeline extension)",
+        "request-creation-order (in fences attach to the first submitted batch order)"
+      ],
+      "submission_edge_review": "experimental/uhd770/acceleration/submission-interface-review.json"
     },
     {
       "id": "completion",

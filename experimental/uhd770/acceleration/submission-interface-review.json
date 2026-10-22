@@ -1,0 +1,123 @@
+{
+  "date": "2026-10-22",
+  "scope": "Submission edges from ANV execbuffer to the execlists submit registers on Alder Lake-S 8086:4680; source and host-fixture evidence only, never GPU execution",
+  "pins": {
+    "mesa": "bffd91947efc1932da99aca69fc540d6d4201b0c",
+    "drm": "c16de0f9fa84f70b9551f69fde837a7f3a73c0e9",
+    "port": "7222618727449426631d13d0654f8347634717e9"
+  },
+  "how_to_read": "Each edge names the caller, the callee and the native code that actually runs. classification is one of: verified-source (implementation read and consistent), fixture-covered (executed by a host fixture, model primitives noted), defect-pending (a concrete defect that still needs a fix), unverified (implementation not read to the end or only the target can answer).",
+  "verified_edges": [
+    {
+      "id": "mmio-mapping-cache",
+      "edge": "i915 register mapping -> IOKit kernel mapping cache attribute",
+      "anchors": [
+        "drm: drivers/gpu/drm/i915/gt/intel_uncore.c:2361 uncore->regs = ioremap(phys_addr, mmio_size)",
+        "freebsd: sys/compat/linuxkpi/common/include/linux/io.h:424-425 ioremap() -> _ioremap_attr(addr, size, VM_MEMATTR_DEVICE)",
+        "port: bsdcompat/include/machine/vm.h:3,10 VM_MEMATTR_UNCACHEABLE 0x00 and VM_MEMATTR_DEVICE == VM_MEMATTR_UNCACHEABLE",
+        "port: bsdcompat/src/nmx_page.c:654-669 pmap_mapdev_attr -> nmx_xnu_map_phys(pa, size, mode, &d->handle)",
+        "port: bsdcompat/include/nmx_xnu.h:17 NMX_CACHE_UC 0x00",
+        "port: xnu/nmx_vm.cpp:21-28 cache_option(): NMX_CACHE_UC -> kIOMapInhibitCache"
+      ],
+      "contract": "This port redefines the FreeBSD VM_MEMATTR_* values as x86 PAT encodings, so VM_MEMATTR_UNCACHEABLE(0x00)/WRITE_COMBINING(0x01)/WRITE_THROUGH(0x04)/WRITE_BACK(0x06) equal NMX_CACHE_UC/WC/WT/WB. Plain ioremap() therefore lands on VM_MEMATTR_DEVICE == UNCACHEABLE == NMX_CACHE_UC and the kernel mapping is created with kIOMapInhibitCache. The enumerations are not silently mismatched, and MMIO is not a write-back mapping.",
+      "classification": "verified-source"
+    },
+    {
+      "id": "mmio-access-semantics",
+      "edge": "readl()/writel() used for ELSP, forcewake and CSB registers",
+      "anchors": [
+        "freebsd: sys/compat/linuxkpi/common/include/linux/io.h:184-205 readl = le32toh(__raw_readl(addr)), writel = __raw_writel(htole32(v), addr)",
+        "freebsd: sys/compat/linuxkpi/common/include/linux/io.h:105-116 __raw_readl/__raw_writel are volatile 32-bit loads/stores"
+      ],
+      "contract": "On x86 the le32toh/htole32 pair is the identity, so readl/writel are plain 32-bit uncached loads/stores with the register width the hardware expects, and neither carries an implicit fence. That matches upstream Linux x86, where drivers must order explicitly.",
+      "classification": "verified-source"
+    },
+    {
+      "id": "barrier-semantics",
+      "edge": "wmb()/mb()/rmb()/mmiowb()/bus_space_barrier as compiled on this port",
+      "anchors": [
+        "port: bsdcompat/include/machine/atomic.h:73-75 mb = mfence, rmb = lfence, wmb = sfence",
+        "freebsd: sys/compat/linuxkpi/common/include/linux/io.h:134 mmiowb() = barrier()",
+        "port: bsdcompat/include/machine/bus.h:17 bus_space_barrier = compiler barrier"
+      ],
+      "contract": "wmb() is SFENCE, which serialises prior write-back/write-combining/write-through stores before a later uncached register write; mb() is MFENCE. mmiowb() and bus_space_barrier are compiler barriers, exactly as Linux x86 defines mmiowb(). No barrier used by the submit path is weaker than its upstream x86 counterpart.",
+      "classification": "verified-source"
+    },
+    {
+      "id": "elsq-submit-registers",
+      "edge": "execlists context descriptor -> RING_EXECLIST_SQ_CONTENTS / RING_EXECLIST_CONTROL",
+      "anchors": [
+        "drm: drivers/gpu/drm/i915/gt/intel_execlists_submission.c:3554-3566 HAS_LOGICAL_RING_ELSQ selects submit_reg = RING_EXECLIST_SQ_CONTENTS and ctrl_reg = RING_EXECLIST_CONTROL, and derives engine->fw_domain from the control register write domain",
+        "drm: gt/intel_execlists_submission.c:719-728 write_desc: with ctrl_reg, low word at submit_reg + port*2 and high word at +1; without it, high word then low word to submit_reg",
+        "drm: gt/intel_execlists_submission.c:901-935 execlists_submit_ports writes one descriptor per pending port and then writel(EL_CTRL_LOAD, ctrl_reg)"
+      ],
+      "contract": "Gen12/ADL has ELSQ, so submission is two 32-bit writes per port into the submit-queue contents followed by an explicit EL_CTRL_LOAD control write, under the forcewake domain that write needs (taken at gt/intel_execlists_submission.c:513-514). On this port both register types are uncached mappings, so the descriptor pair and the load write reach the device in program order without an extra fence.",
+      "classification": "verified-source"
+    },
+    {
+      "id": "context-image-visibility-before-submit",
+      "edge": "context image store -> wmb() -> uncached ELSP descriptor write",
+      "anchors": [
+        "drm: gt/intel_execlists_submission.c:700-713 writes ce->lrc_reg_state[CTX_RING_TAIL] and calls wmb() with a comment that the WC context write may not reach the HW before the UC register write",
+        "port: machine/atomic.h:75 wmb() = sfence",
+        "port: bsdcompat/src/nmx_page.c:687-692 the port records cache attributes on pages and states system memory stays cached in the kernel's own view"
+      ],
+      "contract": "SFENCE flushes write-combining buffers and orders earlier stores, so the context image is published before the descriptor that names it. The remaining dependency is that a write-back context image is actually coherent to the GPU, which here rests on the shared LLC of an integrated part, not on PCIe snooping; that is a platform property this review cannot prove in software.",
+      "classification": "verified-source; the coherence half is target-only"
+    },
+    {
+      "id": "execbuf-fence-array",
+      "edge": "ANV syncobjs -> EXECBUFFER2 fence array -> i915 in-fence waits",
+      "anchors": [
+        "mesa: src/intel/vulkan/i915/anv_batch_chain.c:565-580 setup_execbuf_fence_params: with timeline values it adds DRM_I915_GEM_EXECBUFFER_EXT_TIMELINE_FENCES; otherwise it sets I915_EXEC_FENCE_ARRAY with num_cliprects = syncobj_count and cliprects_ptr = syncobjs",
+        "drm: gem/i915_gem_execbuffer.c:2947 add_fence_array parses the array only when I915_EXEC_FENCE_ARRAY is set",
+        "drm: gem/i915_gem_execbuffer.c:3258-3301 eb_fences_add awaits the context syncobj, the submit fence and await_fence_array(rq), then creates the out fence with sync_file_create"
+      ],
+      "contract": "A VkFence submission has no timeline values, so it takes the fence-array path: a packed array of drm_i915_exec_fence entries, awaited against one request before submission. The timeline extension is not used on the probe's path, which is why the completion fixture's ordinary-syncobj case is the relevant one.",
+      "classification": "verified-source"
+    },
+    {
+      "id": "request-creation-order",
+      "edge": "execbuf request creation and in-fence attachment order",
+      "anchors": [
+        "drm: gem/i915_gem_execbuffer.c:3320-3364 eb_requests_create creates one request per batch order and attaches the in fences only to the request whose batch order is the first submitted (i + 1 == eb->num_batches)",
+        "drm: gem/i915_gem_execbuffer.c:3142 eb_requests_add and :3510 the error path that adds requests back"
+      ],
+      "contract": "For a single-batch submit the in fences are attached to the only request, so a wait registered there gates the same request the ELSP descriptor names. The multi-batch case relies on implicit ordering between the batches rather than on repeated fence attachment, which is i915's design and unchanged by the port.",
+      "classification": "verified-source"
+    }
+  ],
+  "unresolved_edges": [
+    {
+      "id": "forcewake-ack",
+      "edge": "intel_uncore_forcewake_get/put ACK polling around the EL_CTRL_LOAD write",
+      "why": "The ACK registers and their settling time are hardware behaviour. Software only shows the wait is bounded and uses the port's monotonic clock; whether the ACK actually asserts on this part cannot be shown from source.",
+      "proves": "target run with a bounded forcewake wait and CSB progress"
+    },
+    {
+      "id": "ring-space-and-wrap",
+      "edge": "intel_ring_begin/ring space accounting for the RCS0 batch, including wrap",
+      "why": "Not read to the end for this pinned i915 revision; the ring is a GEM internal object whose pages come through the same allocator reviewed for T2, but the wrap and tail arithmetic has not been traced against the port's page ordering.",
+      "proves": "source trace plus a host fixture over intel_ring_begin/advance/wrap"
+    },
+    {
+      "id": "ggtt-hwsp-address",
+      "edge": "HWSP and context GGTT offsets the descriptor names, versus the addresses the completion path reads",
+      "why": "Belongs to T3: the vma node offset, the GGTT PTE for that offset and the hwsp_offset used by the breadcrumb must agree. Not yet traced end to end.",
+      "proves": "source trace of i915_vma_pin/GGTT insert plus hwsp_offset, then a target run"
+    },
+    {
+      "id": "gpu-consumption",
+      "edge": "does the GPU actually consume the ELSQ entry and execute the batch",
+      "why": "Only observable on the target: CSB entries, breadcrumb seqno and the readback buffer.",
+      "proves": "target run with COMPUTE_READBACK_VERIFIED and exit 0"
+    }
+  ],
+  "cross_references": {
+    "completion_and_irq": "experimental/uhd770/acceleration/completion-interface-review.json",
+    "dma_and_page_tables": "experimental/uhd770/acceleration/dma-interface-review.json",
+    "mapping_registration": "experimental/uhd770/acceleration/dma-interface-review.json page_map_registration"
+  },
+  "hardware_executed": false,
+  "new_hardware_test_requested": false
+}

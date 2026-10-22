@@ -41,7 +41,7 @@
       "operation": "Real execbuffer submission",
       "caller": "anv_batch_chain.c:setup_async_execbuf/setup_execbuf_fence_params -> anv_gem_execbuffer_impl -> i915_gem_execbuf_ioctl",
       "kernel": "gem/i915_gem_execbuffer.c:i915_gem_execbuffer2_ioctl -> i915_gem_do_execbuffer -> context/engine/VMA selection -> request creation -> eb_submit -> eb_requests_add",
-      "finding": "Object arrays, softpin offsets, per-context engine index and internal syncobj/timeline extensions reach real request creation and submission code. Copy/dispatch transport has its separate native fixture. GPU VA binding, engine emission, IRQ and fence behavior are not yet fully reviewed or proved."
+      "finding": "Object arrays, softpin offsets, per-context engine index and internal syncobj/timeline extensions reach real request creation and submission code. Copy/dispatch transport has its separate native fixture. submission-interface-review.json now records seven source-verified edges (MMIO cache attribute, access width, barriers, ELSQ submit registers, context-image ordering, fence-array path, request/fence order); ring space, GGTT/HWSP address agreement, forcewake ACK and GPU consumption remain open."
     },
     {
       "operation": "Readback and process exit acceptance",
