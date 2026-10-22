@@ -258,6 +258,24 @@
         "conclusion: the -19 cannot be attributed to a current-code path from this evidence; either that build lacked the print or the refusal came from the devfs layer before nmx_cdev_open"
       ],
       "discriminator_for_the_next_run": "if a device open is refused again, the presence of the port's own 'NullMoth devfs: open ... error=' line says which callback refused it; its absence says the refusal happened before the port's open path"
+    },
+    "artifacts_to_bring_back": {
+      "always": [
+        "the whole newest UHD770MVP-session-reports.* folder from /Users/Shared, not single files inside it",
+        "the newest panic-*.txt if one exists, from the USB root",
+        "the two or three most recent opencore-*.txt from the USB root (about 256 KB each)"
+      ],
+      "why_the_usb_root_files_matter": "when the machine panics, the report's kernel-stream.txt can be almost empty: across the r14 report the 33 captured streams average 6 KB and several are only the 293-byte filter header, while the panic and OpenCore files on the USB root are written at the moment of the event and carry the backtrace. Bringing only the report folder would show that the run stopped without saying where",
+      "usb_notes_added": [
+        "F:\\UHD770-当前使用\\r16-取日志补充说明.txt (written for this round; explains what to bring back and what not to do)",
+        "F:\\00-先看这里.txt (first line now points at that note)"
+      ],
+      "do_not": [
+        "do not delete any existing panic-*, opencore-*, old package or old report on the USB",
+        "do not edit anything under the USB EFI directory",
+        "do not rerun the manual test in the same boot: the per-boot session lock refuses it"
+      ],
+      "efi_after_this_update": "22a185d96105258fc24b0d0ca842206dc36fc885fbb8b7d0559e58bf1ae2f6f9 (unchanged)"
     }
   }
 }
