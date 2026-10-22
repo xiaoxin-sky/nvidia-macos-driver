@@ -472,5 +472,34 @@
       "residual": "a human reading only the stdout text could be misled, so the instructions say explicitly that exit 0 is part of the criterion"
     },
     "correction_to_my_brief": "the brief asked about session_clock.cpp, which does not exist in the probe directory; the probe includes only vulkan.h and standard headers"
+  },
+  "record_self_audit": {
+    "date": "2026-10-22",
+    "what": "every hash this record states was recomputed from the file it names, to make sure the record has not drifted from the artifacts after the later edits",
+    "results": {
+      "package zip (local copy)": "matches",
+      "package zip (copy on the USB)": "matches",
+      "kernel artifact zip": "matches",
+      "userland artifact zip": "matches",
+      "metal artifact zip": "matches",
+      "NMXGPU binary inside the package": "matches",
+      "uhd770-compute-probe binary inside the package": "matches",
+      "boot EFI config digest": "matches the live file on the USB"
+    },
+    "conclusion": "the record and the delivered files agree; nothing was falsified by the later edits",
+    "hardware_executed": false
+  },
+  "capture_window_analysis": {
+    "question": "can the recorder stop before the test, and especially before the post-test observation that exists to catch a teardown panic",
+    "numbers": {
+      "recorder_window": "600 s, set at prepare (ProgramArguments duration) and restarted fresh when the manual test begins",
+      "coordinator_bound": "600 s for the whole selected-user coordinator",
+      "post_test_observation": "up to 180 s, ending early if the recorder has already finished",
+      "typical": "the readiness gate normally passes in seconds and the probes take tens of seconds, so a normal run finishes well inside the window"
+    },
+    "worst_case": "a 330 s readiness gate plus both probe deadlines plus the observation can reach the 600 s window, in which case the observation ends early and the report records observation_end=recorder_not_running rather than pretending it completed",
+    "backstop": "a panic still leaves the OpenCore panic file on the USB root, which is why the instructions ask for it, and the kernel stream can also be recovered from the dmesg snapshots that the collector writes while it runs",
+    "decision": "recorded, not changed: raising the window would mean rebuilding a verified package for a number, and the failure it would hide is already detectable in the report",
+    "hardware_executed": false
   }
 }
