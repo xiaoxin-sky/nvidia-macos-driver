@@ -48,7 +48,8 @@
           "Review WW contention/progress semantics separately from atomic owner access",
           "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
         ],
-        "hardware_executed": false
+        "hardware_executed": false,
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39730672410"
       }
     },
     {
@@ -111,7 +112,8 @@
           "Review WW contention/progress semantics separately from atomic owner access",
           "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
         ],
-        "hardware_executed": false
+        "hardware_executed": false,
+        "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39730672410"
       }
     },
     {
@@ -277,7 +279,7 @@
         "staged_match": "all patched source text identical after CRLF/LF normalization"
       }
     },
-    "current_native_ci_status": "Shared-lock/IDR repair not yet native-verified; prior DMA/clock/PCODE implementation passed native build",
+    "current_native_ci_status": "Shared-lock/IDR source 8fcf6fa run 39730672410 in progress at verified observation; no target execution proof",
     "new_user_test_requested": false,
     "usb_package_changed": false,
     "kernel_clock": {
@@ -354,7 +356,8 @@
         "Review WW contention/progress semantics separately from atomic owner access",
         "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
       ],
-      "hardware_executed": false
+      "hardware_executed": false,
+      "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39730672410"
     }
   }
 }

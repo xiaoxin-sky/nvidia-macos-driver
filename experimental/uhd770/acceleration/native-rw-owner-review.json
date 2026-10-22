@@ -30,5 +30,13 @@
       "GPU VA/PTE, actual completion IRQ/fence, managed-page cache aliases and target execution/cleanup still unverified"
     ],
     "hardware_executed": false
+  },
+  "native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39730672410",
+  "dependency_survey": {
+    "freebsd_pin": "7668705cb9837d4c3a6db9b3434b3a522220c8ea",
+    "complete_common_source": "D:/UHD770-driver-kit/build-audit/freebsd-native-interfaces/sys/compat/linuxkpi/common",
+    "owner_read_consumers": "Full common-source search identified mutex.h, ww_mutex.h and linux_lock.c; all owner-word reads in these paths now use sx_xholder and the native atomic helper.",
+    "migration_consumers": "Mandatory IDR preload migrated to thread-owned scoped state. Native critical/FPU exclusion is preserved; highmem uses the PMAP_HAS_DMAP fast path on this port. Scatterlist copy helpers still have per-CPU/direct-map assumptions and were not found on ordinary i915 compute caller paths; no broad compatibility claim is made.",
+    "WW_progress": "Existing WW source checks direct two-thread wait cycles. Its general contention/progress behavior needs a separate actual wait-graph review, not an inference from owner metadata tests."
   }
 }
