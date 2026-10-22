@@ -436,5 +436,41 @@
       "conclusion": "the shipped probe reports each dispatch's seed, each mismatching word with expected and actual values, and a per-iteration verified count, so a wrong result would come back diagnosable at word level rather than as a bare failure"
     },
     "limit": "this proves the artifacts contain the intended interfaces and messages; it does not prove they run"
+  },
+  "probe_review": {
+    "method": "a fourth independent reviewer read the probe, the shader, its build flags and the runner, and checked the Vulkan sequence item by item",
+    "verdict": "no definite bug: the sequence instance -> device -> host-visible buffer -> descriptors -> push constants -> pipeline -> barriers -> dispatch -> fence -> invalidate -> compare is spec-conformant",
+    "confirmed": [
+      "device creation enables no features and needs none, because the shader uses only core compute, storage buffers and push constants",
+      "the memory type is chosen by requiring HOST_VISIBLE, preferring HOST_COHERENT, and failing loudly if neither exists",
+      "the non-coherent path flushes before submit and invalidates after the fence, in the required order",
+      "descriptor bindings, push constant range and stage flags match the shader exactly",
+      "the dispatch covers ceil(count/64) groups and the shader bounds-checks the tail",
+      "every element of every iteration is compared, and each iteration poisons the output first, so an unexecuted dispatch cannot match",
+      "the CPU expectation and the shader are the same unsigned arithmetic term for term, with no undefined shift and no float",
+      "resource destruction order is correct and the only skipped teardown is on in-flight failure, which exits deliberately"
+    ],
+    "risks": {
+      "identity_gate": {
+        "what": "the probe requires deviceType INTEGRATED_GPU, driverID INTEL_OPEN_SOURCE_MESA and exactly one matching device, all self-reported metadata, and there is no override",
+        "why_it_matters": "a working GPU reporting different metadata would fail before any dispatch",
+        "evidence_it_passes": [
+          "the staged ICD is Mesa ANV (libvulkan_intel.dylib), not a proprietary driver",
+          "neither Mesa patch touches driverID, driverName or the physical device type; their hunks in anv_physical_device.c only disable external-memory/fd extensions and adjust feature flags on Apple",
+          "the shipped dylib contains the driverName string that accompanies that driverID, and the device table is present"
+        ],
+        "limit": "cannot be proven without the target; if it fails here the message says so before any GPU work"
+      },
+      "fence_timeout": "the per-wait fence timeout is a fixed 10 s while the runner deadline is 45 s, so a very slow first dispatch would exit 124 although the work would have completed; improbable at 4099 words",
+      "vk_incomplete": "the second enumeration ignores VK_INCOMPLETE, which only matters if the device count changes between the two calls",
+      "pci_bus_info": "VkPhysicalDevicePCIBusInfoPropertiesEXT is chained without enabling VK_EXT_pci_bus_info; query-only, so at worst the BDF line disappears",
+      "diagnostic_quality": "mismatch and fence messages print bare integers without the iteration index, which is inferable only from the preceding dispatch line"
+    },
+    "success_before_teardown": {
+      "fact": "COMPUTE_READBACK_VERIFIED is printed after the comparison but before the destructors run, so a hang during device destruction can leave the marker on stdout followed by exit 124",
+      "why_it_is_not_a_false_pass": "the runner requires the exit status to be 0 as well as the marker at the start of a line, and the acceptance stated to the user already demands a clean exit with no panic or hang",
+      "residual": "a human reading only the stdout text could be misled, so the instructions say explicitly that exit 0 is part of the criterion"
+    },
+    "correction_to_my_brief": "the brief asked about session_clock.cpp, which does not exist in the probe directory; the probe includes only vulkan.h and standard headers"
   }
 }
