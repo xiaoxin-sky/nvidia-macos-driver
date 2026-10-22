@@ -300,7 +300,34 @@
         ],
         "next_step_if_reproduced": "one print at the top of nmx_open recording the minor would settle whether XNU reaches the port's callback at all. That needs a kext rebuild and a new package, so it is held until the next run shows the same signature",
         "hardware_executed": false
-      }
+      },
+      "hypotheses_checked_and_dropped": {
+        "stale_node_after_reload": {
+          "idea": "a /dev/dri node left over from an earlier kext load would point at a major whose cdevsw is gone, so open would fail with ENODEV and nothing in the port would print",
+          "checked": [
+            "destroy_dev clears c->nmx_node, sets nmx_gone, and calls nmx_xnu_devfs_remove",
+            "nmx_xnu_devfs_remove calls devfs_remove(handle) and clears both the handle and the cookie slot",
+            "nmx_xnu_devfs_fini only removes the cdevsw, so it relies on every cdev having been destroyed first, which is the normal teardown order"
+          ],
+          "verdict": "unlikely on the documented flow: the test boot loads the kext once and the nodes are created and removed through these paths"
+        },
+        "clone_minor_leak": {
+          "idea": "clone_minor returns 0 for DEVFS_CLONE_FREE without clearing its table, so each open could permanently consume a minor until allocation fails",
+          "checked": [
+            "nmx_open clears g_open_node[m] on any error",
+            "nmx_close clears g_open_node[m] for every clone minor on close"
+          ],
+          "verdict": "dropped; the table is recycled"
+        },
+        "gone_device": {
+          "idea": "opening a node whose cdev was destroyed returns the port's 'gone' error",
+          "checked": [
+            "nmx_cdev_open returns an error for a gone cdev, and that error is printed by the same two call sites"
+          ],
+          "verdict": "cannot explain a silent ENODEV"
+        }
+      },
+      "current_state": "with the port's own paths ruled out both by source (they print or are unreachable) and by the captured logs (no such line in 33 streams or 268 dmesg snapshots), two explanations remain: XNU devfs refuses the open before d_open, or the path being opened is not the node this kext instance created. Both need a target observation, and the next run's report discriminates them by whether any port-side line appears at all."
     },
     "artifacts_to_bring_back": {
       "always": [
