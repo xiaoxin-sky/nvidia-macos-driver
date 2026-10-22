@@ -436,3 +436,42 @@
  
  	return entry;
  }
+--- a/drivers/gpu/drm/i915/intel_pcode.c
++++ b/drivers/gpu/drm/i915/intel_pcode.c
+@@ -151,7 +151,8 @@
+  * The request is acknowledged once the PCODE reply dword equals @reply after
+  * applying @reply_mask. Polling is first attempted with preemption enabled
+  * for @timeout_base_ms and if this times out for another 50 ms with
+- * preemption disabled.
++ * preemption disabled. Darwin retains the same retry budget with native
++ * interrupt delivery enabled while the mailbox mutex serializes requests.
+  *
+  * Returns 0 on success, %-ETIMEDOUT in case of a timeout, <0 in case of some
+  * other error as reported by PCODE.
+@@ -191,12 +192,26 @@
+ 	 * requests, and for any quirks of the PCODE firmware that delays
+ 	 * the request completion.
+ 	 */
++#ifdef NMXKPI
++	drm_dbg_kms(&uncore->i915->drm,
++		    "PCODE timeout, retrying with native interrupts enabled\n");
++#else
+ 	drm_dbg_kms(&uncore->i915->drm,
+ 		    "PCODE timeout, retrying with preemption disabled\n");
++#endif
+ 	drm_WARN_ON_ONCE(&uncore->i915->drm, timeout_base_ms > 3);
++#ifdef NMXKPI
++	/* sb_lock already serializes this mailbox and its registers do not need
++	 * forcewake. Darwin preempt_disable masks interrupts: keep only the
++	 * helper's short clock snapshots critical, never the whole 50ms retry.
++	 * The real request/ack predicate, time budget and status precedence stay
++	 * unchanged; local_clock is monotonic in the matching FreeBSD patch. */
++	ret = _wait_for_atomic(COND, 50000, 0);
++#else
+ 	preempt_disable();
+ 	ret = wait_for_atomic(COND, 50);
+ 	preempt_enable();
++#endif
+ 
+ out:
+ 	mutex_unlock(&uncore->i915->sb_lock);

@@ -140,5 +140,10 @@
     "native_status": "native fixture header/type conflict repaired; retry pending, no usable driver from failed run 39722716450",
     "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
     "hardware_executed": false
+  },
+  "pcode_retry": {
+    "status": "implemented, native tests pending",
+    "policy": "Mailbox mutex remains held; retry predicate and 50ms budget unchanged. Only short per-iteration clock snapshots enter native CPU critical sections. No forced acknowledgment or success fallback.",
+    "coverage": "Actual request retry/timeout/status precedence and actual wait/clock bodies, modeled mailbox transaction; native clang required for GNU wait expressions"
   }
 }

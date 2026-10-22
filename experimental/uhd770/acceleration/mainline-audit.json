@@ -30,8 +30,9 @@
     {
       "id": "identity_context",
       "route": "ANV Intel QUERY/GETPARAM -> i915 capabilities, VM/context and engine setup",
-      "status": "REVIEW IN PROGRESS",
-      "remaining": "trace mandatory calls to kernel implementations and unsupported branches; no fallback around required features"
+      "status": "MANDATORY ANV UAPI CALLS MAPPED TO REAL KERNEL HANDLERS; transitive and target validation incomplete",
+      "remaining": "Complete native allocation/locking and target VM/queue creation evidence; ioctl dispatch passing alone is insufficient",
+      "source_review": "experimental/uhd770/acceleration/compute-interface-review.json"
     },
     {
       "id": "memory",
@@ -50,19 +51,21 @@
         "artifact_id": 12397562479,
         "sha256": "282484b2aa1ad4e6681a408df1812b975f8896a445c29dcff59fd61051322051",
         "result": "joined Linux/native mm fixture and kernel KC checks passed"
-      }
+      },
+      "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json"
     },
     {
       "id": "submission",
       "route": "ANV batch construction -> EXECBUFFER2 -> i915 request/engine scheduling -> real device",
       "status": "NOT FULLY REVIEWED",
-      "remaining": "nested ioctl data, object address/length/pinning and fence lifetime; actual execution requires UHD770"
+      "remaining": "nested ioctl data, object address/length/pinning and fence lifetime; actual execution requires UHD770",
+      "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json"
     },
     {
       "id": "completion",
       "route": "GPU IRQ/breadcrumb -> dma_fence -> wake_up_task -> sleepqueue -> XNU assert_wait/thread_block",
       "status": "THREADED BH/NATIVE MUTEX/CSB REPAIR PASSED NATIVE MACOS/TSAN/KERNEL CHECKS; monotonic clock fixture repair pending",
-      "remaining": "Verify current repair on native macOS; review remaining explicit preempt scopes, long PCODE polling, seqcount/IRQ-work and allocation paths; real GPU IRQ/breadcrumb/fence execution remains unverified",
+      "remaining": "Verify kernel clock and PCODE retry on native macOS; finish remaining native critical/seqcount/IRQ-work/allocation paths and actual GPU request/IRQ/fence evidence",
       "host_evidence": "Actual Linux schedule/wake functions plus actual native sleepqueue/condition adapter passed Windows host event-model tests; hardware IRQ still unverified",
       "native_ci_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39708726018",
       "next_review": "Complete remaining critical-scope transitive audit and actual GPU context/memory/submission/visibility/cleanup contracts; no hardware request merely for a passing build",
@@ -107,6 +110,14 @@
         "host_result": "kernel-clock-test.cpp\nPASS actual clock/uptime adapter with forward/backward calendar jumps\nGNU i915 wait expressions require native clang; not executed by Windows fixture.\nKernel clock contracts passed for the executed scope; native clock primitives modeled; no GPU executed.\n",
         "native_status": "previous native fixture compilation failed: user clock_types header does not expose kernel clock_sec_t/nsec types and defines NSEC_PER_SEC as a macro. Fixture now models kernel primitive argument types and respects the SDK macro; retry pending.",
         "integration": "All three patches applied to disposable pinned source copies; common headers, fixture preparation and cache launcher checks passed",
+        "hardware_executed": false,
+        "retry_native_run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39723485354"
+      },
+      "pcode_retry_repair": {
+        "status": "implemented, native verification pending",
+        "change": "NMX-only 50ms retry uses actual non-atomic wait helper; mailbox sb_lock, request/ack condition, retry budget and status precedence preserved",
+        "source_trace": "__snb_pcode_rw uses forcewake-independent raw mailbox MMIO and __intel_wait_for_register_fw; nested fast polling uses non-atomic helper with only short clock snapshots critical",
+        "test_scope": "Actual skl_pcode_request + actual i915 wait macros + actual native clock adapter; mailbox transaction modeled; GNU expressions/PCODE tests require native clang and were not executed by the Windows fixture",
         "hardware_executed": false
       }
     },
@@ -114,7 +125,8 @@
       "id": "visibility",
       "route": "GPU writes -> completion -> cache/barrier handling -> host readback",
       "status": "NOT FULLY REVIEWED",
-      "remaining": "trace coherency assumptions and WC/WB mapping options; host tests cannot validate real cache visibility"
+      "remaining": "trace coherency assumptions and WC/WB mapping options; host tests cannot validate real cache visibility",
+      "source_interface_inventory": "experimental/uhd770/acceleration/compute-interface-review.json"
     },
     {
       "id": "cleanup",

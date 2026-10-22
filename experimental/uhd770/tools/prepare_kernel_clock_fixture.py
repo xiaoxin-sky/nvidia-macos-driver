@@ -13,7 +13,7 @@ from prepare_native_lock_fixture import macro
 
 def definition(text, name):
     """Extract one complete native/inline clock definition without replacing it."""
-    pattern = rf'^(?:static\s+)?(?:inline\s+)?(?:uint64_t|void)\s+{name}\([^;{{}}]*\)\n\{{\n.*?^\}}'
+    pattern = rf'^(?:static\s+)?(?:inline\s+)?(?:uint64_t|void|int)\s+{name}\([^;{{}}]*\)\n\{{\n.*?^\}}'
     found = re.findall(pattern, text, re.M | re.S)
     if len(found) != 1:
         raise ValueError(f'clock fixture drift: {name}: {len(found)}')
@@ -33,11 +33,18 @@ def prepare(port, freebsd, drm, template, output):
     actual = '\n\n'.join(definition(lower, n) for n in ['uptime_ns', 'nanouptime', 'nanotime'])
     actual += '\n\n' + definition(upper, 'local_clock')
     actual += '\n#ifndef _MSC_VER\n' + macro(wait, '_wait_for_atomic') + '\n#endif\n'
+    pcode = (drm / 'drivers/gpu/drm/i915/intel_pcode.c').read_text(encoding='utf-8')
+    pcode_body = '\n\n'.join(macro(wait, n) for n in ['__wait_for', '_wait_for'])
+    pcode_body += '\n\n' + definition(pcode, 'skl_pcode_request')
     value = template.read_text(encoding='utf-8')
     marker = '/* ACTUAL_KERNEL_CLOCK_CHAIN */'
     if value.count(marker) != 1:
         raise ValueError('clock fixture marker count')
-    output.write_text(value.replace(marker, actual), encoding='utf-8', newline='\n')
+    value = value.replace(marker, actual)
+    marker = '/* ACTUAL_PCODE_RETRY */'
+    if value.count(marker) != 1:
+        raise ValueError('PCODE fixture marker count')
+    output.write_text(value.replace(marker, pcode_body), encoding='utf-8', newline='\n')
     print(f'Prepared actual LinuxKPI/native clock and i915 wait: {output}')
 
 

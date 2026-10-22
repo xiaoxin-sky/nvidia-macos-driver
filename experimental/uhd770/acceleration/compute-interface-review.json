@@ -1,0 +1,60 @@
+{
+  "date": "2026-10-22",
+  "scope": "Source trace for ordinary-buffer compute on Alder Lake-S 8086:4680; this inventory is not proof that hardware execution works",
+  "pins": {
+    "mesa": "bffd91947efc1932da99aca69fc540d6d4201b0c",
+    "drm": "c16de0f9fa84f70b9551f69fde837a7f3a73c0e9",
+    "port": "7222618727449426631d13d0654f8347634717e9"
+  },
+  "interfaces": [
+    {
+      "operation": "Required execution/synchronization capabilities",
+      "caller": "Mesa src/intel/vulkan/i915/anv_device.c:anv_i915_physical_device_get_parameters",
+      "kernel": "i915_getparam.c:i915_getparam_ioctl; i915_driver.c driver flags and ioctl table",
+      "finding": "WAIT_TIMEOUT, EXECBUF2, SOFTPIN, EXEC_FENCE_ARRAY, ASYNC, CAPTURE and TIMELINE_FENCES have implemented query cases; driver declares internal SYNCOBJ/TIMELINE and render-allowed execbuffer/context/VM ioctls. A true capability reply alone is not proof of lower-path completion."
+    },
+    {
+      "operation": "VM and per-queue engine context",
+      "caller": "anv_i915_device_setup_context -> anv_i915_device_setup_vm; anv_i915_create_engine -> i915_gem_create_context_engines",
+      "kernel": "i915_gem_vm_create_ioctl; i915_gem_context_create_ioctl -> create_setparam -> set_proto_ctx_param -> VM/ENGINES/RECOVERABLE setters",
+      "finding": "VM-control path first creates the VM, then queue creation creates its engine context; returning from setup_context after VM creation is intentional. Probe selects a compute-capable render queue, supported by Alder Lake-S RCS0. Native allocation/locking and actual target context creation still require validation."
+    },
+    {
+      "operation": "Ordinary GEM allocation and PAT extension compatibility",
+      "caller": "Mesa i915/anv_kmd_backend.c:i915_gem_create",
+      "kernel": "gem/i915_gem_create.c:i915_gem_create_ext_ioctl and memory-region extension handlers",
+      "finding": "Successful memory-region queries enable CREATE_EXT with system-memory placements. ADL does not set has_set_pat_uapi; therefore it does not send SET_PAT, which this kernel only accepts for graphics 12.70+. Protected-context and external-FD paths are not requested by the ordinary probe."
+    },
+    {
+      "operation": "Physical backing to device-visible DMA addresses",
+      "caller": "i915_gem_shmem.c:shmem_sg_alloc_table -> i915_gem_gtt_prepare_pages -> linux_dma_map_sg_attrs",
+      "kernel": "xkpi override/src/linux_pci.c -> bsdcompat/src/nmx_busdma.c:load_one/_bus_dmamap_load_phys -> xnu/nmx_dma.cpp:nmx_xnu_dma_map",
+      "finding": "Real page addresses are mapped per S/G range. No-IOMapper path validates identity DMA addresses; IOMapper path uses prepared IODMACommand and checks complete segment length/address mask. ADL-S has a 39-bit DMA mask. Actual device/IOMMU reachability and cache visibility are not proved by source tracing."
+    },
+    {
+      "operation": "Application mapping and backing lifetime",
+      "caller": "Mesa anv_nmx_bo_mmap and kernel i915_gem_object_mmap",
+      "kernel": "nmx_linux_cdev.c populate/pin/free -> nmx_devfs.cpp:nmx_xnu_map_user -> IOMemoryDescriptor/IOMemoryMap",
+      "finding": "Persistent shmem pin and GEM/VMA reference survive native mapping; native unmap precedes unpin and close. Existing actual mapping fixture covers this lifetime. Native physical-page mapping and WB/WC alias/cache semantics remain a separate review/target requirement."
+    },
+    {
+      "operation": "Real execbuffer submission",
+      "caller": "anv_batch_chain.c:setup_async_execbuf/setup_execbuf_fence_params -> anv_gem_execbuffer_impl -> i915_gem_execbuf_ioctl",
+      "kernel": "gem/i915_gem_execbuffer.c:i915_gem_execbuffer2_ioctl -> i915_gem_do_execbuffer -> context/engine/VMA selection -> request creation -> eb_submit -> eb_requests_add",
+      "finding": "Object arrays, softpin offsets, per-context engine index and internal syncobj/timeline extensions reach real request creation and submission code. Copy/dispatch transport has its separate native fixture. GPU VA binding, engine emission, IRQ and fence behavior are not yet fully reviewed or proved."
+    },
+    {
+      "operation": "Readback and process exit acceptance",
+      "caller": "probe/main.cpp:run and main; probe/verify.comp",
+      "finding": "Probe uploads changing inputs, submits real compute commands, waits a fence, invalidates noncoherent memory when necessary and compares every output word across changing seeds. COMPUTE_READBACK_VERIFIED precedes teardown; only actual exit 0 plus source/binary/target submission evidence can satisfy acceptance. No such target result exists."
+    }
+  ],
+  "additional_review_items": [
+    "Explicit preempt scopes: stats/seqcount short sections, CSB fallback repaired, PCODE long retry being adapted; FPU critical exclusion preserved",
+    "Native physical page mappings/cache aliases: pmap_change_attr returns success without changing the existing cached kernel view; do not infer CPU/GPU coherency solely from that result",
+    "IODMACommand uses system IOMapper while target EFI disables IOMapper; cover both branches in software and verify actual target configuration before claiming DMA success",
+    "Complete GPU VA/page-table emission and real request/IRQ/fence/cache/cleanup transitive review before a new hardware request"
+  ],
+  "hardware_executed": false,
+  "new_hardware_test_requested": false
+}
