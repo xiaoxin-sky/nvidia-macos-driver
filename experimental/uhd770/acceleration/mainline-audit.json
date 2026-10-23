@@ -1120,7 +1120,8 @@
       }
     },
     "hardware_executed": false,
-    "delivery": "r17 corrects F3 and F4; F1 teardown trace still open"
+    "delivery": "r17 fixes F3 and F4; F2 is fixed in the analyzer with regression tests; F1's two traces are complete and its seven primitive hazards are recorded as known limitations",
+    "status": "all four findings addressed as review items; the corrected work is ready for independent verification"
   },
   "known_limitations_from_teardown_trace": {
     "source": "cleanup contract's teardown_trace",
