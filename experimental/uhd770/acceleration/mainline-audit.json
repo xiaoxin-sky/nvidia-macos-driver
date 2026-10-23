@@ -727,7 +727,8 @@
             "effect": "harmless while BH enable dispatches nothing; a reentrancy bug if BH dispatch is ever implemented",
             "fixed_here": false,
             "fix": "a new hunk for sys/compat/linuxkpi/common/include/linux/spinlock.h in patches/freebsd.patch",
-            "verification": "check_patch_inputs.py applies the patch to the clean pin and the whole fixture preparation still passes; test_hazard_dispositions.py applies the shipped patch to a temp copy and asserts that both macros release before enabling; the kernel build on the next CI run compiles the patched header"
+            "verification": "check_patch_inputs.py applies the patch to the clean pin and the whole fixture preparation still passes; test_hazard_dispositions.py applies the shipped patch to a temp copy and asserts that both macros release before enabling; the kernel build on the next CI run compiles the patched header",
+            "coverage": "spin_unlock and spin_unlock_bh are reordered in the patch; spin_unlock_irq and spin_unlock_irqrestore route through spin_unlock, so all four unlock variants now release the mutex before enabling bottom halves"
           },
           {
             "id": "D3",
