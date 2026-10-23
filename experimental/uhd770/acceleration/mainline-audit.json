@@ -718,7 +718,7 @@
             "what": "i915's spin_lock_irqsave is a sleeping mutex that does not mask interrupts; data it protects is serialized against other threads only, and the protected section is not non-blocking",
             "effect": "the interrupt path, which runs on a workloop thread, can block behind a close-path critical section",
             "target_only": "whether contention actually occurs",
-            "disposition": "kept: the port's spinlock design is FreeBSD's, shared by every driver and the recorder; changing it here would alter interrupt handling for all of them with no way to test"
+            "disposition": "kept: the port's spinlock design is FreeBSD's, shared by every driver and the recorder; changing it here would alter interrupt handling for all of them with no way to test; the claim that irqsave does not mask is itself checked by the same test file"
           },
           {
             "id": "D2",
@@ -726,7 +726,7 @@
             "what": "spin_unlock enables bottom halves before dropping the mutex, the reverse of the lock order",
             "effect": "harmless while BH enable dispatches nothing; a reentrancy bug if BH dispatch is ever implemented",
             "fixed_here": false,
-            "disposition": "kept: enabling bottom halves before unlocking is wrong in principle, but bottom-half dispatch is a per-thread counter that dispatches nothing today, so the observable order is unchanged; fixing it edits a pinned linuxkpi header that every spinlock user includes"
+            "disposition": "kept: enabling bottom halves before unlocking is wrong in principle, but bottom-half dispatch is a per-thread counter that dispatches nothing today, so the observable order is unchanged; fixing it edits a pinned linuxkpi header that every spinlock user includes; checked by experimental/uhd770/tools/test_hazard_dispositions.py, which fails if the BH enable path gains any dispatch call and also fails if the unlock order is fixed, so the record cannot go stale silently"
           },
           {
             "id": "D3",
@@ -1159,7 +1159,17 @@
     "fixed_in_this_round": 0,
     "why_not_fixed": "D1 and D3 are semantic changes to primitives that every driver and the recorder use; neither has a reproduction, and both are on paths (interrupt re-entry and unload/PM drain) that this review cannot exercise. Changing them without a way to verify would trade a documented hazard for an unverified one.",
     "what_they_mean_for_the_compute_probe": "none of them blocks submission, completion or readback by construction; D1 could turn contention into a stall, and D3 could wedge a drain at unload or PM after a race. Both are target observations, not source unknowns.",
-    "hardware_executed": false
+    "hardware_executed": false,
+    "checks": {
+      "file": "experimental/uhd770/tools/test_hazard_dispositions.py",
+      "what_it_checks": [
+        "D2's reason: the BH enable path in the override that is actually built forwards to a counter helper and calls no dispatch function",
+        "D2's premise: spin_unlock still enables BH before unlocking, so the record stays accurate; if this is ever fixed the test fails and forces the record to be updated",
+        "D1's premise: spin_lock_irqsave only zeroes the flags and masks nothing"
+      ],
+      "result": "3 checks pass against the pinned trees on this host",
+      "limit": "these are source checks, not runtime observations; they keep the records honest, they do not measure contention"
+    }
   },
   "t8_status": {
     "state": "software delivery gate NOT declared as passed",
