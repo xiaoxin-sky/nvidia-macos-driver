@@ -262,9 +262,12 @@ capture_main() {
     [ "$EUID" -eq 0 ] || { capture_startup_fail requires_root; return 1; }
     if [ "$#" -eq 2 ] && [ "$1" = --duration ]; then
         case "$2" in ''|*[!0-9]*) capture_startup_fail duration; return 1 ;; esac
-        [ "${#2}" -le 3 ] || { capture_startup_fail duration; return 1; }
+        [ "${#2}" -le 4 ] || { capture_startup_fail duration; return 1; }
         CAPTURE_DURATION=$((10#$2))
-        [ "$CAPTURE_DURATION" -ge 120 ] && [ "$CAPTURE_DURATION" -le 600 ] || { capture_startup_fail duration; return 1; }
+        # The manual run needs one recorder session to cover startup
+        # confirmation, the coordinator bound and the post-test observation
+        # (about 805 s), so the ceiling is above that rather than 600.
+        [ "$CAPTURE_DURATION" -ge 120 ] && [ "$CAPTURE_DURATION" -le 1800 ] || { capture_startup_fail duration; return 1; }
     elif [ "$#" -ne 0 ]; then
         capture_startup_fail arguments
         return 1

@@ -93,7 +93,7 @@ done
 
 # Exercise the whole-collector watchdog while a metadata query is still stuck.
 # This reduced duration is test-only; production CLI validation still requires
-# 120..600 seconds and cannot select these mock commands or paths.
+# 120..1800 seconds and cannot select these mock commands or paths.
 mkdir "$FIXTURE/deadline-reports"
 started=$SECONDS
 /bin/bash "$FIXTURE/run-one.sh" deadline

@@ -147,5 +147,21 @@
     "toolchain": "MSVC on the Windows host with a local-only adaptation for pthread and GNU void* arithmetic; this is auxiliary evidence, not the macOS CI compiler",
     "why": "confirms the committed generators and fixtures still work on the current HEAD after the later record-only commits",
     "hardware_executed": false
+  },
+  "capture_budget_and_harness_fixtures": {
+    "date": "2026-10-23",
+    "why": "the independent acceptance found that one recorder session (600 s) could end before the coordinator bound (600 s) plus the observation (180 s), so the tail of a slow run, where a teardown panic appears, was not recorded",
+    "fix": {
+      "session_sh": "MANUAL_STARTUP_LIMIT 25 + MANUAL_COORDINATOR_LIMIT 600 + MANUAL_OBSERVE_LIMIT 180 = 805, against a 900 s recorder session, with a startup check that dies if the budget is smaller than the sum",
+      "collector_sh": "accepted --duration range 120..600 became 120..1800, and the digit guard 3 became 4"
+    },
+    "executable_checks_on_this_host": {
+      "test_capture.sh": "PASS (Git bash): independent reports, finite children, startup failures, staged snapshots",
+      "test_session.sh": "PASS (Git bash): session transaction, terminal/deadline export, recorder and sequential failure gates",
+      "test_capture_finish.sh": "not verified here: its three cases rely on POSIX signal/background semantics that MSYS does not reproduce; treat as unverified rather than failed",
+      "test_log_sync_macos.sh": "refuses to run off macOS by design"
+    },
+    "limit": "these fixtures prove the scripts parse and their gates behave; they do not prove a macOS run",
+    "hardware_executed": false
   }
 }

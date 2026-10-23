@@ -3,7 +3,7 @@
   "objective": "UHD 770 8086:4680 genuinely executes GPU compute, returns correct readback and exits normally; review the complete cross-OS call chain before requesting another hardware test",
   "started": "2026-10-22",
   "review_baseline": "35b42cc5c84f5d1d79b92d5ddc200a5eff8451a1",
-  "hardware_status": "NOT ACHIEVED: no target GPU execution. The software stage is also not complete: the independent acceptance report of 2026-10-22 records unresolved source-review items and three delivery/tooling findings, which are being worked through.",
+  "hardware_status": "NOT ACHIEVED: no target GPU execution. Of the independent acceptance findings, F2, F3 and F4 are closed and delivered in r17; the F1 teardown trace below drm_release is still open, so the software stage is not complete.",
   "acceptance": [
     "Matched source and loaded binary identities for 8086:4680 on the target macOS boot",
     "Real Intel ANV physical/logical device and command queue, no software/no-hardware substitution",
@@ -685,14 +685,14 @@
   ],
   "test_limit": "Existing fixtures are evidence only for their actual extracted code and exercised contracts. Kernel services or hardware replaced by host mocks are not verified by those mocks.",
   "next_hardware_request": {
-    "package": "UHD770-MVP-manual-20261022-r16.zip",
-    "sha256": "4ee0488be045b3d7f097810146dfe25d48baa805f20c318056c0e55ef390a899",
-    "record": "experimental/uhd770/acceleration/delivery-r16.json",
+    "package": "UHD770-MVP-manual-20261023-r17.zip",
+    "sha256": "ffe3c3368001ef1e9860a3d50f139840ad5c4b6d024d5eeaae3b750755d3fc2c",
+    "record": "experimental/uhd770/acceleration/delivery-r17.json",
     "scope": "one macOS session on 8086:4680: prepare, reboot through the same USB, run Run-UHD770-Test.command manually, then bring the report back",
     "not_requested_yet": "the package is staged on the USB and the boot configuration was not touched, but no reboot has been requested; the user runs one concentrated session when they choose",
     "staged_on_usb": true,
     "usb_path": "F:\\UHD770-当前使用\\UHD770-MVP-manual-20261022-r16.zip",
-    "blocked_until": "the F1 teardown tracing and the F2/F3/F4 fixes are finished and a corrected package is delivered; do not ask the user to run the current one before then"
+    "blocked_until": "the F1 teardown trace is finished and the work is submitted for independent verification; the r17 package is staged on the USB but the user is not asked to run it before that"
   },
   "completion_limit": "Windows/CI cannot prove target GPU execution. Keep the goal active until actual target execution/readback/clean exit evidence is available.",
   "latest_host_verification": {
@@ -983,7 +983,7 @@
       "F1_source_review_gaps": {
         "top_page_directory_ordering": "RESOLVED in this round: traced alloc -> pin -> DMA -> root init and the failure rollback, with citations; recorded in dma-interface-review.json",
         "teardown_below_drm_release": "OPEN: the i915 release ordering below drm_release (BO, context, VM, request/callback, DMA, deferred release) is still untraced",
-        "status_rule": "T8 and any 'software complete' statement stay unmet until the teardown trace is done"
+        "status_rule": "T8 and any 'software complete' statement remain unmet until the teardown trace below drm_release is finished, even though F2, F3 and F4 are now closed"
       },
       "F2_analyzer_sessions": {
         "status": "RESOLVED",
@@ -1016,9 +1016,26 @@
         "still_reports": "the direct evidence in the report (per-session exit code, discovery lines, loader errors, kernel-side failure lines, panic head) so a human can check the verdict against the log",
         "hardware_executed": false
       },
-      "F3_capture_budget": "OPEN: the recorder's 600 s window does not provably cover the coordinator bound plus the observation",
-      "F4_instruction_mismatch": "OPEN: the copy inside the zip and the copy on the USB disagree"
+      "F3_capture_budget": {
+        "status": "RESOLVED",
+        "what_changed": [
+          "session.sh derives a single manual capture budget and refuses to start if it is smaller than startup confirmation + coordinator bound + observation",
+          "the budget is 900 s against a 805 s worst-case sum, and the collector's accepted range rose from 120..600 to 120..1800",
+          "the capture and session shell fixtures pass on the host that can run them"
+        ],
+        "delivered_in": "r17"
+      },
+      "F4_instruction_mismatch": {
+        "status": "RESOLVED",
+        "what_changed": [
+          "the instruction text now lives once, in experimental/uhd770/acceleration/deployment/NEXT-STEPS.txt",
+          "the packaging script reads that file, so the packaged copy and the USB copy are byte identical; the USB root pointer is generated from the same text",
+          "the package was regenerated, so the stale in-zip copy no longer exists"
+        ],
+        "delivered_in": "r17"
+      }
     },
-    "hardware_executed": false
+    "hardware_executed": false,
+    "delivery": "r17 corrects F3 and F4; F1 teardown trace still open"
   }
 }

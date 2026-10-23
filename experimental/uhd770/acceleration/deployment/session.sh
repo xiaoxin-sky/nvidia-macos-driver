@@ -61,6 +61,18 @@ safe_directory() {
 property() { plutil -extract "$1" raw -o - "$PLAN"; }
 hash() { shasum -a 256 "$1" | awk '{print $1}'; }
 
+# Capture budget for the manual run. One recorder session has to outlive the
+# whole run: startup confirmation, the coordinator's own bound, and the
+# post-test observation. A window shorter than their sum is exactly how a
+# teardown panic at the end goes unrecorded, so the sum is checked here rather
+# than left to whoever edits a constant later.
+MANUAL_STARTUP_LIMIT=25
+MANUAL_COORDINATOR_LIMIT=600
+MANUAL_OBSERVE_LIMIT=180
+MANUAL_CAPTURE_LIMIT=900
+[ "$MANUAL_CAPTURE_LIMIT" -ge $((MANUAL_STARTUP_LIMIT + MANUAL_COORDINATOR_LIMIT + MANUAL_OBSERVE_LIMIT)) ] || \
+    die 'Capture budget does not cover startup, coordinator and observation.'
+
 # Every mutation/recovery target is fixed here, not read from a journal or EFI.
 targets() {
     printf '%s\n' \
@@ -481,7 +493,7 @@ prepare() {
     [ -n "$found" ] || die 'Recorder did not pass; no live driver was replaced or enabled.'
     printf 'recorder=%s\nnormal_desktop_capture=passed\n' "$found" > "$PRIVATE/recorder-check.txt"
     # Use ten minutes on the next boot: attach delay plus both bounded probes.
-    /usr/libexec/PlistBuddy -c 'Set :ProgramArguments:3 600' /Library/LaunchDaemons/com.uhd770.mvp.capture.plist
+    /usr/libexec/PlistBuddy -c "Set :ProgramArguments:3 $MANUAL_CAPTURE_LIMIT" /Library/LaunchDaemons/com.uhd770.mvp.capture.plist
     local work="$PRIVATE/prepared" repo="$PRIVATE/repository" key target prepared
     mkdir "$work" "$repo"
     mkdir -p "$work/Library/GPUBundles"
@@ -688,7 +700,7 @@ run_manual_test() {
     done
     session_bounded 10 "$PRIVATE/manual-capture-start-$current.txt" \
         launchctl kickstart -k system/com.uhd770.mvp.capture || die 'Cannot start the recorder; compute was not started.'
-    while [ "$count" -lt 25 ]; do
+    while [ "$count" -lt "$MANUAL_STARTUP_LIMIT" ]; do
         for report in /private/var/log/UHD770MVP/session-*; do
             [ -d "$report" ] && [ ! -L "$report" ] || continue
             grep -Fxq "$report" "$PRIVATE/manual-$current/previous-captures.txt" && continue
@@ -710,7 +722,7 @@ run_manual_test() {
     printf 'Recorder is ready. Waiting for driver checks, then Vulkan and Metal in this terminal.\n'
     : > "$PRIVATE/manual-coordinator-$current.txt"
     tail -n +1 -f "$PRIVATE/manual-coordinator-$current.txt" & FOLLOWER=$!
-    session_bounded_group 600 "$PRIVATE/manual-coordinator-$current.txt" \
+    session_bounded_group "$MANUAL_COORDINATOR_LIMIT" "$PRIVATE/manual-coordinator-$current.txt" \
         sudo -n -u "#$uid" /bin/bash -p "$ROOT/session-tools/session-user.sh" manual || code=$?
     kill -TERM "$FOLLOWER" 2>/dev/null || :; FOLLOWER=''
     session_bounded 10 "$PRIVATE/manual-loaded-after-$current.txt" kmutil showloaded || :
@@ -720,7 +732,7 @@ run_manual_test() {
     fi
     printf '\nManual coordinator exit=%s. Compute is stopped; observing the display before exporting...\n' "$code"
     printf 'manual_authorization=closed\nboot=%s\n' "$current" > "$PUBLIC/manual-authorization-$current.txt"
-    session_observe_capture "$MANUAL_CAPTURE" "$current" 180 "$PRIVATE/post-test-observation-$current.txt"
+    session_observe_capture "$MANUAL_CAPTURE" "$current" "$MANUAL_OBSERVE_LIMIT" "$PRIVATE/post-test-observation-$current.txt"
     finish_capture "$current" "$MANUAL_CAPTURE"
     printf 'finished\n' > "$PUBLIC/state.txt"
     printf 'boot=%s\nmanual_exit=%s\n' "$current" "$code" > "$PUBLIC/manual-result-$current.txt"

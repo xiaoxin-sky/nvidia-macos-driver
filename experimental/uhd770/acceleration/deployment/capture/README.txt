@@ -11,7 +11,9 @@ Fixed paths:
   /private/var/log/UHD770MVP/
 
 The daemon runs as root when launchd loads it, including boot. It exits after
-300 seconds by default. --duration accepts only 120..600 seconds. KeepAlive is
+300 seconds by default. --duration accepts 120..1800 seconds; the manual test
+sets 900 so one recorder session covers startup, the coordinator bound and the
+post-test observation. KeepAlive is
 false, so it is not repeatedly restarted in the same boot. The independent
 watchdog allows at most three further seconds before killing a stuck parent
 that has not started cleanup. Controlled cleanup ignores repeat stop signals,

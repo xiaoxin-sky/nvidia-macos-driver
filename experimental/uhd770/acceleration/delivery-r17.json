@@ -1,0 +1,70 @@
+{
+  "delivery": "r17",
+  "date": "2026-10-23",
+  "classification": "manual-hardware-test candidate; no GPU executed",
+  "change_since_r16": {
+    "capture_budget": "one recorder session is now 900 s instead of 600, covering the 25 s startup confirmation, the 600 s coordinator bound and the 180 s post-test observation; the collector's accepted ceiling rose from 600 to 1800 and the digit check from 3 to 4",
+    "instructions": "one authoritative text lives at experimental/uhd770/acceleration/deployment/NEXT-STEPS.txt; the packaged copy, the USB copy and the USB root pointer all use that same text",
+    "binaries": "kernel, userland and metal components are byte identical to r16 (5d0b123e NMXGPU, 31a13e57 compute probe, 23c89dab metal probe)"
+  },
+  "components": {
+    "kernel": {
+      "source_commit": "b5bb28c96aeaef0016f59a3213240eb58d3cde99",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39752294845",
+      "artifact_sha256": "c514ca1539d8dce5701f7d02b15d4e261518626bee2e0196d52bf705349a145d"
+    },
+    "userland": {
+      "source_commit": "991e460dff9a71a6a1bba0427c3dd602267145a0",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39704724791",
+      "artifact_sha256": "38a9c74d9d5273c75820f97455397a9d5fb8221f49c0d3036c5311cbe0d7f993"
+    },
+    "metal": {
+      "source_commit": "222351ae2ba33abadc8a5b32e2319a63db31ff3f",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39443141719",
+      "artifact_sha256": "76937c6637184216b3ef4703d43897d1c638cb041a2e29dc65d6d54b4619844f"
+    }
+  },
+  "package": {
+    "name": "UHD770-MVP-manual-20261023-r17.zip",
+    "path": "D:\\UHD770-driver-kit\\UHD770-MVP-manual-20261023-r17.zip",
+    "bytes": 62892453,
+    "sha256": "ffe3c3368001ef1e9860a3d50f139840ad5c4b6d024d5eeaae3b750755d3fc2c",
+    "delivery_dir": "D:\\UHD770-driver-kit\\build-audit\\delivery-20261023-r17",
+    "usb_written": true,
+    "usb_path": "F:\\UHD770-当前使用\\UHD770-MVP-manual-20261023-r17.zip",
+    "usb_digest_verified": true
+  },
+  "verification_performed_here": [
+    "every component zip digest was asserted against its recorded value before the assembler ran",
+    "the assembler refused unless the kernel artifact carried 1250 unit logs, exact source counts, every fixture marker and a passed KC preflight",
+    "the packaged SHA256SUMS was re-verified file by file: 0 mismatches",
+    "the three component binaries were compared with r16 and are byte identical, which is what a harness-only change should produce",
+    "the packaged NEXT-STEPS.txt and the delivery copy are byte identical",
+    "the boot EFI config digest was checked before and after writing to the USB and is unchanged"
+  ],
+  "capture_budget_invariant": {
+    "startup_confirmation_s": 25,
+    "coordinator_bound_s": 600,
+    "observation_bound_s": 180,
+    "sum_s": 805,
+    "recorder_session_s": 900,
+    "collector_ceiling_s": 1800,
+    "guard": "session.sh dies at startup if the budget is smaller than the sum, so a later edit cannot silently reintroduce the gap",
+    "limit": "a run that exceeds the coordinator bound can still truncate the observation, but the report then records observation_end=recorder_not_running instead of implying coverage"
+  },
+  "shell_fixture_results": {
+    "test_capture.sh": "PASS under Git bash on this host: independent reports, finite children, startup failures, staged snapshots",
+    "test_session.sh": "PASS under Git bash: session transaction, terminal/deadline export, recorder and sequential failure gates",
+    "test_capture_finish.sh": "cannot run faithfully here: three cases report 'no real cleanup start', which is the fixture's own signal/background-job semantics on MSYS rather than a product result; recorded as not verified on this host",
+    "test_log_sync_macos.sh": "refuses to run off macOS, as designed"
+  },
+  "acceptance_findings_addressed": {
+    "F3_capture_budget": "RESOLVED: the budget is now derived from and checked against startup + coordinator + observation, and the collector accepts the larger value",
+    "F4_instructions": "RESOLVED: one text in version control feeds the package, the USB copy and the root pointer; the earlier in-zip copy is gone because the package was rebuilt"
+  },
+  "does_not_prove": [
+    "that any GPU work happens; no target run exists",
+    "that the remaining acceptance finding F1 (teardown trace below drm_release) is closed; it is still open"
+  ],
+  "hardware_executed": false
+}
