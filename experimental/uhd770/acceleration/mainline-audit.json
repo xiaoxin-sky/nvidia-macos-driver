@@ -985,7 +985,37 @@
         "teardown_below_drm_release": "OPEN: the i915 release ordering below drm_release (BO, context, VM, request/callback, DMA, deferred release) is still untraced",
         "status_rule": "T8 and any 'software complete' statement stay unmet until the teardown trace is done"
       },
-      "F2_analyzer_sessions": "OPEN: the analyzer picks the newest session by directory name, which is a random UUID, and can report an old success",
+      "F2_analyzer_sessions": {
+        "status": "RESOLVED",
+        "what_was_wrong": [
+          "the newest session was taken from a sort of directory names, which are boot UUIDs and carry no order",
+          "the probe result was collected from every probe directory rather than only the one the session named, so an older success could be reported",
+          "a session with no coordinator exit code was treated like any other, and success never required this run's own exit status"
+        ],
+        "what_it_does_now": [
+          "orders sessions by the UTC stamp in the probe evidence directory each session names, with file time only as a tie-breaker",
+          "checks only the probe directory that the chosen session named, and treats a missing one as incomplete",
+          "treats a missing coordinator exit code as incomplete",
+          "reports success only when the chosen session exited 0 and its own probe log has the marker at the start of a line",
+          "names any older session that carries a marker and says explicitly that it is not this run's result",
+          "says when the marker is present but the exit code was not 0, which is the successful-compute-but-teardown-did-not-finish case"
+        ],
+        "tests": {
+          "file": "experimental/uhd770/tools/test_analyze_session_report.py",
+          "cases": [
+            "an older success cannot mask a newer failure, with directory names sorting the wrong way round (the exact case the acceptance report reproduced)",
+            "a current run that exits 0 without its own marker is a failure, and the older marker is named as not being this run's",
+            "success requires the current run's marker and exit 0 together",
+            "a missing exit code is incomplete",
+            "a marker with exit 124 is a failure that names teardown not finishing",
+            "a named evidence directory missing from the report is incomplete",
+            "a panic dominates even when the probe printed the marker"
+          ],
+          "result": "7 tests, all pass; run from both the working copy and the repository copy, which are byte identical"
+        },
+        "still_reports": "the direct evidence in the report (per-session exit code, discovery lines, loader errors, kernel-side failure lines, panic head) so a human can check the verdict against the log",
+        "hardware_executed": false
+      },
       "F3_capture_budget": "OPEN: the recorder's 600 s window does not provably cover the coordinator bound plus the observation",
       "F4_instruction_mismatch": "OPEN: the copy inside the zip and the copy on the USB disagree"
     },
