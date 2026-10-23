@@ -21,7 +21,6 @@ jobs:
     timeout-minutes: 240
     env:
       NMX_USE_CACHE: ${{ github.event_name != 'workflow_dispatch' || !inputs.clean_build }}
-      CCACHE_NODIRECT: 'true'
       CCACHE_COMPILERCHECK: content
     steps:
       - name: Check out this fork (full history, for the GPU source at 7222618)
@@ -100,7 +99,6 @@ jobs:
           bash experimental/uhd770/tools/check_ccache.sh 2>&1 | tee /tmp/nmx-ccache-validation.log
           ccache --set-config=max_size=512M
           ccache --set-config=sloppiness=
-          ccache --set-config=direct_mode=false
           ccache --set-config=depend_mode=false
           ccache --zero-stats
 
