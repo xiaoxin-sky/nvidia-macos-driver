@@ -1,0 +1,48 @@
+{
+  "delivery": "r18",
+  "date": "2026-10-23",
+  "classification": "manual-hardware-test candidate; no GPU executed",
+  "why": "an independent verification of the r17 handback found that the package still carried two different NEXT-STEPS files, because prepare_kit copies the whole deployment directory",
+  "change_since_r17": {
+    "instructions_source": "moved to experimental/uhd770/acceleration/NEXT-STEPS-source.txt, outside the directory prepare_kit copies, so the package can only contain the generated root copy",
+    "package_contents": "exactly one NEXT-STEPS.txt, 4726 bytes, containing the 900 s budget, the Archive step and the remove-recorder remedy",
+    "binaries": "kernel and userland are byte identical to r17 and r16",
+    "analyzer": "F2 fixed again for the newest-session-without-evidence case; that fix is in the repository tools and is not part of this package"
+  },
+  "components": {
+    "kernel": {
+      "source_commit": "b5bb28c96aeaef0016f59a3213240eb58d3cde99",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39752294845",
+      "artifact_sha256": "c514ca1539d8dce5701f7d02b15d4e261518626bee2e0196d52bf705349a145d"
+    },
+    "userland": {
+      "source_commit": "991e460dff9a71a6a1bba0427c3dd602267145a0",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39704724791",
+      "artifact_sha256": "38a9c74d9d5273c75820f97455397a9d5fb8221f49c0d3036c5311cbe0d7f993"
+    },
+    "metal": {
+      "source_commit": "222351ae2ba33abadc8a5b32e2319a63db31ff3f",
+      "run": "https://github.com/xiaoxin-sky/nvidia-macos-driver/actions/runs/39443141719",
+      "artifact_sha256": "76937c6637184216b3ef4703d43897d1c638cb041a2e29dc65d6d54b4619844f"
+    }
+  },
+  "package": {
+    "name": "UHD770-MVP-manual-20261023-r18.zip",
+    "path": "D:\\UHD770-driver-kit\\UHD770-MVP-manual-20261023-r18.zip",
+    "bytes": 62889977,
+    "sha256": "eb8dcaf48f3aad2ddcf24e39f08350940239c38884f923822500262a72042f2e",
+    "delivery_dir": "D:\\UHD770-driver-kit\\build-audit\\delivery-20261023-r18",
+    "usb_written": true,
+    "usb_path": "F:\\UHD770-当前使用\\UHD770-MVP-manual-20261023-r18.zip",
+    "usb_digest_verified": true
+  },
+  "verification_performed_here": [
+    "only one NEXT-STEPS file exists anywhere in the package",
+    "the packaged instructions contain the budget, the Archive step and the remove-recorder remedy",
+    "the packaged SHA256SUMS re-verifies with zero mismatches",
+    "kernel and userland binaries are byte identical to r17",
+    "the boot EFI digest was checked before and after the USB write and is unchanged"
+  ],
+  "known_qualifier": "no fixture exercises the 805/900 slow path; the budget invariant is enforced at startup and by the collector's accepted range, which is weaker than an end-to-end timing test",
+  "hardware_executed": false
+}

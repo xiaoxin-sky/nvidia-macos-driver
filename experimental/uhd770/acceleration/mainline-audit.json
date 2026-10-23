@@ -3,7 +3,7 @@
   "objective": "UHD 770 8086:4680 genuinely executes GPU compute, returns correct readback and exits normally; review the complete cross-OS call chain before requesting another hardware test",
   "started": "2026-10-22",
   "review_baseline": "35b42cc5c84f5d1d79b92d5ddc200a5eff8451a1",
-  "hardware_status": "NOT ACHIEVED: no target GPU execution. The independent acceptance findings F1 to F4 are addressed as review items: F2, F3 and F4 are fixed and delivered in r17, and F1's two traces are complete with seven recorded primitive hazards. This is not a claim that the software is clean; it is a claim that nothing in the reviewed source remains untraced.",
+  "hardware_status": "NOT ACHIEVED: no target GPU execution. The acceptance findings are addressed as review items, and an independent verification of this handback found four things to correct, all of which are being corrected. This is not a claim that the software is clean.",
   "acceptance": [
     "Matched source and loaded binary identities for 8086:4680 on the target macOS boot",
     "Real Intel ANV physical/logical device and command queue, no software/no-hardware substitution",
@@ -595,7 +595,7 @@
       "id": "cleanup",
       "route": "fence/context/BO destruction -> user unmap -> final file/MM/task release -> RCU callbacks",
       "status": "PROBE AND KERNEL CLOSE ORDERING ARE SOURCE-VERIFIED, AND THE r14 CLOSE-PATH PANIC MECHANISM IS GONE; no target evidence that close completes without panic, timeout or leaked references",
-      "remaining": "The teardown below drm_release is now traced, with the port primitive recorded at every step and the reference and lock ownership stated (see teardown_trace). No double put and no missing get was found. What remains is not source review: the GuC-versus-execlists binding, real lock contention, and whether the kext unloads at logout are target facts.",
+      "remaining": "Traced: the close path, context/engine/VM release, the BO free and the request/fence release, with the port primitive at each step (see teardown_trace). Not traced and labelled target facts: the GuC-versus-execlists binding, real lock contention, and whether the kext unloads at logout. Seven primitive hazards are recorded as known limitations and none of them was fixed, for the reason stated with each.",
       "source_findings": [
         "Device cdev callbacks never invoke the documented nmx_thread_enter/nmx_thread_leave path",
         "Wiring that path blindly can free struct thread while a retained task_struct still points to task_thread",
@@ -674,7 +674,7 @@
           }
         ],
         "open": [
-          "driver-internal release ordering below drm_release (upstream i915 teardown) is not traced in this entry",
+          "RESOLVED: the close path, context/engine/VM release, BO free and request/fence release are traced; the remaining unknowns are the GuC binding, real contention and unload timing",
           "VFS is relied on to call d_close only after the last file reference; nothing here tests that a concurrent ioctl cannot hold the open record",
           "a long-lived REGULAR RCU reader would stall the close grace period; that lands on the deadline and exits 124 without cleanup",
           "the r14 panic itself is a hardware-observed event; no source change can be claimed to have fixed it on the target without a run"
@@ -717,43 +717,50 @@
             "status": "proven mechanism",
             "what": "i915's spin_lock_irqsave is a sleeping mutex that does not mask interrupts; data it protects is serialized against other threads only, and the protected section is not non-blocking",
             "effect": "the interrupt path, which runs on a workloop thread, can block behind a close-path critical section",
-            "target_only": "whether contention actually occurs"
+            "target_only": "whether contention actually occurs",
+            "disposition": "kept: the port's spinlock design is FreeBSD's, shared by every driver and the recorder; changing it here would alter interrupt handling for all of them with no way to test"
           },
           {
             "id": "D2",
             "status": "proven",
             "what": "spin_unlock enables bottom halves before dropping the mutex, the reverse of the lock order",
             "effect": "harmless while BH enable dispatches nothing; a reentrancy bug if BH dispatch is ever implemented",
-            "fixed_here": false
+            "fixed_here": false,
+            "disposition": "kept: enabling bottom halves before unlocking is wrong in principle, but bottom-half dispatch is a per-thread counter that dispatches nothing today, so the observable order is unchanged; fixing it edits a pinned linuxkpi header that every spinlock user includes"
           },
           {
             "id": "D3",
             "status": "proven mechanism, race-conditional trigger",
             "what": "queue_work returns success but drops the work while the workqueue is draining, while flush_work on an unqueued work returns immediately",
             "effect": "i915_gem_drain_freed_objects loops while free_count is non-zero; an object freed during the final drain_workqueue can leave that counter set with no work queued, and the next drain spins forever",
-            "why_not_fixed": "fixing it means changing the meaning of drain for every workqueue user (i915, drm, the recorder) with no reproduction available, and the window is driver unload or PM, not the compute path"
+            "why_not_fixed": "fixing it means changing the meaning of drain for every workqueue user (i915, drm, the recorder) with no reproduction available, and the window is driver unload or PM, not the compute path",
+            "disposition": "kept: proven mechanism, race-conditional trigger, on the unload/PM drain rather than the compute path; fixing it redefines drain for every workqueue user"
           },
           {
             "id": "D4",
             "status": "proven, latent",
             "what": "interrupt state is restored from a per-lock field, so out-of-order unlocking of two MTX_SPIN locks would re-enable interrupts early",
-            "effect": "the port's own RCU and tasklet locks are strict LIFO in one thread, so it is not exercised today"
+            "effect": "the port's own RCU and tasklet locks are strict LIFO in one thread, so it is not exercised today",
+            "disposition": "kept: latent, requires out-of-order unlock of two MTX_SPIN locks, which the port's own users do not do"
           },
           {
             "id": "D5",
             "status": "proven, latent",
-            "what": "mtx_lock_spin is defined to the same call as mtx_lock, so spin-ness is decided only by the init option"
+            "what": "mtx_lock_spin is defined to the same call as mtx_lock, so spin-ness is decided only by the init option",
+            "disposition": "kept: latent naming hazard, not exercised by i915"
           },
           {
             "id": "D6",
             "status": "proven mechanism, suspected reachability",
             "what": "the critical-section detector samples IRQ state and linux_synchronize_rcu panics when it thinks a critical section is held",
-            "effect": "not reachable from the close path, but reachable from drain paths that other subsystems call"
+            "effect": "not reachable from the close path, but reachable from drain paths that other subsystems call",
+            "disposition": "kept: reachable only from drain paths that other subsystems call, not from this close path"
           },
           {
             "id": "D7",
             "status": "proven, latent",
-            "what": "flush_work dereferences the work's queue for any non-idle state"
+            "what": "flush_work dereferences the work's queue for any non-idle state",
+            "disposition": "kept: latent, requires a work whose queue pointer is NULL, which does not occur here"
           }
         ],
         "still_target_only": [
@@ -761,15 +768,27 @@
           "whether any of the flagged lock acquisitions actually contend",
           "whether the kext is unloaded at logout, which decides how long deferred frees can wait"
         ],
-        "hardware_executed": false
+        "hardware_executed": false,
+        "request_fence_and_callbacks": {
+          "why": "the acceptance report's condition 2 also asks for the request and callback path",
+          "chain": [
+            "i915_request_put is dma_fence_put on the request's embedded fence (i915/i915_request.h:411-415), so the request is owned by the fence refcount",
+            "the final reference runs i915_fence_release (i915/i915_request.c:115): capture list freed (:122), batch resource put (:124), i915_sw_fence_fini on submit and semaphore (:135-136), then either the request is parked in rq->engine->request_pool for reuse (:169-170) or returned to the slab (:173)",
+            "i915_fence_ops.release is that function (:182), and the fence itself is freed through drm's dma_fence RCU path, so the struct outlives the drop",
+            "signal callbacks are invoked from the signal path under the fence lock; in this port that lock is a sleeping mutex, and the tasklet that can deliver it runs on a taskqueue thread, so the callback context is thread context, not a hard interrupt"
+          ],
+          "ownership": "one put per request reference; the fence carries the lifetime and the engine request_pool can retain one request per engine without freeing it"
+        },
+        "scope_note": "This is a main-road trace, not an exhaustive one: it follows the close path, the context/engine/VM release, the BO free and the request/fence release. Subsystem branches that the probe never reaches (display, GuC-specific teardown, debugfs) are cited only where they are on this path, and the GuC-versus-execlists binding remains a target fact.",
+        "dispositions_note": "Every hazard now states its disposition. None was fixed; the reason is specific to each rather than a general 'too risky', and none of them is on the submission/completion/readback path by construction."
       }
     }
   ],
   "test_limit": "Existing fixtures are evidence only for their actual extracted code and exercised contracts. Kernel services or hardware replaced by host mocks are not verified by those mocks.",
   "next_hardware_request": {
-    "package": "UHD770-MVP-manual-20261023-r17.zip",
-    "sha256": "ffe3c3368001ef1e9860a3d50f139840ad5c4b6d024d5eeaae3b750755d3fc2c",
-    "record": "experimental/uhd770/acceleration/delivery-r17.json",
+    "package": "UHD770-MVP-manual-20261023-r19.zip",
+    "sha256": "a274d9d0e2c32e48a808f0653e783b8ec190dc8114236033950490342d754fd6",
+    "record": "experimental/uhd770/acceleration/delivery-r19.json",
     "scope": "one macOS session on 8086:4680: prepare, reboot through the same USB, run Run-UHD770-Test.command manually, then bring the report back",
     "not_requested_yet": "the package is staged on the USB and the boot configuration was not touched, but no reboot has been requested; the user runs one concentrated session when they choose",
     "staged_on_usb": true,
@@ -1060,7 +1079,7 @@
   "acceptance_findings_20261022": {
     "source": "D:\\UHD770-driver-kit\\UHD770-r16-独立验收报告-20261022.md",
     "verdict": "the independent acceptance confirms the real fix, the native build and the r16 artifacts, but does not accept the claim that the software side is complete",
-    "software_stage_status": "NOT COMPLETE: F1 items and F2/F3/F4 are still open",
+    "software_stage_status": "TRACES COMPLETE AND PACKAGE DELIVERED (r19). Open by decision, not by omission: seven primitive hazards are recorded as known limitations and none was fixed, each with a stated reason. T8 is not claimed as passed.",
     "items": {
       "F1_source_review_gaps": {
         "top_page_directory_ordering": "RESOLVED in this round: traced alloc -> pin -> DMA -> root init and the failure rollback, with citations; recorded in dma-interface-review.json",
@@ -1114,14 +1133,25 @@
         "what_changed": [
           "the instruction text now lives once, in experimental/uhd770/acceleration/deployment/NEXT-STEPS.txt",
           "the packaging script reads that file, so the packaged copy and the USB copy are byte identical; the USB root pointer is generated from the same text",
-          "the package was regenerated, so the stale in-zip copy no longer exists"
+          "r18 moved the authoritative text out of the copied directory; the package now contains exactly one NEXT-STEPS file and the packaged scripts are byte identical to the repository"
         ],
         "delivered_in": "r17"
       }
     },
     "hardware_executed": false,
-    "delivery": "r17 fixes F3 and F4; F2 is fixed in the analyzer with regression tests; F1's two traces are complete and its seven primitive hazards are recorded as known limitations",
-    "status": "all four findings addressed as review items; the corrected work is ready for independent verification"
+    "delivery": "r19",
+    "status": "F2 fixed again after an independent verifier found that a newest session with no evidence directory still lost to an older success; F3 and F4 fixed and delivered; F1 traced and its hazards recorded, but see the corrections block",
+    "verifier_corrections_20261023": {
+      "source": "an independent read-only verification of this handback",
+      "items": [
+        "F2: a newest session that failed before naming a probe directory had no evidence stamp, sorted before every stamped session, and could be reported as an older success. Fixed by ordering on the session file time when no evidence stamp exists, and covered by two new regression tests.",
+        "F1: the record still contained stale text calling the teardown trace open while another line called it complete. Corrected, and the trace now also covers the request/fence release and the callback context.",
+        "F4: the package contained two different NEXT-STEPS files because prepare_kit copies the whole deployment directory. The authoritative source was moved out of that directory so only one copy can exist.",
+        "F3: the budget invariant is checked at startup, but no fixture exercises the 805/900 slow path or the collector's new CLI range; that is now stated as a qualifier rather than implied coverage."
+      ],
+      "hardware_executed": false,
+      "r18": "single instructions file verified; usb copy and root pointer generated from it"
+    }
   },
   "known_limitations_from_teardown_trace": {
     "source": "cleanup contract's teardown_trace",
@@ -1130,5 +1160,11 @@
     "why_not_fixed": "D1 and D3 are semantic changes to primitives that every driver and the recorder use; neither has a reproduction, and both are on paths (interrupt re-entry and unload/PM drain) that this review cannot exercise. Changing them without a way to verify would trade a documented hazard for an unverified one.",
     "what_they_mean_for_the_compute_probe": "none of them blocks submission, completion or readback by construction; D1 could turn contention into a stall, and D3 could wedge a drain at unload or PM after a race. Both are target observations, not source unknowns.",
     "hardware_executed": false
+  },
+  "t8_status": {
+    "state": "software delivery gate NOT declared as passed",
+    "traces": "T0 baseline re-verified; T1-T7 contracts audited; T8 gate file exists; T9 package delivered twice (r17, r19)",
+    "open": "seven primitive hazards recorded as known limitations, none fixed; no target execution",
+    "meaning": "the gate stays open on purpose: a gate that is declared passed while known primitive hazards are unfixed would be the same over-claim the acceptance report called out"
   }
 }

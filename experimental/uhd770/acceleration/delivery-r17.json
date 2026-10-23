@@ -4,7 +4,7 @@
   "classification": "manual-hardware-test candidate; no GPU executed",
   "change_since_r16": {
     "capture_budget": "one recorder session is now 900 s instead of 600, covering the 25 s startup confirmation, the 600 s coordinator bound and the 180 s post-test observation; the collector's accepted ceiling rose from 600 to 1800 and the digit check from 3 to 4",
-    "instructions": "one authoritative text lives at experimental/uhd770/acceleration/deployment/NEXT-STEPS.txt; the packaged copy, the USB copy and the USB root pointer all use that same text",
+    "instructions": "the instructions were consolidated into one file, but the packaging step still copied that file into tools/ as well, so r17 shipped two different copies. r18 moved the source out of the copied directory and r19 verified that exactly one file remains.",
     "binaries": "kernel, userland and metal components are byte identical to r16 (5d0b123e NMXGPU, 31a13e57 compute probe, 23c89dab metal probe)"
   },
   "components": {
@@ -64,7 +64,10 @@
   },
   "does_not_prove": [
     "that any GPU work happens; no target run exists",
-    "that the remaining acceptance finding F1 (teardown trace below drm_release) is closed; it is still open"
+    "that the F4 claim in this record ('one authoritative copy') held for r17: it did not, which is why r18 and r19 rebuilt the package"
   ],
-  "hardware_executed": false
+  "hardware_executed": false,
+  "superseded_by": "r19",
+  "known_issue": "the package contains two different NEXT-STEPS files: the generated root one and tools/NEXT-STEPS.txt, which prepare_kit copied from the deployment directory. r18 fixes this by keeping the authoritative text outside the directory that is copied.",
+  "f1_status_at_the_time_of_this_record": "the teardown trace was complete when this record was written; the stale line quoted by the verifier was in mainline-audit.json, not here, and has been corrected"
 }

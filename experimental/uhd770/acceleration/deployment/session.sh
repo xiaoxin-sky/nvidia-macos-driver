@@ -62,16 +62,20 @@ property() { plutil -extract "$1" raw -o - "$PLAN"; }
 hash() { shasum -a 256 "$1" | awk '{print $1}'; }
 
 # Capture budget for the manual run. One recorder session has to outlive the
-# whole run: startup confirmation, the coordinator's own bound, and the
-# post-test observation. A window shorter than their sum is exactly how a
-# teardown panic at the end goes unrecorded, so the sum is checked here rather
-# than left to whoever edits a constant later.
+# whole run: startup confirmation, the coordinator's own bound, the loaded-kext
+# snapshot taken after it exits, and the post-test observation. A window shorter
+# than their sum is exactly how a teardown panic at the end goes unrecorded.
+# The budget is a constant with a guard rather than a computed value: what is
+# checked here is that it covers every bounded step that runs while the
+# recorder is alive, so a later edit to one constant fails at startup.
 MANUAL_STARTUP_LIMIT=25
 MANUAL_COORDINATOR_LIMIT=600
 MANUAL_OBSERVE_LIMIT=180
+MANUAL_LOADED_AFTER_LIMIT=10
 MANUAL_CAPTURE_LIMIT=900
-[ "$MANUAL_CAPTURE_LIMIT" -ge $((MANUAL_STARTUP_LIMIT + MANUAL_COORDINATOR_LIMIT + MANUAL_OBSERVE_LIMIT)) ] || \
-    die 'Capture budget does not cover startup, coordinator and observation.'
+MANUAL_REQUIRED_LIMIT=$((MANUAL_STARTUP_LIMIT + MANUAL_COORDINATOR_LIMIT + MANUAL_OBSERVE_LIMIT + MANUAL_LOADED_AFTER_LIMIT))
+[ "$MANUAL_CAPTURE_LIMIT" -ge "$MANUAL_REQUIRED_LIMIT" ] || \
+    die 'Capture budget does not cover startup, coordinator, loaded-kext snapshot and observation.'
 
 # Every mutation/recovery target is fixed here, not read from a journal or EFI.
 targets() {
@@ -725,7 +729,7 @@ run_manual_test() {
     session_bounded_group "$MANUAL_COORDINATOR_LIMIT" "$PRIVATE/manual-coordinator-$current.txt" \
         sudo -n -u "#$uid" /bin/bash -p "$ROOT/session-tools/session-user.sh" manual || code=$?
     kill -TERM "$FOLLOWER" 2>/dev/null || :; FOLLOWER=''
-    session_bounded 10 "$PRIVATE/manual-loaded-after-$current.txt" kmutil showloaded || :
+    session_bounded "$MANUAL_LOADED_AFTER_LIMIT" "$PRIVATE/manual-loaded-after-$current.txt" kmutil showloaded || :
     if [ "$code" -eq 124 ]; then
         printf 'boot=%s\ntrigger=manual-timeout\npartial=true\n' "$current" > "$PUBLIC/deadline-$current.txt"
         chmod 644 "$PUBLIC/deadline-$current.txt"

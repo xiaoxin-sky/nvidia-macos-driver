@@ -16,6 +16,7 @@ Rules this tool follows, because getting them wrong hides a failure:
   marker at the start of a line in that session's own probe log.
 """
 import argparse
+import datetime
 import json
 import re
 import sys
@@ -76,6 +77,7 @@ def sessions_in(report):
             "coordinator_exit": exits[-1] if exits else None,
             "evidence_named": named,
             "evidence_stamp": stamp,
+            "stamp_source": "probe evidence" if stamp else "session file time",
             "mtime": mtime,
             "registry_ready": bool(re.search(r"NMXGPU.*registered, matched, active",
                                              read(path / "registry-latest.txt") or "")),
@@ -83,9 +85,23 @@ def sessions_in(report):
     return out
 
 
+def mtime_stamp(session):
+    """Express the session file's own timestamp in the same form as the evidence stamp.
+
+    A session that failed before it could name a probe directory has no
+    evidence stamp, and treating that as "older than everything" is exactly how
+    an old success gets reported for a newer failure. The file timestamp is a
+    real UTC instant, so both kinds of session can be ordered together.
+    """
+    try:
+        return datetime.datetime.fromtimestamp(session["mtime"], datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    except (OverflowError, OSError, ValueError):
+        return "00000000T000000Z"
+
+
 def order_key(session):
-    """Evidence time first, file time only as a tie-breaker."""
-    return (session["evidence_stamp"] or "", session["mtime"])
+    """Order by evidence time when present, otherwise by the session file's time."""
+    return (session["evidence_stamp"] or mtime_stamp(session),)
 
 
 def probe_report(directory):
@@ -167,6 +183,10 @@ def decide(report, current, probe, others_with_marker, panic):
     if not current["gpu_started"]:
         return "failure", "the session exited 0 but never reached the probe"
     if probe is None:
+        if not current["evidence_named"]:
+            return "incomplete", (
+                "the current session never named a probe directory, which means it stopped before compute could start; "
+                "an older session's marker is not this run's result")
         return "incomplete", (
             "the current session named an evidence directory that is not in the report, so its own probe result "
             "cannot be checked")
@@ -221,11 +241,11 @@ def main():
     if stage_state:
         print("stage-state:", "; ".join(l.replace("=", ": ") for l in stage_state.splitlines() if l))
 
-    print("\nsessions (oldest first, ordered by evidence stamp):")
+    print("\nsessions (oldest first, by probe evidence stamp or session file time):")
     for s in ordered:
         mark = "*" if current is not None and s["dir"] == current["dir"] else " "
-        print(f" {mark} {s['dir']}  evidence={s['evidence_stamp'] or 'unknown'}  "
-              f"exit={s['coordinator_exit']}  gpu_started={s['gpu_started']}")
+        print(f" {mark} {s['dir']}  stamp={s['evidence_stamp'] or mtime_stamp(s)} "
+              f"({s['stamp_source']})  exit={s['coordinator_exit']}  gpu_started={s['gpu_started']}")
     if not ordered:
         print("   (none)")
 

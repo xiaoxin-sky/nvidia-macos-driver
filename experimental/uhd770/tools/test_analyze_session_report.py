@@ -4,7 +4,9 @@ These encode the failures the independent acceptance report reproduced: the tool
 must never report success for a run that failed, and must never read an older
 session's success marker as the current run's result.
 """
+import datetime
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -13,6 +15,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TOOL = HERE / "analyze_session_report.py"
+
+
+def epoch(stamp):
+    """The instant named by an evidence stamp such as 20261021T120000Z."""
+    return datetime.datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(
+        tzinfo=datetime.timezone.utc).timestamp()
 
 
 def build(root, sessions, probes):
@@ -33,6 +41,8 @@ def build(root, sessions, probes):
                 f"Evidence directory: /Users/x/Library/Logs/UHD770MVP/{s['evidence']}\n", encoding="utf-8")
         (d / "registry-latest.txt").write_text(
             "+-o NMXGPU  <class NMXGPU, registered, matched, active>\n", encoding="utf-8")
+        if "mtime" in s:
+            os.utime(d / "session.txt", (s["mtime"], s["mtime"]))
     for p in probes:
         d = diag / p["dir"]
         d.mkdir()
@@ -142,6 +152,40 @@ class AnalyzerRules(unittest.TestCase):
         text = run(self.root)
         self.assertIn("verdict (incomplete)", text)
         self.assertIn("not in the report", text)
+
+    def test_newest_session_without_evidence_does_not_lose_to_an_older_success(self):
+        # a run that stops before naming a probe directory has no evidence
+        # stamp; ordering it by "no stamp" would put it before every stamped
+        # session and hand the verdict to an older success
+        build(
+            self.root,
+            sessions=[
+                {"dir": "manual-FFFFFFFF", "exit": 0, "evidence": "20261021T120000Z-vulkan.OLD001",
+                 "mtime": epoch("20261021T110000Z")},
+                {"dir": "manual-00000000", "exit": 2, "mtime": epoch("20261021T190000Z")},
+            ],
+            probes=[{"dir": "20261021T120000Z-vulkan.OLD001",
+                     "log": "COMPUTE_READBACK_VERIFIED: vendor=8086 device=4680\n"}],
+        )
+        text = run(self.root)
+        self.assertIn("verdict (failure)", text)
+        self.assertIn("exited 2", text)
+        self.assertNotIn("verdict (success)", text)
+
+    def test_newest_session_without_evidence_and_no_exit_is_incomplete(self):
+        build(
+            self.root,
+            sessions=[
+                {"dir": "manual-FFFFFFFF", "exit": 0, "evidence": "20261021T120000Z-vulkan.OLD001",
+                 "mtime": epoch("20261021T110000Z")},
+                {"dir": "manual-00000000", "exit": None, "mtime": epoch("20261021T190000Z")},
+            ],
+            probes=[{"dir": "20261021T120000Z-vulkan.OLD001",
+                     "log": "COMPUTE_READBACK_VERIFIED: vendor=8086\n"}],
+        )
+        text = run(self.root)
+        self.assertIn("verdict (incomplete)", text)
+        self.assertNotIn("verdict (success)", text)
 
     def test_panic_dominates(self):
         build(
