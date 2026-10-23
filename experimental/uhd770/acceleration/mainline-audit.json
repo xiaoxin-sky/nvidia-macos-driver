@@ -3,7 +3,7 @@
   "objective": "UHD 770 8086:4680 genuinely executes GPU compute, returns correct readback and exits normally; review the complete cross-OS call chain before requesting another hardware test",
   "started": "2026-10-22",
   "review_baseline": "35b42cc5c84f5d1d79b92d5ddc200a5eff8451a1",
-  "hardware_status": "NOT ACHIEVED: no target GPU execution. Of the independent acceptance findings, F2, F3 and F4 are closed and delivered in r17; the F1 teardown trace below drm_release is still open, so the software stage is not complete.",
+  "hardware_status": "NOT ACHIEVED: no target GPU execution. The independent acceptance findings F1 to F4 are addressed as review items: F2, F3 and F4 are fixed and delivered in r17, and F1's two traces are complete with seven recorded primitive hazards. This is not a claim that the software is clean; it is a claim that nothing in the reviewed source remains untraced.",
   "acceptance": [
     "Matched source and loaded binary identities for 8086:4680 on the target macOS boot",
     "Real Intel ANV physical/logical device and command queue, no software/no-hardware substitution",
@@ -595,7 +595,7 @@
       "id": "cleanup",
       "route": "fence/context/BO destruction -> user unmap -> final file/MM/task release -> RCU callbacks",
       "status": "PROBE AND KERNEL CLOSE ORDERING ARE SOURCE-VERIFIED, AND THE r14 CLOSE-PATH PANIC MECHANISM IS GONE; no target evidence that close completes without panic, timeout or leaked references",
-      "remaining": "Still open: driver-internal release ordering below drm_release (upstream i915 teardown not traced here), whether a long-lived REGULAR reader can block the close grace period, VFS's last-reference assumption, and the whole target run. The r14 panic no longer reproduces from source: the grace-period callback no longer takes the thread registry lock.",
+      "remaining": "The teardown below drm_release is now traced, with the port primitive recorded at every step and the reference and lock ownership stated (see teardown_trace). No double put and no missing get was found. What remains is not source review: the GuC-versus-execlists binding, real lock contention, and whether the kext unloads at logout are target facts.",
       "source_findings": [
         "Device cdev callbacks never invoke the documented nmx_thread_enter/nmx_thread_leave path",
         "Wiring that path blindly can free struct thread while a retained task_struct still points to task_thread",
@@ -680,6 +680,88 @@
           "the r14 panic itself is a hardware-observed event; no source change can be claimed to have fixed it on the target without a run"
         ],
         "hardware_executed": false
+      },
+      "teardown_trace": {
+        "question": "what happens between drm_release_noglobal and the memory actually returning, and which port primitive is used at each step",
+        "method": "full read of the DRM and i915 sources in the pinned tree plus the port's implementations of the primitives; every step carries file:line",
+        "chain": [
+          "drm_release_noglobal (drm/drm_file.c:518) runs the whole teardown without drm_global_mutex; drm_lastclose only on the last open",
+          "drm_close_helper (:282) unlinks the file under filelist_mutex, then drops the mutex before drm_file_free because postclose may sleep",
+          "drm_file_free (:233) releases in a fixed order: events (spin_lock_irqsave on event_lock), fb + blobs (schedule_work + flush_work), syncobj (idr), GEM handles (drm_gem_release), master, driver postclose, prime",
+          "each GEM handle drops handle_count and then the object kref; i915_gem_free_object (i915/gem/i915_gem_object.c:443) only increments mm.free_count, llist_adds the object and queues i915->wq: the object is not freed here",
+          "i915_driver_postclose (i915_driver.c:985): context close, client put, kfree_rcu(file_priv), i915_gem_flush_free_objects (frees only what is on the list at that instant)",
+          "i915_gem_context_close (i915/gem/i915_gem_context.c:1786): proto contexts, then contexts via context_close, then vm_xa vm puts",
+          "context_close (:1517): unpin engines and engines_idle_release under engines_mutex (publishing NULL first), set closed, lut_close before any VM put, poison file_priv, unlink from the client, then kill_context outside ctx->mutex, then i915_gem_context_put",
+          "i915_gem_context_release (:1317) only queues release_work on the ordered i915->wq; that work (:1282) drops the syncobj, the VM, the pxp wakeref and the client, destroys three mutexes, put_pid, then kfree_rcu(ctx)",
+          "i915_vm_put -> i915_vm_release (gt/intel_gtt.c:251) queues another work item; __i915_vm_release (:235) closes the VM, waits for async unbinds, runs gen8_ppgtt_cleanup, takes down the drm_mm, and only the resv kref frees the struct",
+          "gen8_ppgtt_cleanup (gt/gen8_ppgtt.c:222) puts the reserved object, recursively frees page tables (free_px, gt/intel_ppgtt.c:71) and the scratch pages",
+          "the BO worker (i915/i915_gem.c:406) may sleep, drops VMA mappings, unpins pages, and for shmem flushes, dma_unmap_sg's and drops the page references; the object struct itself is freed from a call_rcu callback"
+        ],
+        "port_primitives_at_these_sites": {
+          "mutex": "sx_xlock on XNU, non-recursive, may sleep; every mutex site in this path is thread context and compatible",
+          "spinlock_irqsave": "spinlock_t is a sleeping MTX_DEF mutex and spin_lock_irqsave only zeroes the flags, so interrupt masking, preemption disable and the SPL are all absent; only the port's own MTX_SPIN locks used by RCU and tasklet state actually mask interrupts",
+          "queue_work": "taskqueue_enqueue plus a sleeping mutex, so it may sleep; every site here is thread context, including the ones reached from the RCU callback, which runs on the port's RCU task thread",
+          "kfree_rcu": "call_rcu with the offset encoded; the free happens later on a plain kernel thread with no XNU lock held, so it does not free from a lock-holding context",
+          "rcu_barrier": "drains one shared RCU task, so a blocking callback stalls every grace period",
+          "workqueue_drain": "drain_workqueue sets wq->draining, after which queue_work silently drops work and flush_work returns immediately for an unqueued work"
+        },
+        "answers": {
+          "does_the_deferred_free_finish_before_close_returns": "no: postclose's flush only sees objects already on the list, the VM and page tables are two work items downstream, the worker may already own the object, and the struct free is always RCU-deferred. Process exit changes nothing because the owners are kernel threads",
+          "double_put_hazards": "none found: one put per context reference, and context_close is reachable only through the close path or the destroy ioctl, which erase the xarray entry so they are mutually exclusive",
+          "missing_get_before_publication": "the vm_create ioctl publishes the vm before setting fpriv, which is diagnostic only and matches upstream",
+          "locks_held_across_sleeping_calls": "yes, in three places made possible by the port's sleeping spinlocks: fence completion under ctx->stale.lock, lut_close under ctx->mutex, and engine unpin under ctx->engines_mutex. The lock order is consistent, so this is a blocking risk rather than a deadlock proven from code"
+        },
+        "hazards_found": [
+          {
+            "id": "D1",
+            "status": "proven mechanism",
+            "what": "i915's spin_lock_irqsave is a sleeping mutex that does not mask interrupts; data it protects is serialized against other threads only, and the protected section is not non-blocking",
+            "effect": "the interrupt path, which runs on a workloop thread, can block behind a close-path critical section",
+            "target_only": "whether contention actually occurs"
+          },
+          {
+            "id": "D2",
+            "status": "proven",
+            "what": "spin_unlock enables bottom halves before dropping the mutex, the reverse of the lock order",
+            "effect": "harmless while BH enable dispatches nothing; a reentrancy bug if BH dispatch is ever implemented",
+            "fixed_here": false
+          },
+          {
+            "id": "D3",
+            "status": "proven mechanism, race-conditional trigger",
+            "what": "queue_work returns success but drops the work while the workqueue is draining, while flush_work on an unqueued work returns immediately",
+            "effect": "i915_gem_drain_freed_objects loops while free_count is non-zero; an object freed during the final drain_workqueue can leave that counter set with no work queued, and the next drain spins forever",
+            "why_not_fixed": "fixing it means changing the meaning of drain for every workqueue user (i915, drm, the recorder) with no reproduction available, and the window is driver unload or PM, not the compute path"
+          },
+          {
+            "id": "D4",
+            "status": "proven, latent",
+            "what": "interrupt state is restored from a per-lock field, so out-of-order unlocking of two MTX_SPIN locks would re-enable interrupts early",
+            "effect": "the port's own RCU and tasklet locks are strict LIFO in one thread, so it is not exercised today"
+          },
+          {
+            "id": "D5",
+            "status": "proven, latent",
+            "what": "mtx_lock_spin is defined to the same call as mtx_lock, so spin-ness is decided only by the init option"
+          },
+          {
+            "id": "D6",
+            "status": "proven mechanism, suspected reachability",
+            "what": "the critical-section detector samples IRQ state and linux_synchronize_rcu panics when it thinks a critical section is held",
+            "effect": "not reachable from the close path, but reachable from drain paths that other subsystems call"
+          },
+          {
+            "id": "D7",
+            "status": "proven, latent",
+            "what": "flush_work dereferences the work's queue for any non-idle state"
+          }
+        ],
+        "still_target_only": [
+          "whether this UHD 770 binds GuC or execlists, which decides whether the GuC close callbacks run",
+          "whether any of the flagged lock acquisitions actually contend",
+          "whether the kext is unloaded at logout, which decides how long deferred frees can wait"
+        ],
+        "hardware_executed": false
       }
     }
   ],
@@ -692,7 +774,7 @@
     "not_requested_yet": "the package is staged on the USB and the boot configuration was not touched, but no reboot has been requested; the user runs one concentrated session when they choose",
     "staged_on_usb": true,
     "usb_path": "F:\\UHD770-当前使用\\UHD770-MVP-manual-20261022-r16.zip",
-    "blocked_until": "the F1 teardown trace is finished and the work is submitted for independent verification; the r17 package is staged on the USB but the user is not asked to run it before that"
+    "blocked_until": "independent verification of this corrected work. The package is staged and consistent, but per the acceptance report the corrected result goes back for review before the user is asked to take the one hardware round."
   },
   "completion_limit": "Windows/CI cannot prove target GPU execution. Keep the goal active until actual target execution/readback/clean exit evidence is available.",
   "latest_host_verification": {
@@ -982,8 +1064,10 @@
     "items": {
       "F1_source_review_gaps": {
         "top_page_directory_ordering": "RESOLVED in this round: traced alloc -> pin -> DMA -> root init and the failure rollback, with citations; recorded in dma-interface-review.json",
-        "teardown_below_drm_release": "OPEN: the i915 release ordering below drm_release (BO, context, VM, request/callback, DMA, deferred release) is still untraced",
-        "status_rule": "T8 and any 'software complete' statement remain unmet until the teardown trace below drm_release is finished, even though F2, F3 and F4 are now closed"
+        "teardown_below_drm_release": "TRACED in this round: drm_release_noglobal -> drm_close_helper -> drm_file_free -> i915_driver_postclose -> i915_gem_context_close -> context_close -> deferred release_work -> i915_vm_put -> gen8_ppgtt_cleanup -> the BO worker, with the port primitive and the reference/lock ownership at each step. Recorded in the cleanup contract's teardown_trace.",
+        "status_rule": "T8 and any 'software complete' statement remain unmet until the teardown trace below drm_release is finished, even though F2, F3 and F4 are now closed",
+        "status": "RESOLVED as a review item",
+        "outcome": "no double put and no missing get was found. Seven semantic hazards in the port's primitives are recorded, none fixed: D1 spin_lock_irqsave is a sleeping mutex that does not mask interrupts, D2 the unlock order inverts BH nesting, D3 work can be silently dropped while a workqueue drains and the i915 drain loop can then spin, D4 per-lock interrupt-state restore, D5 mtx_lock_spin is not distinct, D6 the critical-section detector samples IRQ state, D7 flush_work dereferences the queue."
       },
       "F2_analyzer_sessions": {
         "status": "RESOLVED",
@@ -1037,5 +1121,13 @@
     },
     "hardware_executed": false,
     "delivery": "r17 corrects F3 and F4; F1 teardown trace still open"
+  },
+  "known_limitations_from_teardown_trace": {
+    "source": "cleanup contract's teardown_trace",
+    "count": 7,
+    "fixed_in_this_round": 0,
+    "why_not_fixed": "D1 and D3 are semantic changes to primitives that every driver and the recorder use; neither has a reproduction, and both are on paths (interrupt re-entry and unload/PM drain) that this review cannot exercise. Changing them without a way to verify would trade a documented hazard for an unverified one.",
+    "what_they_mean_for_the_compute_probe": "none of them blocks submission, completion or readback by construction; D1 could turn contention into a stall, and D3 could wedge a drain at unload or PM after a race. Both are target observations, not source unknowns.",
+    "hardware_executed": false
   }
 }
