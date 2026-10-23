@@ -728,7 +728,8 @@
             "fixed_here": false,
             "fix": "a new hunk for sys/compat/linuxkpi/common/include/linux/spinlock.h in patches/freebsd.patch",
             "verification": "check_patch_inputs.py applies the patch to the clean pin and the whole fixture preparation still passes; test_hazard_dispositions.py applies the shipped patch to a temp copy and asserts that both macros release before enabling; the kernel build on the next CI run compiles the patched header",
-            "coverage": "spin_unlock and spin_unlock_bh are reordered in the patch; spin_unlock_irq and spin_unlock_irqrestore route through spin_unlock, so all four unlock variants now release the mutex before enabling bottom halves"
+            "coverage": "spin_unlock and spin_unlock_bh are reordered in the patch; spin_unlock_irq and spin_unlock_irqrestore route through spin_unlock, so all four unlock variants now release the mutex before enabling bottom halves",
+            "build_status": "the patch hunk is in the repository and locally verified, but the CI build that would embed it has not finished (160+ minutes of cold recompile because the header is included by every unit). The delivered package r19 therefore does NOT contain this fix. If that build succeeds, r20 will carry it; if it fails, the hunk is reverted with tools/revert_d2.py and the hazard returns to the recorded-only state."
           },
           {
             "id": "D3",
@@ -1141,7 +1142,7 @@
       }
     },
     "hardware_executed": false,
-    "delivery": "r19",
+    "delivery": "r19 is the delivered package and does not contain the D2 fix; the fix is in the patch and its build is in flight",
     "status": "F2 fixed again after an independent verifier found that a newest session with no evidence directory still lost to an older success; F3 and F4 fixed and delivered; F1 traced and its hazards recorded, but see the corrections block",
     "verifier_corrections_20261023": {
       "source": "an independent read-only verification of this handback",
