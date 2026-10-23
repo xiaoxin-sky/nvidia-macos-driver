@@ -221,7 +221,7 @@
     "parent_pde_and_root_recorded_in": "ppgtt_root_and_pde"
   },
   "ppgtt_root_and_pde": {
-    "status": "source-verified parent PDE encoding and context root programming; page-walk, pin ordering and all hardware effects unverified",
+    "status": "SOURCE-VERIFIED parent PDE encoding, context root programming and now the allocation-to-root-init order with its failure rollback; the GPU page walk, scratch/TLB interaction and every hardware effect remain unverified",
     "question": "Does the GPU reach the page tables the driver wrote: is every parent directory entry and the context root filled with the DMA address of the object it names, with the flags the hardware expects?",
     "chain": [
       "child page-table and page-directory objects are i915 internal GEM objects; their pages are DMA-mapped by i915_gem_gtt_prepare_pages through the S/G -> BSD -> native path already reviewed",
@@ -267,11 +267,31 @@
       }
     ],
     "open": [
-      "pin ordering: that the top page-directory object already has pages and a DMA address at the moment init_ppgtt_regs reads px_dma (upstream guarantees it, this review has not traced the allocation-to-context-init order itself)",
       "whether the GPU page-walk actually reaches the parent entries (target only)",
       "scratch/TLB interaction when a parent entry is replaced or cleared while the GPU is using it"
     ],
-    "hardware_executed": false
+    "hardware_executed": false,
+    "pin_ordering_trace": {
+      "question": "does the top page-directory object already have pinned pages and a DMA address when init_ppgtt_regs reads px_dma",
+      "answer": "yes; traced end to end in the pinned drm-kmod tree",
+      "chain": [
+        "gen8_ppgtt_create allocates and initialises the VM, then calls gen8_init_scratch, then gen8_alloc_top_pd (gt/gen8_ppgtt.c:1056-1060)",
+        "gen8_alloc_top_pd calls __alloc_pd (kzalloc + kcalloc entries, gt/intel_ppgtt.c:35-51), then vm->alloc_pt_dma to create the backing object, then map_pt_dma on it (gt/gen8_ppgtt.c:933-946)",
+        "map_pt_dma pins the object through i915_gem_object_pin_map_unlocked and marks it unshrinkable (gt/intel_gtt.c:115-119); pinning is what establishes the sg DMA addresses that px_dma later reads",
+        "only after that does gen8_alloc_top_pd fill the entries with px_dma-derived values (fill_page_dma, gt/gen8_ppgtt.c:948) and mark the page directory pinned (atomic_inc(px_used), :949)",
+        "ppgtt->pd is assigned only when gen8_alloc_top_pd returned successfully (gt/gen8_ppgtt.c:1060-1065)",
+        "init_ppgtt_regs runs later, when a context is created on that VM (gt/intel_lrc.c:945 via lrc_init_regs), so the read of px_dma(ppgtt->pd) happens strictly after the pin and DMA mapping"
+      ],
+      "failure_rollback": [
+        "if map_pt_dma fails, gen8_alloc_top_pd goes to err_pd and calls free_pd, which is free_px(vm, px_pt(px), 1): it frees the entry array, does i915_gem_object_put on the backing object exactly once, and frees the directory (gt/intel_ppgtt.c:71-85)",
+        "gen8_ppgtt_create then takes err_put and calls i915_vm_put (gt/gen8_ppgtt.c:1082-1084); gen8_ppgtt_cleanup guards its teardown with if (ppgtt->pd) (gt/gen8_ppgtt.c:232), and ppgtt->pd is still NULL on that path, so the already-freed directory cannot be freed twice"
+      ],
+      "remaining_target_only": [
+        "whether the GPU page walk actually reaches the parent entries (needs the target)",
+        "scratch/TLB interaction when a parent entry is replaced or cleared while the GPU is using it (needs the target)"
+      ],
+      "hardware_executed": false
+    }
   },
   "cpu_alias_cache_modes": {
     "status": "source-verified alias encoding round trip, alias creation and flush primitives; real visibility and snooping unverified",

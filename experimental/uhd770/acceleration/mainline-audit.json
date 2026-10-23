@@ -3,7 +3,7 @@
   "objective": "UHD 770 8086:4680 genuinely executes GPU compute, returns correct readback and exits normally; review the complete cross-OS call chain before requesting another hardware test",
   "started": "2026-10-22",
   "review_baseline": "35b42cc5c84f5d1d79b92d5ddc200a5eff8451a1",
-  "hardware_status": "NOT ACHIEVED: no target GPU execution yet. The software stage is complete and a single concentrated manual test package (r16) is prepared; it has not been run and no reboot has been requested.",
+  "hardware_status": "NOT ACHIEVED: no target GPU execution. The software stage is also not complete: the independent acceptance report of 2026-10-22 records unresolved source-review items and three delivery/tooling findings, which are being worked through.",
   "acceptance": [
     "Matched source and loaded binary identities for 8086:4680 on the target macOS boot",
     "Real Intel ANV physical/logical device and command queue, no software/no-hardware substitution",
@@ -223,7 +223,7 @@
         "hardware_executed": false
       },
       "ppgtt_root_and_pde": {
-        "status": "source-verified parent PDE encoding and context root programming; page-walk, pin ordering and all hardware effects unverified",
+        "status": "SOURCE-VERIFIED parent PDE encoding, context root programming and the allocation-to-root-init order with its failure rollback; the GPU page walk and scratch/TLB interaction remain unverified",
         "detail": "experimental/uhd770/acceleration/dma-interface-review.json ppgtt_root_and_pde",
         "verified": [
           "no CPU physical address enters a parent entry or the context root",
@@ -232,11 +232,31 @@
           "the flags ORed into the address cannot collide with address bits"
         ],
         "open": [
-          "pin ordering: that the top page-directory object already has pages and a DMA address at the moment init_ppgtt_regs reads px_dma (upstream guarantees it, this review has not traced the allocation-to-context-init order itself)",
           "whether the GPU page-walk actually reaches the parent entries (target only)",
           "scratch/TLB interaction when a parent entry is replaced or cleared while the GPU is using it"
         ],
-        "hardware_executed": false
+        "hardware_executed": false,
+        "pin_ordering_trace": {
+          "question": "does the top page-directory object already have pinned pages and a DMA address when init_ppgtt_regs reads px_dma",
+          "answer": "yes; traced end to end in the pinned drm-kmod tree",
+          "chain": [
+            "gen8_ppgtt_create allocates and initialises the VM, then calls gen8_init_scratch, then gen8_alloc_top_pd (gt/gen8_ppgtt.c:1056-1060)",
+            "gen8_alloc_top_pd calls __alloc_pd (kzalloc + kcalloc entries, gt/intel_ppgtt.c:35-51), then vm->alloc_pt_dma to create the backing object, then map_pt_dma on it (gt/gen8_ppgtt.c:933-946)",
+            "map_pt_dma pins the object through i915_gem_object_pin_map_unlocked and marks it unshrinkable (gt/intel_gtt.c:115-119); pinning is what establishes the sg DMA addresses that px_dma later reads",
+            "only after that does gen8_alloc_top_pd fill the entries with px_dma-derived values (fill_page_dma, gt/gen8_ppgtt.c:948) and mark the page directory pinned (atomic_inc(px_used), :949)",
+            "ppgtt->pd is assigned only when gen8_alloc_top_pd returned successfully (gt/gen8_ppgtt.c:1060-1065)",
+            "init_ppgtt_regs runs later, when a context is created on that VM (gt/intel_lrc.c:945 via lrc_init_regs), so the read of px_dma(ppgtt->pd) happens strictly after the pin and DMA mapping"
+          ],
+          "failure_rollback": [
+            "if map_pt_dma fails, gen8_alloc_top_pd goes to err_pd and calls free_pd, which is free_px(vm, px_pt(px), 1): it frees the entry array, does i915_gem_object_put on the backing object exactly once, and frees the directory (gt/intel_ppgtt.c:71-85)",
+            "gen8_ppgtt_create then takes err_put and calls i915_vm_put (gt/gen8_ppgtt.c:1082-1084); gen8_ppgtt_cleanup guards its teardown with if (ppgtt->pd) (gt/gen8_ppgtt.c:232), and ppgtt->pd is still NULL on that path, so the already-freed directory cannot be freed twice"
+          ],
+          "remaining_target_only": [
+            "whether the GPU page walk actually reaches the parent entries (needs the target)",
+            "scratch/TLB interaction when a parent entry is replaced or cleared while the GPU is using it (needs the target)"
+          ],
+          "hardware_executed": false
+        }
       }
     },
     {
@@ -671,7 +691,8 @@
     "scope": "one macOS session on 8086:4680: prepare, reboot through the same USB, run Run-UHD770-Test.command manually, then bring the report back",
     "not_requested_yet": "the package is staged on the USB and the boot configuration was not touched, but no reboot has been requested; the user runs one concentrated session when they choose",
     "staged_on_usb": true,
-    "usb_path": "F:\\UHD770-当前使用\\UHD770-MVP-manual-20261022-r16.zip"
+    "usb_path": "F:\\UHD770-当前使用\\UHD770-MVP-manual-20261022-r16.zip",
+    "blocked_until": "the F1 teardown tracing and the F2/F3/F4 fixes are finished and a corrected package is delivered; do not ask the user to run the current one before then"
   },
   "completion_limit": "Windows/CI cannot prove target GPU execution. Keep the goal active until actual target execution/readback/clean exit evidence is available.",
   "latest_host_verification": {
@@ -953,5 +974,21 @@
       "hardware_executed": false,
       "new_user_reboot_requested": false
     }
+  },
+  "acceptance_findings_20261022": {
+    "source": "D:\\UHD770-driver-kit\\UHD770-r16-独立验收报告-20261022.md",
+    "verdict": "the independent acceptance confirms the real fix, the native build and the r16 artifacts, but does not accept the claim that the software side is complete",
+    "software_stage_status": "NOT COMPLETE: F1 items and F2/F3/F4 are still open",
+    "items": {
+      "F1_source_review_gaps": {
+        "top_page_directory_ordering": "RESOLVED in this round: traced alloc -> pin -> DMA -> root init and the failure rollback, with citations; recorded in dma-interface-review.json",
+        "teardown_below_drm_release": "OPEN: the i915 release ordering below drm_release (BO, context, VM, request/callback, DMA, deferred release) is still untraced",
+        "status_rule": "T8 and any 'software complete' statement stay unmet until the teardown trace is done"
+      },
+      "F2_analyzer_sessions": "OPEN: the analyzer picks the newest session by directory name, which is a random UUID, and can report an old success",
+      "F3_capture_budget": "OPEN: the recorder's 600 s window does not provably cover the coordinator bound plus the observation",
+      "F4_instruction_mismatch": "OPEN: the copy inside the zip and the copy on the USB disagree"
+    },
+    "hardware_executed": false
   }
 }
