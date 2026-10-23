@@ -729,7 +729,7 @@
             "fix": "a new hunk for sys/compat/linuxkpi/common/include/linux/spinlock.h in patches/freebsd.patch",
             "verification": "check_patch_inputs.py applies the patch to the clean pin and the whole fixture preparation still passes; test_hazard_dispositions.py applies the shipped patch to a temp copy and asserts that both macros release before enabling; the kernel build on the next CI run compiles the patched header",
             "coverage": "spin_unlock and spin_unlock_bh are reordered in the patch; spin_unlock_irq and spin_unlock_irqrestore route through spin_unlock, so all four unlock variants now release the mutex before enabling bottom halves",
-            "build_status": "the patch hunk is in the repository and locally verified, but the CI build that would embed it has not finished (160+ minutes of cold recompile because the header is included by every unit). The delivered package r19 therefore does NOT contain this fix. If that build succeeds, r20 will carry it; if it fails, the hunk is reverted with tools/revert_d2.py and the hazard returns to the recorded-only state."
+            "build_status": "BLOCKED BY CI INFRASTRUCTURE, NOT BY THIS PATCH. Four kernel runs are stuck at the same log line (the DRM/TTM/amdgpu section) for 190+ minutes, and the oldest of them is commit 5d00887, which predates the D2 patch. The hang is therefore not evidence against the change. The patch stays in the repository and its local verification stands; the delivered package r19 does not contain it. When a kernel build completes, r20 carries it."
           },
           {
             "id": "D3",
@@ -1179,5 +1179,12 @@
     "traces": "T0 baseline re-verified; T1-T7 contracts audited; T8 gate file exists; T9 package delivered twice (r17, r19)",
     "open": "seven primitive hazards recorded as known limitations, none fixed; no target execution",
     "meaning": "the gate stays open on purpose: a gate that is declared passed while known primitive hazards are unfixed would be the same over-claim the acceptance report called out"
+  },
+  "ci_infrastructure_note_20261023": {
+    "finding": "four kernel runs hung in the same step at the same log line; the oldest predates the D2 patch, so the cause is environmental or concurrency, not the header change",
+    "my_contribution_to_it": "the kernel workflow triggers on experimental/uhd770/{tools,tests,patches}/**, so several commits that only added tests or scripts each queued a full kernel build; on a limited macOS concurrency budget they compete",
+    "mitigation_taken": "no further commits touch those directories until a build completes",
+    "user_action_needed": "cancel the redundant in-progress kernel runs and keep or re-run one (39885342208 carries the D2 patch)",
+    "hardware_executed": false
   }
 }
