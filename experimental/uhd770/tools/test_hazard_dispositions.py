@@ -40,9 +40,38 @@ def read(base, relative):
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+PATCH = Path(__file__).resolve().parent.parent / "patches" / "freebsd.patch"
+SPINLOCK = f"{LINUXKPI}/spinlock.h"
+
+
+def patched_spinlock():
+    """Reproduce the header the kernel build sees: the pin with our patch applied.
+
+    Reading the pinned file would assert the pre-fix order, which is exactly the
+    mistake this check exists to prevent.
+    """
+    base = need(FREEBSD, "NMX_FREEBSD_SRC")
+    if not PATCH.is_file():
+        raise unittest.SkipTest(f"missing patch {PATCH}")
+    import shutil, subprocess, tempfile
+    work = Path(tempfile.mkdtemp())
+    try:
+        target = work / SPINLOCK
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((Path(base) / SPINLOCK).read_bytes().replace(b"\r\n", b"\n"))
+        subprocess.run(["git", "init", "-q"], cwd=work, check=True, capture_output=True)
+        applied = subprocess.run(["git", "apply", "--include", SPINLOCK, str(PATCH)],
+                                 cwd=work, capture_output=True, text=True)
+        if applied.returncode != 0:
+            raise AssertionError(f"patch does not apply to {SPINLOCK}: {applied.stderr.strip()[:200]}")
+        return target.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 class HazardDispositions(unittest.TestCase):
     def test_d2_bh_enable_cannot_dispatch(self):
-        """D2's disposition: the unlock order is inverted, but enabling BH runs nothing."""
+        """D2's fix is behaviourally neutral today only because enabling BH dispatches nothing."""
         base = need(XKPI, "NMX_XKPI")
         # the port overrides the pinned linux_tasklet.c, so the built definition
         # is the override, not the FreeBSD original
@@ -61,22 +90,21 @@ class HazardDispositions(unittest.TestCase):
             self.assertNotRegex(impl, r"tasklet|softirq|wakeup|schedule",
                                 "the BH enable implementation gained a dispatch path")
 
-    def test_d2_unlock_order_is_still_the_inverted_one(self):
-        """If someone fixes the order, the record must be updated; this fails until it is."""
-        base = need(FREEBSD, "NMX_FREEBSD_SRC")
-        header = read(base, f"{LINUXKPI}/spinlock.h")
-        block = re.search(r"#define\s+spin_unlock\(_l\).*?while \(0\)", header, re.S)
-        self.assertIsNotNone(block, "spin_unlock definition not found")
-        body = block.group(0)
-        enable_at = body.index("local_bh_enable")
-        unlock_at = body.index("mtx_unlock")
-        self.assertLess(enable_at, unlock_at,
-                        "spin_unlock now unlocks before enabling BH; the D2 record is stale and should be closed")
+    def test_d2_unlock_order_is_fixed(self):
+        """D2 is fixed by the shipped patch: both unlock macros release the mutex before enabling BH."""
+        header = patched_spinlock()
+        for macro in ("spin_unlock", "spin_unlock_bh"):
+            block = re.search(rf"#define\s+{macro}\(_l\).*?while \(0\)", header, re.S)
+            self.assertIsNotNone(block, f"{macro} definition not found")
+            body = block.group(0)
+            release = body.find("mtx_unlock") if "mtx_unlock" in body else body.find("spin_unlock(_l)")
+            self.assertGreaterEqual(release, 0, f"{macro} has no release step")
+            self.assertLess(release, body.index("local_bh_enable"),
+                            f"{macro} enables bottom halves before releasing the lock again")
 
     def test_d1_irqsave_still_does_not_mask(self):
         """D1's claim: spin_lock_irqsave only zeroes the flags."""
-        base = need(FREEBSD, "NMX_FREEBSD_SRC")
-        header = read(base, f"{LINUXKPI}/spinlock.h")
+        header = patched_spinlock()
         block = re.search(r"#define\s+spin_lock_irqsave\(_l, flags\).*?while \(0\)", header, re.S)
         self.assertIsNotNone(block, "spin_lock_irqsave definition not found")
         body = block.group(0)

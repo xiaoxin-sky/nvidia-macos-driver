@@ -722,11 +722,12 @@
           },
           {
             "id": "D2",
-            "status": "proven",
-            "what": "spin_unlock enables bottom halves before dropping the mutex, the reverse of the lock order",
+            "status": "FIXED",
+            "what": "spin_unlock enabled bottom halves before dropping the mutex, and spin_unlock_bh did the same; both now release the mutex first, which is what Linux does and what prevents a softirq from re-entering a lock the caller still holds",
             "effect": "harmless while BH enable dispatches nothing; a reentrancy bug if BH dispatch is ever implemented",
             "fixed_here": false,
-            "disposition": "kept: enabling bottom halves before unlocking is wrong in principle, but bottom-half dispatch is a per-thread counter that dispatches nothing today, so the observable order is unchanged; fixing it edits a pinned linuxkpi header that every spinlock user includes; checked by experimental/uhd770/tools/test_hazard_dispositions.py, which fails if the BH enable path gains any dispatch call and also fails if the unlock order is fixed, so the record cannot go stale silently"
+            "fix": "a new hunk for sys/compat/linuxkpi/common/include/linux/spinlock.h in patches/freebsd.patch",
+            "verification": "check_patch_inputs.py applies the patch to the clean pin and the whole fixture preparation still passes; test_hazard_dispositions.py applies the shipped patch to a temp copy and asserts that both macros release before enabling; the kernel build on the next CI run compiles the patched header"
           },
           {
             "id": "D3",
@@ -1086,7 +1087,7 @@
         "teardown_below_drm_release": "TRACED in this round: drm_release_noglobal -> drm_close_helper -> drm_file_free -> i915_driver_postclose -> i915_gem_context_close -> context_close -> deferred release_work -> i915_vm_put -> gen8_ppgtt_cleanup -> the BO worker, with the port primitive and the reference/lock ownership at each step. Recorded in the cleanup contract's teardown_trace.",
         "status_rule": "T8 and any 'software complete' statement remain unmet until the teardown trace below drm_release is finished, even though F2, F3 and F4 are now closed",
         "status": "RESOLVED as a review item",
-        "outcome": "no double put and no missing get was found. Seven semantic hazards in the port's primitives are recorded, none fixed: D1 spin_lock_irqsave is a sleeping mutex that does not mask interrupts, D2 the unlock order inverts BH nesting, D3 work can be silently dropped while a workqueue drains and the i915 drain loop can then spin, D4 per-lock interrupt-state restore, D5 mtx_lock_spin is not distinct, D6 the critical-section detector samples IRQ state, D7 flush_work dereferences the queue."
+        "outcome": "no double put and no missing get; the request/fence release is traced; D1 and D3 to D7 are recorded with individual reasons; D2 was a proven defect and is now fixed in the patch and checked"
       },
       "F2_analyzer_sessions": {
         "status": "RESOLVED",
@@ -1156,16 +1157,16 @@
   "known_limitations_from_teardown_trace": {
     "source": "cleanup contract's teardown_trace",
     "count": 7,
-    "fixed_in_this_round": 0,
-    "why_not_fixed": "D1 and D3 are semantic changes to primitives that every driver and the recorder use; neither has a reproduction, and both are on paths (interrupt re-entry and unload/PM drain) that this review cannot exercise. Changing them without a way to verify would trade a documented hazard for an unverified one.",
+    "fixed_in_this_round": 1,
+    "why_not_fixed": "D2 is fixed and verified. The other six are kept: D1 and D3 are semantic changes to primitives every driver and the recorder use, with no reproduction here and on interrupt-re-entry and unload paths; D4 to D7 are latent and not exercised by this port.",
     "what_they_mean_for_the_compute_probe": "none of them blocks submission, completion or readback by construction; D1 could turn contention into a stall, and D3 could wedge a drain at unload or PM after a race. Both are target observations, not source unknowns.",
     "hardware_executed": false,
     "checks": {
       "file": "experimental/uhd770/tools/test_hazard_dispositions.py",
       "what_it_checks": [
-        "D2's reason: the BH enable path in the override that is actually built forwards to a counter helper and calls no dispatch function",
-        "D2's premise: spin_unlock still enables BH before unlocking, so the record stays accurate; if this is ever fixed the test fails and forces the record to be updated",
-        "D1's premise: spin_lock_irqsave only zeroes the flags and masks nothing"
+        "D2's fix: the shipped patch makes both unlock macros release the mutex before enabling BH, checked by applying the patch",
+        "D2's neutrality today: the BH enable path in the override that is actually built forwards to a counter and calls no dispatch function",
+        "D1's premise: spin_lock_irqsave still only zeroes the flags and masks nothing"
       ],
       "result": "3 checks pass against the pinned trees on this host",
       "limit": "these are source checks, not runtime observations; they keep the records honest, they do not measure contention"

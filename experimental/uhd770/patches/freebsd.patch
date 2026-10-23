@@ -183,3 +183,21 @@
  			}
  			if (catch_signal) {
  				retval = -cv_wait_sig(&lock->condvar, &ww_mutex_global);
+--- a/sys/compat/linuxkpi/common/include/linux/spinlock.h
++++ b/sys/compat/linuxkpi/common/include/linux/spinlock.h
+@@ -75,13 +75,13 @@
+ #define	spin_unlock(_l)	do {			\
+ 	if (SPIN_SKIP())			\
+ 		break;				\
+-	local_bh_enable();			\
+ 	mtx_unlock(_l);				\
++	local_bh_enable();			\
+ } while (0)
+ 
+ #define	spin_unlock_bh(_l) do {			\
+-	local_bh_enable();			\
+ 	spin_unlock(_l);			\
++	local_bh_enable();			\
+ } while (0)
+ 
+ #define	spin_unlock_irq(_l) do {		\
