@@ -402,18 +402,18 @@ jobs:
           }
           if [[ "$NMX_FULL_AUDIT" != true ]]; then
             python3 - <<'PY'
-            import re
             p = 'all.sh'
             s = open(p).read()
-            s, changed = re.subn(r'(?<=amd\.flags\s)amd/amdgpu\s+', '', s, count=1)
-            if not changed:
-                s, changed = re.subn(r'\bamd/amdgpu\b\s+', '', s, count=1)
-            if not changed:
-                raise SystemExit('fast-path source selector anchor missing')
-            open(p, 'w').write(s)
-            print('UHD770 fast path: amdgpu sources omitted; shared DRM/TTM/dmabuf retained')
+            marker = ': > srcs.txt'
+            if marker not in s:
+                raise SystemExit('fast-path source-list anchor missing')
+            inject = "grep -v '/amd/amdgpu/' srcs.all > srcs.all.fast\nmv srcs.all.fast srcs.all\n"
+            s = s.replace(marker, inject + marker, 1)
+            open('all-fast.sh', 'w').write(s)
+            print('UHD770 fast path: amdgpu sources filtered; shared DRM/TTM/dmabuf retained')
             PY
-            run_build_stage "DRM / TTM / dma-buf (UHD 770 fast path)" logs obj 'bash all.sh 30' /tmp/all.log
+            chmod +x all-fast.sh
+            run_build_stage "DRM / TTM / dma-buf (UHD 770 fast path)" logs obj 'bash all-fast.sh 30' /tmp/all.log
           else
             run_build_stage "DRM / TTM / amdgpu" logs obj 'bash all.sh 30' /tmp/all.log
           fi
