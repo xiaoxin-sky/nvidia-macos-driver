@@ -82,9 +82,10 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/nmxgpu/ccache
-          key: nmxgpu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: nmxgpu-ccache-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            nmxgpu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-
+            nmxgpu-ccache-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-
+            nmxgpu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-39761550305-1
 
       - name: Stage the sources
         run: bash experimental/uhd770/tools/stage_sources.sh
@@ -417,10 +418,8 @@ jobs:
           grep -E 'sources:|runtime sources:' /tmp/all.log /tmp/i915.log /tmp/rt.log || true
           tail -30 /tmp/link.log || true
 
-      # Persist completed ccache entries before later packaging or reporting
-      # steps. The cache action can still run after a newer push cancels a build.
-      - name: Save compiler cache, including partial cancelled builds
-        if: always() && steps.toolchain.outcome == 'success' && env.NMX_USE_CACHE == 'true'
+      - name: Save compiler cache after a complete successful build
+        if: success() && env.NMX_USE_CACHE == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/nmxgpu/ccache
