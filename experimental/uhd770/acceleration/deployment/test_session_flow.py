@@ -276,9 +276,11 @@ class SessionFlowTests(unittest.TestCase):
             text = text.replace("/usr/libexec/PlistBuddy", str(mock / "PlistBuddy"))
             text = text.replace("/usr/bin/sudo", str(mock / "sudo"))
             # Delay semantics are exercised by the inert helper fixture. Only
-            # the observation duration is compressed in full-flow adapters.
-            text = text.replace('session_observe_capture "$MANUAL_CAPTURE" "$current" 180',
-                                'session_observe_capture "$MANUAL_CAPTURE" "$current" 2')
+            # the observation duration is compressed in full-flow adapters; a
+            # missing anchor would silently make every flow wait the full 180 s.
+            if name == "session.sh":
+                self.assertEqual(text.count("\nMANUAL_OBSERVE_LIMIT=180\n"), 1)
+                text = text.replace("\nMANUAL_OBSERVE_LIMIT=180\n", "\nMANUAL_OBSERVE_LIMIT=2\n")
             self.assertIsNone(re.search(r"[\"'= ]/(Library|private|System|Volumes|Users)/",
                                        text.replace(str(self.root), "$FIXTURE")))
             path.write_text(text, encoding="utf-8")
@@ -660,11 +662,13 @@ class SessionFlowTests(unittest.TestCase):
         self.prepare_test_boot()
         path = self.kit / "tools/session.sh"
         text = path.read_text(encoding="utf-8")
-        marker = 'session_bounded_group 600 "$PRIVATE/manual-coordinator-$current.txt"'
+        marker = 'session_bounded_group "$MANUAL_COORDINATOR_LIMIT" "$PRIVATE/manual-coordinator-$current.txt"'
         self.assertEqual(text.count(marker), 1)
+        self.assertEqual(text.count("\nMANUAL_COORDINATOR_LIMIT=600\n"), 1)
         # Shrink only the explicit manual watchdog. Boot recovery must not
         # consume it, publish its failure marker or initiate the coordinator.
-        path.write_text(text.replace(marker, marker.replace("600", "0", 1)), encoding="utf-8")
+        path.write_text(text.replace("\nMANUAL_COORDINATOR_LIMIT=600\n", "\nMANUAL_COORDINATOR_LIMIT=0\n"),
+                        encoding="utf-8")
         boot = self.run_session("boot", SESSION_BOOT="TEST")
         self.assertEqual(boot.returncode, 0, boot.stderr.decode())
         deadline = self.installed / "session-public/deadline-TEST.txt"

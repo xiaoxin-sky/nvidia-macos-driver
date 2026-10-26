@@ -195,7 +195,7 @@ class BootstrapTests(unittest.TestCase):
         result = self.run_wrapper()
         self.assertEqual(result.returncode, 23)
         self.assertNotIn(b"fixture preparation stdout", result.stdout + result.stderr)
-        self.assertIn("STOPPED：inert preparation boundary", result.stderr.decode())
+        self.assertIn("STOPPED: inert preparation boundary", result.stderr.decode())
         self.assertIn(str(self.usb / "UHD770-prepare-logs" / self.report.name), result.stderr.decode())
         self.reset()
         result = self.run_wrapper(BOOTSTRAP_CHILD_EXIT="0")

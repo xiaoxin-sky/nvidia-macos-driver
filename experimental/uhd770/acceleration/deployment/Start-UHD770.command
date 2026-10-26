@@ -132,7 +132,8 @@ if [ "$code" -eq 0 ]; then
 else
     reason=$(grep '^STOP:' "$REPORT/prepare.txt" 2>/dev/null | tail -1 || :)
     reason=${reason#STOP: }
-    printf '\nSTOPPED：%s\n不要为测试而重启。把这个日志文件夹带回来即可：\n  %s\n' \
-        "${reason:-见日志（exit $code）}" "$logs" >&2
+    # macOS bash 3.2 corrupts multibyte text inside ${var:-word}; keep it in printf formats only.
+    [ -n "$reason" ] || reason="exit $code"
+    printf '\nSTOPPED: %s\n不要为测试而重启。把这个日志文件夹带回来即可：\n  %s\n' "$reason" "$logs" >&2
 fi
 exit "$code"
