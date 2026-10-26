@@ -402,12 +402,14 @@ jobs:
           }
           if [[ "$NMX_FULL_AUDIT" != true ]]; then
             python3 - <<'PY'
+            import re
             p = 'all.sh'
             s = open(p).read()
-            old = 'amd/amdgpu drm ttm dmabuf'
-            if old not in s:
+            s, changed = re.subn(r'(?<=amd\.flags\s)amd/amdgpu\s+', '', s, count=1)
+            if not changed:
+                s, changed = re.subn(r'\bamd/amdgpu\b\s+', '', s, count=1)
+            if not changed:
                 raise SystemExit('fast-path source selector anchor missing')
-            s = s.replace(old, 'drm ttm dmabuf', 1)
             open(p, 'w').write(s)
             print('UHD770 fast path: amdgpu sources omitted; shared DRM/TTM/dmabuf retained')
             PY
