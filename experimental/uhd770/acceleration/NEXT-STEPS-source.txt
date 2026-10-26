@@ -4,76 +4,51 @@ UHD 770 手动实测操作步骤（i7-12700 / UHD 770 / macOS 15）
 测试目标是"GPU 真正执行计算、CPU 读回逐字正确、进程正常退出"，
 不包括桌面加速、Metal 之外的图形功能或视频编解码。
 
-一、准备（先直接试；只有在开头被拒绝时才做清理）
+只需要两条命令。每条命令都在本包解压后的目录里运行（先 cd 到这个目录）。
 
-  在 -nvoff 的正常 macOS 桌面里，cd 到本包解压后的目录，然后：
+一、准备
+
+  在 -nvoff 的正常 macOS 桌面里：
 
     sudo /bin/bash -p ./Start-UHD770.command
 
-  看到 PREPARED 才可以重启。成功时它已完成全部安装与校验；其中约 5 分钟
-  用于验证自动记录器，整体可能需要十几到二十几分钟。任何一步失败都会停下
-  并尽力恢复，不会带着半装状态继续。
+  通常 10–25 分钟，终端只显示进度分钟数和最后结果：
 
-  如果它**在开头就停下**（此时系统文件一个都还没被替换），按提示处理：
+  · PREPARED：用同一个 1401 U 盘重启一次，进入第二步。
+  · STOPPED：不要重启。把它最后打印的日志文件夹带回来即可，不需要你判断原因。
 
-  · "A session already exists" 或 "A different package is staged"
-      旧会话还在，执行下面两条（都不需要重启），第二条必须显示 ARCHIVED：
-        sudo /bin/bash -p ./tools/session.sh restore
-        sudo /bin/bash -p ./Archive-UHD770-Failed.command --restored-session
+  旧包留下的会话、暂存、锁和记录器，它会先自己恢复并归档（同 session.sh
+  restore / Archive-UHD770-Failed.command 的全部检查），再开始准备；
+  只有这些检查拒绝时才 STOPPED，此时系统文件一个都没有被替换。
 
-  · "An earlier capture job exists"
-      旧包的采集守护还在：
-        sudo /bin/bash -p ./tools/manage.sh remove-recorder
+二、重启后运行一次测试
 
-  · USB / EFI 相关
-      确认插的是那个 1401 U 盘（不是别的盘），再重试。
-
-  这些开头拒绝都发生在任何系统文件被替换之前，不会留下半装状态；
-  不要自行删除 /Library/Application Support 下的目录。
-
-二、重启后手动运行一次测试
-
-  用同一个 U 盘重启，正常进入 macOS 15，重新 cd 到本包目录：
+  用同一个 U 盘重启，正常进入 macOS 15，cd 到本包目录：
 
     sudo /bin/bash -p ./Run-UHD770-Test.command
 
-  它会重新启动并验证一轮日志、核对已加载 kext 的 UUID，然后才跑 Vulkan 计算；
+  它先启动并验证日志记录、核对已加载 kext 的 UUID，然后跑 Vulkan 计算；
   Vulkan 通过后才跑 Metal。结束时终端显示 FINISHED 或 STOPPED。
 
   成功判据（三者缺一不算）：
     1. 打印 COMPUTE_READBACK_VERIFIED（在行首）；
     2. 进程以 0 退出；
     3. 同一次会话没有 panic、卡死或 GPU 超时。
-  只看到成功标记但有非 0 退出码，说明销毁没有正常结束，不算通过。
 
-  记录器的一次会话已按"启动确认 + 最长协调器 + 清理观察"配足时间
-  （默认 900 秒）；如果协调器跑满且观察被截断，报告会写明
-  observation_end=recorder_not_running，而不是假装观察完成。
-
-三、如果准备在开头之后才失败
-
-  · 不要立刻重跑，也不要重启；它会自动导出报告。
-  · 这时 U 盘仍是安全的 -nvoff 配置，下一次启动不会带着新驱动。
-  · 若想立刻清回原状再重试：
-      sudo /bin/bash -p ./tools/session.sh restore
-      sudo /bin/bash -p ./Archive-UHD770-Failed.command
-    第二条在"准备失败"场景不用加 --restored-session。
-
-四、取回报告（无论成败）
+三、取回报告（无论成败）
 
   1. /Users/Shared 下最新的 UHD770MVP-session-reports.* 整个文件夹；
-  2. U 盘根目录最新的 panic-*.txt（若有）与最近两三个 opencore-*.txt。
+  2. U 盘根目录最新的 panic-*.txt（若有）与最近两三个 opencore-*.txt；
+  3. U 盘 UHD770-prepare-logs 下最新的文件夹。
 
-  为什么一定要后两项：panic 时报告里的 kernel-stream.txt 可能只有几百字节，
-  真正的位置信息留在 U 盘根目录的 panic/opencore 记录里。
+  panic 时报告里的 kernel-stream.txt 可能只有几百字节，真正的位置信息
+  留在 U 盘根目录的 panic/opencore 记录里，所以第 2 项不能少。
 
   持续黑屏可等待约 6 分钟后手动重启；下一次正常启动应已恢复 -nvoff。
-  需要时在正常桌面执行并取回报告：
-    sudo /bin/bash -p ./tools/session.sh export
 
-五、不要做的事
+四、不要做的事
 
   · 不要删除 U 盘上已有的 panic-*.txt / opencore-*.txt / 旧版本 ZIP / 旧报告；
   · 不要改动 U 盘 EFI 目录下的任何文件；
-  · 不要在失败后立刻反复重跑：同一个 boot 只允许一次 manual 会话；
-  · 不要把"驱动加载成功""显存数字正常""桌面恢复"当作加速成功的证据。
+  · 不要自行删除 /Library/Application Support 下的目录；
+  · 不要在测试失败后立刻反复重跑：同一个 boot 只允许一次测试会话。

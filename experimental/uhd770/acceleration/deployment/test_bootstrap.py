@@ -9,6 +9,7 @@ import os
 import pathlib
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,10 +24,14 @@ if name == 'uname':
     print(os.environ.get('BOOTSTRAP_OS', 'Darwin') if args == ['-s'] else 'x86_64')
 elif name == 'mktemp':
     requested = pathlib.Path(args[-1])
-    if args[0] != '-d' or requested.parent != root / 'mac/Users/Shared' or requested.name != 'UHD770MVP-bootstrap.XXXXXX': sys.exit(91)
-    target = requested.with_name('UHD770MVP-bootstrap.FIXTURE')
+    allowed = {(root / 'mac/Users/Shared', 'UHD770MVP-bootstrap.XXXXXX'): 'UHD770MVP-bootstrap.FIXTURE',
+               (root / 'mac/Library/Application Support', 'UHD770MVP-retired.XXXXXX'): 'UHD770MVP-retired.FIXTURE'}
+    if args[0] != '-d' or (requested.parent, requested.name) not in allowed: sys.exit(91)
+    target = requested.with_name(allowed[(requested.parent, requested.name)])
     target.mkdir(mode=0o700)
     print(target)
+elif name == 'pgrep':
+    sys.exit(0 if os.environ.get('BOOTSTRAP_HELPER_RUNNING') else 1)
 elif name == 'plutil':
     data = plistlib.loads(pathlib.Path(args[-1]).read_bytes())
     print(data[args[1]])
@@ -63,7 +68,7 @@ class BootstrapTests(unittest.TestCase):
         dispatcher = mock / "dispatcher"
         dispatcher.write_text(DISPATCHER.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1), encoding="utf-8")
         dispatcher.chmod(0o700)
-        for name in ("uname", "mktemp", "plutil", "ditto", "tee", "stat", "ls"):
+        for name in ("uname", "mktemp", "plutil", "ditto", "tee", "stat", "ls", "pgrep"):
             (mock / name).symlink_to(dispatcher)
         self.shared.mkdir(parents=True)
         (self.kit / "tools").mkdir(parents=True)
@@ -86,11 +91,21 @@ class BootstrapTests(unittest.TestCase):
         self.wrapper = self.kit / "Start-UHD770.command"
         self.wrapper.write_text(text, encoding="utf-8")
         (self.kit / "tools/session.sh").write_text(
-            '#!/bin/bash\n[ "$#" -eq 1 ] && [ "$1" = prepare ] || exit 91\n'
+            '#!/bin/bash\n[ "$#" -eq 1 ] || exit 91\n'
+            'printf "session.sh %s\\n" "$1" >> "$BOOTSTRAP_FIXTURE/calls"\n'
+            'if [ "$1" = restore ]; then exit "${BOOTSTRAP_RESTORE_EXIT:-0}"; fi\n'
+            '[ "$1" = prepare ] || exit 91\n'
             'printf "called\\n" > "$BOOTSTRAP_FIXTURE/child-called"\n'
             'printf "fixture preparation stdout\\n"\n'
             'printf "STOP: inert preparation boundary\\n" >&2\n'
             'exit "${BOOTSTRAP_CHILD_EXIT:-23}"\n', encoding="utf-8")
+        (self.kit / "Archive-UHD770-Failed.command").write_text(
+            '#!/bin/bash\nprintf "archive %s\\n" "$*" >> "$BOOTSTRAP_FIXTURE/calls"\n'
+            'exit "${BOOTSTRAP_ARCHIVE_EXIT:-0}"\n', encoding="utf-8")
+        (self.kit / "SHA256SUMS").write_text("this package\n", encoding="utf-8")
+        self.parent = self.mac / "Library/Application Support"
+        self.lock = self.parent / ".com.uhd770.mvp.prepare.lock"
+        self.stage = self.parent / "UHD770MVP"
 
     def run_wrapper(self, *arguments, **extra):
         """Run the copied foreground wrapper; all destinations remain temporary."""
@@ -153,6 +168,103 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in existing.iterdir()), ["preserve.txt"])
         self.assertEqual(sentinel.read_bytes(), b"earlier evidence")
         self.assertTrue((self.report / "prepare.txt").is_file())
+
+    def reset(self):
+        """Forget one run's report, USB copy and call log before the next run."""
+        for path in (self.report, self.usb / "UHD770-prepare-logs"):
+            if path.exists():
+                shutil.rmtree(path)
+        for name in ("calls", "child-called"):
+            (self.root / name).unlink(missing_ok=True)
+
+    def calls(self):
+        path = self.root / "calls"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def make_stage(self, sums=b"older package\n", state=None, complete=True):
+        (self.stage / "incoming").mkdir(parents=True)
+        (self.stage / "incoming/SHA256SUMS").write_bytes(sums)
+        if complete:
+            (self.stage / "stage-state.txt").write_text("stage=offline-ready\n")
+        if state is not None:
+            (self.stage / "session-private").mkdir()
+            (self.stage / "session-public").mkdir()
+            (self.stage / "session-public/state.txt").write_text(state + "\n")
+
+    def test_terminal_shows_only_the_outcome_and_the_log_keeps_everything(self):
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 23)
+        self.assertNotIn(b"fixture preparation stdout", result.stdout + result.stderr)
+        self.assertIn("STOPPED：inert preparation boundary", result.stderr.decode())
+        self.assertIn(str(self.usb / "UHD770-prepare-logs" / self.report.name), result.stderr.decode())
+        self.reset()
+        result = self.run_wrapper(BOOTSTRAP_CHILD_EXIT="0")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("PREPARED", result.stdout.decode())
+        self.assertIn("Run-UHD770-Test.command", result.stdout.decode())
+
+    def test_stale_lock_without_a_running_helper_is_removed(self):
+        self.lock.mkdir(parents=True)
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 23, result.stderr.decode())
+        self.assertFalse(self.lock.exists())
+        self.assertTrue((self.root / "child-called").exists())
+
+    def test_lock_held_by_a_running_helper_stops_before_prepare(self):
+        self.lock.mkdir(parents=True)
+        result = self.run_wrapper(BOOTSTRAP_HELPER_RUNNING="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(self.lock.is_dir())
+        self.assertFalse((self.root / "child-called").exists())
+        self.assertIn("still running", result.stderr.decode())
+
+    def test_other_package_stage_without_session_is_set_aside_whole(self):
+        self.make_stage()
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 23, result.stderr.decode())
+        self.assertFalse(self.stage.exists())
+        retired = self.parent / "UHD770MVP-retired.FIXTURE/stage"
+        self.assertEqual((retired / "incoming/SHA256SUMS").read_bytes(), b"older package\n")
+        self.assertEqual(self.calls(), ["session.sh prepare"])
+
+    def test_complete_stage_of_this_package_is_reused(self):
+        self.make_stage(sums=b"this package\n")
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 23)
+        self.assertTrue(self.stage.is_dir())
+        self.assertEqual(self.calls(), ["session.sh prepare"])
+
+    def test_incomplete_stage_of_this_package_is_set_aside(self):
+        self.make_stage(sums=b"this package\n", complete=False)
+        self.run_wrapper()
+        self.assertFalse(self.stage.exists())
+        self.assertTrue((self.parent / "UHD770MVP-retired.FIXTURE/stage").is_dir())
+
+    def test_each_session_state_uses_the_matching_recovery(self):
+        for state, expected in (("failed", ["archive "]),
+                                ("restored", ["archive --restored-session"]),
+                                ("armed", ["session.sh restore", "archive --restored-session"]),
+                                ("finished", ["session.sh restore", "archive --restored-session"])):
+            with self.subTest(state=state):
+                self.make_stage(state=state)
+                self.reset()
+                result = self.run_wrapper()
+                self.assertEqual(result.returncode, 23, result.stderr.decode())
+                self.assertEqual(self.calls(), expected + ["session.sh prepare"])
+                shutil.rmtree(self.stage)
+
+    def test_a_refused_recovery_stops_before_prepare(self):
+        for extra, expected in (({"BOOTSTRAP_RESTORE_EXIT": "1"}, ["session.sh restore"]),
+                                ({"BOOTSTRAP_ARCHIVE_EXIT": "1"}, ["session.sh restore", "archive --restored-session"])):
+            with self.subTest(extra=extra):
+                self.make_stage(state="armed")
+                self.reset()
+                result = self.run_wrapper(**extra)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(self.calls(), expected)
+                self.assertTrue(self.stage.is_dir())
+                self.assertFalse((self.root / "child-called").exists())
+                shutil.rmtree(self.stage)
 
     def test_help_bad_arguments_and_nonmac_do_not_start_or_write(self):
         for arguments, environment, expected in ((["--help"], {}, 0),
