@@ -15,13 +15,15 @@ on:
       - 'experimental/uhd770/tests/**'
 permissions:
   contents: write
+concurrency:
+  group: nmxgpu-kernel-build-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: macos-15-intel
     timeout-minutes: 240
     env:
       NMX_USE_CACHE: ${{ github.event_name != 'workflow_dispatch' || !inputs.clean_build }}
-      CCACHE_NODIRECT: 'true'
       CCACHE_COMPILERCHECK: content
     steps:
       - name: Check out this fork (full history, for the GPU source at 7222618)
@@ -100,7 +102,6 @@ jobs:
           bash experimental/uhd770/tools/check_ccache.sh 2>&1 | tee /tmp/nmx-ccache-validation.log
           ccache --set-config=max_size=512M
           ccache --set-config=sloppiness=
-          ccache --set-config=direct_mode=false
           ccache --set-config=depend_mode=false
           ccache --zero-stats
 
@@ -416,6 +417,15 @@ jobs:
           grep -E 'sources:|runtime sources:' /tmp/all.log /tmp/i915.log /tmp/rt.log || true
           tail -30 /tmp/link.log || true
 
+      # Persist completed ccache entries before later packaging or reporting
+      # steps. The cache action can still run after a newer push cancels a build.
+      - name: Save compiler cache, including partial cancelled builds
+        if: always() && steps.toolchain.outcome == 'success' && env.NMX_USE_CACHE == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/nmxgpu/ccache
+          key: ${{ steps.objects.outputs.cache-primary-key }}
+
       - name: Record compiler cache statistics
         if: always() && steps.toolchain.outcome == 'success'
         run: |
@@ -615,10 +625,3 @@ jobs:
             sleep 5
           done
           echo "::warning title=log not published::the build log stays in ci/last-run.txt on the runner and in the nmxgpu-build artifact"
-
-      - name: Save compiler cache after all build gates pass
-        if: success() && env.NMX_USE_CACHE == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/nmxgpu/ccache
-          key: ${{ steps.objects.outputs.cache-primary-key }}
