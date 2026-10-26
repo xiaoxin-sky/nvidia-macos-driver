@@ -366,13 +366,37 @@ jobs:
             exit 1
           fi
           echo "DP tunnel configuration verified: frontend=off core=off"
-          echo "== DRM / TTM / amdgpu =="
-          bash all.sh 30 | tee /tmp/all.log || true
-          echo "== i915 =="
-          bash all-i915.sh 30 | tee /tmp/i915.log || true
-          echo "== LinuxKPI runtime + bsdcompat + IOKit glue =="
+          progress_report() {
+            local stage=$1 logdir=$2 objdir=$3 started completed failed latest
+            started=$(find "$X/$logdir" -type f -name '*.log' 2>/dev/null | wc -l | tr -d ' ' || true)
+            completed=$(find "$X/$objdir" -type f -name '*.o' 2>/dev/null | wc -l | tr -d ' ' || true)
+            failed=$(find "$X/$logdir" -type f -name '*.failed' 2>/dev/null | wc -l | tr -d ' ' || true)
+            latest=$(find "$X/$logdir" -type f -name '*.log' -exec stat -f '%m %N' {} + 2>/dev/null | sort -nr | head -1 || true)
+            echo "::notice title=build progress::$stage logs_started=$started objects_completed=$completed failed=$failed latest=$latest"
+          }
+          progress_watch() {
+            local stage=$1 logdir=$2 objdir=$3
+            while :; do
+              sleep 30 || return 0
+              progress_report "$stage" "$logdir" "$objdir"
+            done
+          }
+          run_build_stage() {
+            local stage=$1 logdir=$2 objdir=$3 command=$4 output=$5 watcher
+            echo "== $stage start $(date -u '+%Y-%m-%dT%H:%M:%SZ') =="
+            progress_watch "$stage" "$logdir" "$objdir" & watcher=$!
+            bash -c "$command" | tee "$output" || true
+            progress_report "$stage" "$logdir" "$objdir"
+            kill "$watcher" 2>/dev/null || true
+            wait "$watcher" 2>/dev/null || true
+            echo "== $stage end $(date -u '+%Y-%m-%dT%H:%M:%SZ') =="
+          }
+          run_build_stage "DRM / TTM / amdgpu" logs obj 'bash all.sh 30' /tmp/all.log
+          run_build_stage "i915" logs-i915 obj-i915 'bash all-i915.sh 30' /tmp/i915.log
+          echo "== LinuxKPI runtime + bsdcompat + IOKit glue start $(date -u '+%Y-%m-%dT%H:%M:%SZ') =="
           bash rt.sh | tee /tmp/rt.log || true
-          echo "== link (xe left out: UHD 770 is i915 only) =="
+          echo "== LinuxKPI runtime + bsdcompat + IOKit glue end $(date -u '+%Y-%m-%dT%H:%M:%SZ') =="
+          echo "== link (xe left out: UHD 770 is i915 only) start $(date -u '+%Y-%m-%dT%H:%M:%SZ') =="
           python3 - <<'PY'
           p = 'kext/build.sh'
           s = open(p).read()
@@ -385,6 +409,7 @@ jobs:
           grep -n 'obj-i915\|xcrun --sdk' kext/build.sh
           mkdir -p "$GITHUB_WORKSPACE/out/logs"
           bash kext/build.sh "$GITHUB_WORKSPACE/out" 2>&1 | tee /tmp/link.log || true
+          echo "== link (xe left out: UHD 770 is i915 only) end $(date -u '+%Y-%m-%dT%H:%M:%SZ') =="
           echo "== summary =="
           grep -E 'sources:|runtime sources:' /tmp/all.log /tmp/i915.log /tmp/rt.log || true
           tail -30 /tmp/link.log || true
