@@ -1,5 +1,5 @@
-run 40458630692 attempt 1
-commit 57460084a05d4d223d6817ffaa738d376d15d0ed
+run 40460226217 attempt 1
+commit 7765c86cb998b91671f88534ac601a286f664496
 freebsd-src 7668705cb9837d4c3a6db9b3434b3a522220c8ea
 
 ===== /tmp/genflags.log
@@ -12,15 +12,11 @@ sources: 900  compiled: 900  failed: 0
 sources: 274  compiled: 274  failed: 0
 
 ===== /tmp/rt.log
-LK FAIL nmx_drm_os
-runtime sources: 76  failed: 1
+runtime sources: 76  failed: 0
 
 ===== /tmp/link.log
-NMXGPU 4380ecf5 13544792 B
+NMXGPU f8e8c04a 13548088 B
 
 ===== first failing sources
---- /Volumes/MiniData/build/gpu-src/xkpi/lklogs/nmx_drm_os.log
-override/src/nmx_drm_os.c:375:31: error: too few arguments provided to function-like macro invocation
-override/src/nmx_drm_os.c:375:10: error: incompatible pointer to integer conversion assigning to 'uint8_t' (aka 'unsigned char') from 'uint8_t (device_t)' (aka 'unsigned char (struct nmx_device *)') [-Wint-conversion]
 ===== kext
--rwxr-xr-x  1 runner  staff  13544792 Oct 27 06:09 /Users/runner/work/nvidia-macos-driver/nvidia-macos-driver/out/NMXGPU.kext/Contents/MacOS/NMXGPU
+-rwxr-xr-x  1 runner  staff  13548088 Oct 27 06:27 /Users/runner/work/nvidia-macos-driver/nvidia-macos-driver/out/NMXGPU.kext/Contents/MacOS/NMXGPU
