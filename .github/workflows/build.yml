@@ -1,15 +1,6 @@
 name: build NMXGPU (UHD 770 audited display batch)
 on:
   workflow_dispatch:
-    inputs:
-      clean_build:
-        description: Ignore all caches for a clean diagnostic build
-        type: boolean
-        default: false
-      full_audit:
-        description: Also compile the full amdgpu compatibility audit set
-        type: boolean
-        default: false
   push:
     paths:
       - '.github/workflows/build.yml'
@@ -25,11 +16,13 @@ concurrency:
 jobs:
   build:
     runs-on: macos-15-intel
-    timeout-minutes: 240
+    # A cold build of all ~1250 sources took 9-11 minutes before ccache was added (Oct 19);
+    # anything near this limit is a hang, not a slow compile.
+    timeout-minutes: 60
     env:
-      NMX_USE_CACHE: ${{ github.event_name != 'workflow_dispatch' || !inputs.clean_build }}
-      NMX_FULL_AUDIT: ${{ github.event_name == 'workflow_dispatch' && inputs.full_audit }}
-      CCACHE_COMPILERCHECK: content
+      NMX_DEPENDENCY_CACHE: /Users/runner/.cache/nmxgpu/dependencies
+      # Per-translation-unit wall clock limit; a hung compiler is killed and its source counted as failed.
+      NMX_CC_TIMEOUT: 600
     steps:
       - name: Check out this fork (full history, for the GPU source at 7222618)
         uses: actions/checkout@v4
@@ -52,64 +45,22 @@ jobs:
           echo "== Kernel.framework headers =="
           ls "$SDK/System/Library/Frameworks/Kernel.framework/Headers" 2>/dev/null | head -5 || true
 
-      - name: Prepare compiler cache and toolchain identity
-        id: toolchain
-        run: |
-          set -euo pipefail
-          if ! command -v ccache >/dev/null; then
-            HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ccache
-          fi
-          {
-            sw_vers -productVersion
-            xcodebuild -version
-            xcrun clang --version
-            xcrun --sdk macosx --show-sdk-version
-            ccache --version
-          } > /tmp/nmx-toolchain.txt
-          echo "fingerprint=$(shasum -a 256 /tmp/nmx-toolchain.txt | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "CCACHE_DIR=$HOME/.cache/nmxgpu/ccache" >> "$GITHUB_ENV"
-          echo "NMX_DEPENDENCY_CACHE=$HOME/.cache/nmxgpu/dependencies" >> "$GITHUB_ENV"
-          if [[ "$NMX_USE_CACHE" != true ]]; then
-            echo 'CCACHE_DISABLE=true' >> "$GITHUB_ENV"
-          fi
-
       - name: Restore pristine pinned dependencies
         id: dependencies
-        if: env.NMX_USE_CACHE == 'true'
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/nmxgpu/dependencies
           key: nmxgpu-deps-v1-${{ runner.os }}-${{ hashFiles('experimental/uhd770/sources.json') }}
 
-      - name: Restore compiler cache
-        id: objects
-        if: env.NMX_USE_CACHE == 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/nmxgpu/ccache
-          key: nmxgpu-ccache-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            nmxgpu-ccache-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-
-            nmxgpu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-39761550305-1
-
       - name: Stage the sources
         run: bash experimental/uhd770/tools/stage_sources.sh
 
       - name: Save pristine pinned dependencies
-        if: env.NMX_USE_CACHE == 'true' && steps.dependencies.outputs.cache-hit != 'true'
+        if: steps.dependencies.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/nmxgpu/dependencies
           key: ${{ steps.dependencies.outputs.cache-primary-key }}
-
-      - name: Validate compiler cache invalidation
-        run: |
-          set -euo pipefail
-          bash experimental/uhd770/tools/check_ccache.sh 2>&1 | tee /tmp/nmx-ccache-validation.log
-          ccache --set-config=max_size=512M
-          ccache --set-config=sloppiness=
-          ccache --set-config=depend_mode=false
-          ccache --zero-stats
 
       - name: Build the kernel extension
         run: |
@@ -128,7 +79,13 @@ jobs:
           git -C "$X" apply "$GITHUB_WORKSPACE/experimental/uhd770/patches/xkpi.patch"
           git -C "$S/kpi/drm-kmod" apply "$GITHUB_WORKSPACE/experimental/uhd770/patches/drm-kmod.patch"
           git -C "$S/kpi/freebsd-src" apply "$GITHUB_WORKSPACE/experimental/uhd770/patches/freebsd.patch"
-          python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/enable_ccache.py" "$X"
+          # Bound every compiler launch. alarm() survives exec, so SIGALRM reaches clang itself;
+          # the source then fails with an empty log and is listed by name in ci/last-run.txt.
+          for f in cc.sh cc-i915.sh cclk.sh ccsrc.sh ccxx.sh; do
+            grep -q '^exec xcrun clang' "$f" || { echo "::error::$f has no exec xcrun clang launcher"; exit 1; }
+            sed -i '' "s|^exec xcrun clang|exec perl -e 'alarm shift @ARGV; exec @ARGV or die' $NMX_CC_TIMEOUT xcrun clang|" "$f"
+          done
+          grep -c 'alarm shift' cc.sh cc-i915.sh cclk.sh ccsrc.sh ccxx.sh
           python3 "$GITHUB_WORKSPACE/experimental/uhd770/tools/prepare_drm_node_fixture.py" \
             "$X" /tmp/nmx-drm-node-test.c
           cc -std=c11 -Wall -Wextra -Werror /tmp/nmx-drm-node-test.c -o /tmp/nmx-drm-node-test
@@ -400,16 +357,8 @@ jobs:
             wait "$watcher" 2>/dev/null || true
             echo "== $stage end $(date -u '+%Y-%m-%dT%H:%M:%SZ') =="
           }
-          if [[ "$NMX_FULL_AUDIT" != true ]]; then
-            sed -E 's/amd\.flags[[:space:]]+amd\/amdgpu[[:space:]]+drm[[:space:]]+ttm[[:space:]]+dmabuf/amd.flags drm ttm dmabuf/' all.sh > all-fast.sh
-            chmod +x all-fast.sh
-            grep -n 'srclist.py' all-fast.sh || { echo 'fast-path source selector missing'; exit 1; }
-            if grep -q 'amd/amdgpu' all-fast.sh; then echo 'fast-path still contains amdgpu'; exit 1; fi
-            echo 'UHD770 fast path: amdgpu sources filtered; shared DRM/TTM/dmabuf retained'
-            run_build_stage "DRM / TTM / dma-buf (UHD 770 fast path)" logs obj 'bash all-fast.sh 30' /tmp/all.log
-          else
-            run_build_stage "DRM / TTM / amdgpu" logs obj 'bash all.sh 30' /tmp/all.log
-          fi
+          # The full set is what every linked NMXGPU so far was built from; amdgpu is cheap (cold build ~10 min).
+          run_build_stage "DRM / TTM / amdgpu" logs obj 'bash all.sh 30' /tmp/all.log
           run_build_stage "i915" logs-i915 obj-i915 'bash all-i915.sh 30' /tmp/i915.log
           echo "== LinuxKPI runtime + bsdcompat + IOKit glue start $(date -u '+%Y-%m-%dT%H:%M:%SZ') =="
           bash rt.sh | tee /tmp/rt.log || true
@@ -431,22 +380,6 @@ jobs:
           echo "== summary =="
           grep -E 'sources:|runtime sources:' /tmp/all.log /tmp/i915.log /tmp/rt.log || true
           tail -30 /tmp/link.log || true
-
-      - name: Save compiler cache after a complete successful build
-        if: success() && env.NMX_USE_CACHE == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/nmxgpu/ccache
-          key: ${{ steps.objects.outputs.cache-primary-key }}
-
-      - name: Record compiler cache statistics
-        if: always() && steps.toolchain.outcome == 'success'
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/out/logs"
-          ccache --show-stats | tee "$GITHUB_WORKSPACE/out/logs/ccache-statistics.txt"
-          ccache --print-stats > "$GITHUB_WORKSPACE/out/logs/ccache-statistics.tsv"
-          ccache --show-config > "$GITHUB_WORKSPACE/out/logs/ccache-config.txt"
-          cat "$GITHUB_WORKSPACE/out/logs/ccache-statistics.txt" >> "$GITHUB_STEP_SUMMARY"
 
       # Every build step above is deliberately tolerant so that all the logs get collected.
       # Without this gate a dropped translation unit disappears silently: the sources that
@@ -566,7 +499,6 @@ jobs:
           cp "$X/xnu/nmx_attach_lifecycle.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/bsdcompat/include/nmx_gamma_lut.h" "$S/kpi/drm-kmod/drivers/gpu/drm/drm_color_mgmt.c" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/bsdcompat/include/nmx_checked_ranges.h" "$X/bsdcompat/src/nmx_busdma.c" "$X/xnu/nmx_dma.cpp" "$X/xnu/nmx_vm.cpp" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
-          cp /tmp/nmx-ccache-validation.log /tmp/nmx-toolchain.txt "$GITHUB_WORKSPACE/out/logs/" 2>/dev/null || true
           cp "$X/cc.sh" "$X/cc-i915.sh" "$X/cclk.sh" "$X/ccsrc.sh" "$X/ccxx.sh" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$X/override/i915/nmx_i915_scanout.c" "$X/bsdcompat/include/nmx_port.h" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_fb_pin.c" "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_fb_pin.h" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
           cp "$S/kpi/drm-kmod/drivers/gpu/drm/i915/display/intel_display_driver.c" "$GITHUB_WORKSPACE/experimental/uhd770/sources.json" "$GITHUB_WORKSPACE/out/logs/diagnostic-source/" 2>/dev/null || true
@@ -593,7 +525,7 @@ jobs:
             echo "commit $GITHUB_SHA"
             echo "freebsd-src $(git -C "$S/kpi/freebsd-src" rev-parse HEAD 2>/dev/null || echo unknown)"
             echo
-            for f in /tmp/genflags.log /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log "$GITHUB_WORKSPACE/out/logs/ccache-statistics.txt"; do
+            for f in /tmp/genflags.log /tmp/all.log /tmp/i915.log /tmp/rt.log /tmp/link.log; do
               if [ -f "$f" ]; then
                 echo "===== $f"
                 tail -100 "$f"
@@ -601,6 +533,13 @@ jobs:
               fi
             done
             echo "===== first failing sources"
+            for d in logs logs-i915; do
+              # a .failed source whose log has no error: line was killed (NMX_CC_TIMEOUT) or crashed the compiler
+              for m in "$X/$d"/*.failed; do
+                [ -e "$m" ] || continue
+                grep -q 'error:' "${m%.failed}.log" 2>/dev/null || echo "--- killed or crashed: ${m%.failed}.log"
+              done
+            done
             for d in logs logs-i915 lklogs; do
               [ -d "$X/$d" ] || continue
               while IFS= read -r l; do
