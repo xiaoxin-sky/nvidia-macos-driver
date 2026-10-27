@@ -404,15 +404,15 @@ jobs:
             python3 - <<'PY'
             p = 'all.sh'
             s = open(p).read()
-            marker = ': > srcs.txt'
-            if marker not in s:
-                raise SystemExit('fast-path source-list anchor missing')
-            inject = "grep -v '/amd/amdgpu/' srcs.all > srcs.all.fast\nmv srcs.all.fast srcs.all\n"
-            s = s.replace(marker, inject + marker, 1)
+            old = 'amd.flags amd/amdgpu drm ttm dmabuf'
+            if old not in s:
+                raise SystemExit('fast-path source selector anchor missing')
+            s = s.replace(old, 'amd.flags drm ttm dmabuf', 1)
             open('all-fast.sh', 'w').write(s)
             print('UHD770 fast path: amdgpu sources filtered; shared DRM/TTM/dmabuf retained')
             PY
             chmod +x all-fast.sh
+            grep -n 'srclist.py' all-fast.sh
             run_build_stage "DRM / TTM / dma-buf (UHD 770 fast path)" logs obj 'bash all-fast.sh 30' /tmp/all.log
           else
             run_build_stage "DRM / TTM / amdgpu" logs obj 'bash all.sh 30' /tmp/all.log
