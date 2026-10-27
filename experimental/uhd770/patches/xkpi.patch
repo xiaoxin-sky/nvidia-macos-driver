@@ -6772,3 +6772,33 @@
  	return (addr);
  }
  
+--- a/fork_i915_gem_mman.py
++++ b/fork_i915_gem_mman.py
+@@ -90,5 +90,14 @@
+     "\tnmx_vma_set_pin(vma, nmx_i915_mmap_pin, obj);\n\n\treturn 0;\n}",
+     "persistent mapping pin registration",
+ )
++# FreeBSD reports mmap version 3 below 1500508 and the port's prelude is
++# 1500000, so Mesa skipped MMAP_OFFSET and ANV refused the device. The Darwin
++# bridge serves offset maps (4), not partial maps (5).
++text = replace_once(
++    text,
++    "int i915_gem_mmap_gtt_version(void)\n{\n#if __FreeBSD_version",
++    "int i915_gem_mmap_gtt_version(void)\n{\n#ifdef NMXKPI\n\treturn 4;\n#elif __FreeBSD_version",
++    "Darwin mmap offset version",
++)
+ pathlib.Path(sys.argv[2]).write_text(text, encoding="utf-8", newline="\n")
+ print("i915_gem_mman.c Darwin CPU mapping fork applied")
+--- a/override/i915/i915_gem_mman.c
++++ b/override/i915/i915_gem_mman.c
+@@ -222,7 +222,9 @@
+  */
+ int i915_gem_mmap_gtt_version(void)
+ {
+-#if __FreeBSD_version < 1500508 || (__FreeBSD_version >= 1600000 && __FreeBSD_version < 1600015)
++#ifdef NMXKPI
++	return 4;
++#elif __FreeBSD_version < 1500508 || (__FreeBSD_version >= 1600000 && __FreeBSD_version < 1600015)
+ 	return 3;
+ #else
+ 	return 5;
