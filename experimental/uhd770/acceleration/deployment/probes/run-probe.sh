@@ -174,6 +174,17 @@ else
         [ "$(find "$stage" -print | wc -l | tr -d ' ')" = "$(find "$installed" -print | wc -l | tr -d ' ')" ] || fail "Installed $tree has extra entries."
     done
     shasum -a 256 "$binary" "$shader" >> "$session/payload-SHA256SUMS"
+    # NMXAccel withholds MetalPluginName until a display head publishes or its
+    # 60 s headless deadline restores it; Metal enumerates only once at launch,
+    # so a probe started earlier sees no device although the GPU works. Wait for
+    # the published name first and record how long it took.
+    ready=no
+    for waited in $(seq 0 90); do
+        if ioreg -r -c NMXAccel -l -w0 2>/dev/null | grep -q '"MetalPluginName"'; then ready=yes; break; fi
+        sleep 1
+    done
+    printf 'metal_plugin_name=%s\nwaited_s=%s\n' "$ready" "$waited" > "$session/metal-readiness.txt"
+    [ "$ready" = yes ] || fail 'NMXAccel did not publish MetalPluginName within 90 s.'
     command=("$binary" --metallib "$shader" --deadline 45)
     verified=METAL_COMPUTE_READBACK_VERIFIED
 fi
