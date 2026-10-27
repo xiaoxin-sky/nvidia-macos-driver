@@ -3349,7 +3349,7 @@
 -	pi->revision_id = pdev->revision;
 +	pi->domain = pci_get_domain(pcidev);
 +	pi->bus = pci_get_bus(pcidev);
-+	pi->dev = pci_get_slot(pcidev);
++	pi->dev = (pci_get_slot)(pcidev); /* LinuxKPI's 2-arg pci_get_slot macro shadows FreeBSD's */
 +	pi->func = pci_get_function(pcidev);
 +	pi->vendor_id = pci_get_vendor(pcidev);
 +	pi->device_id = pci_get_device(pcidev);
