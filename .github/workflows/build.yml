@@ -401,18 +401,11 @@ jobs:
             echo "== $stage end $(date -u '+%Y-%m-%dT%H:%M:%SZ') =="
           }
           if [[ "$NMX_FULL_AUDIT" != true ]]; then
-            python3 - <<'PY'
-            p = 'all.sh'
-            s = open(p).read()
-            old = 'amd.flags amd/amdgpu drm ttm dmabuf'
-            if old not in s:
-                raise SystemExit('fast-path source selector anchor missing')
-            s = s.replace(old, 'amd.flags drm ttm dmabuf', 1)
-            open('all-fast.sh', 'w').write(s)
-            print('UHD770 fast path: amdgpu sources filtered; shared DRM/TTM/dmabuf retained')
-            PY
+            sed -E 's/amd\.flags[[:space:]]+amd\/amdgpu[[:space:]]+drm[[:space:]]+ttm[[:space:]]+dmabuf/amd.flags drm ttm dmabuf/' all.sh > all-fast.sh
             chmod +x all-fast.sh
-            grep -n 'srclist.py' all-fast.sh
+            grep -n 'srclist.py' all-fast.sh || { echo 'fast-path source selector missing'; exit 1; }
+            if grep -q 'amd/amdgpu' all-fast.sh; then echo 'fast-path still contains amdgpu'; exit 1; fi
+            echo 'UHD770 fast path: amdgpu sources filtered; shared DRM/TTM/dmabuf retained'
             run_build_stage "DRM / TTM / dma-buf (UHD 770 fast path)" logs obj 'bash all-fast.sh 30' /tmp/all.log
           else
             run_build_stage "DRM / TTM / amdgpu" logs obj 'bash all.sh 30' /tmp/all.log
