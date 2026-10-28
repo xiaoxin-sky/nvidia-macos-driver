@@ -31,6 +31,10 @@ def report(root, metal_passes=True, kernel=""):
     write(root / "user-diagnostics/3-metal-render.c/result.txt", "state=verified-readback\nrunner_exit=0\n")
     write(root / "user-diagnostics/3-metal-render.c/probe.log",
           "round 1: verified=4096 pixels elapsed_ms=5.000\nMETAL_RENDER_READBACK_VERIFIED: x\n")
+    suite = root / "user-diagnostics/4-metal-suite.d"
+    write(suite / "result.txt", "state=failed\nrunner_exit=3\n")
+    write(suite / "probe.log", "subtest texture: PASS verified=4096 pixels elapsed_ms=2.000\n"
+                               "subtest iosurface: FAIL Metal refused an IOSurface-backed render target\n")
     write(root / f"preparation/final-dmesg-{BOOT}.txt", kernel)
     # An older boot's capture must not count against this report.
     write(root / "system/boot-capture/session-old/boot-identity.txt", "kern.bootsessionuuid: OLD\n")
@@ -47,6 +51,9 @@ class CompareReportTests(unittest.TestCase):
         self.assertEqual(summary["phases"]["metal-render"]["round_ms"], [5.0])
         self.assertEqual(summary["mmap_refusal_lines"], 0)
         self.assertEqual(summary["loaded_uuids"], {"com.nullmoth.NMXGPU": "aaa"})
+        subtests = summary["phases"]["metal-suite"]["subtests"]
+        self.assertEqual(subtests["texture"], {"result": "PASS", "ms": 2.0, "detail": None})
+        self.assertEqual(subtests["iosurface"]["result"], "FAIL")
 
     def test_lost_pass_and_new_panic_are_regressions(self):
         with tempfile.TemporaryDirectory() as temporary:

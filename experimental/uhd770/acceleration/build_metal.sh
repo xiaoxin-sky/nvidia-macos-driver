@@ -99,12 +99,15 @@ mkdir -p "$OUT/probe"
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -std=c++17 \
   -fobjc-arc -fobjc-arc-exceptions -Wall -Wextra -Werror \
   "$REPO/experimental/uhd770/acceleration/metal-probe/main.mm" \
-  -framework Foundation -framework Metal -framework IOKit -framework CoreFoundation \
+  -framework Foundation -framework Metal -framework IOKit -framework IOSurface -framework CoreFoundation \
   -o "$OUT/probe/uhd770-metal-probe"
 xcrun --sdk macosx metallib "$ROOT/build/apple.air" -o "$OUT/probe/smoke.metallib"
 xcrun --sdk macosx metal -std=macos-metal2.4 -mmacosx-version-min=15.0 -O1 \
   -c "$REPO/experimental/uhd770/acceleration/metal-probe/render.metal" -o "$ROOT/build/render.air"
 xcrun --sdk macosx metallib "$ROOT/build/render.air" -o "$OUT/probe/render.metallib"
+xcrun --sdk macosx metal -std=macos-metal2.4 -mmacosx-version-min=15.0 -O1 \
+  -c "$REPO/experimental/uhd770/acceleration/metal-probe/suite.metal" -o "$ROOT/build/suite.air"
+xcrun --sdk macosx metallib "$ROOT/build/suite.air" -o "$OUT/probe/suite.metallib"
 cp "$ROOT/sources.json" "$OUT/logs/acceleration-sources.json"
 
 echo "Intel accelerator, translator and Metal frontend compiled; nothing installed or loaded."

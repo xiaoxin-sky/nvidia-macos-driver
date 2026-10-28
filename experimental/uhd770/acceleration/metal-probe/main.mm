@@ -7,6 +7,7 @@
 #import <Metal/Metal.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
+#include <IOSurface/IOSurface.h>
 #include <objc/runtime.h>
 
 #include <atomic>
@@ -34,7 +35,7 @@ constexpr uint32_t kRenderRounds = 2;
 [[noreturn]] void fail(const std::string &message) { throw std::runtime_error(message); }
 const char *utf8(NSString *value) { return value ? value.UTF8String : "(nil)"; }
 
-struct Options { std::string metallib; uint32_t deadline = 45; bool render = false; };
+struct Options { std::string metallib; uint32_t deadline = 45; bool render = false; bool suite = false; };
 
 Options arguments(int argc, char **argv)
 {
@@ -42,10 +43,11 @@ Options arguments(int argc, char **argv)
     for (int i = 1; i < argc; ++i) {
         const std::string option = argv[i];
         if (option == "--help") {
-            std::puts("Usage: uhd770-metal-probe --metallib PATH [--mode compute|render] [--deadline 45]\n"
+            std::puts("Usage: uhd770-metal-probe --metallib PATH [--mode compute|render|suite] [--deadline 45]\n"
                       "Requires the matched diagnostic package. --help does not enumerate Metal or I/O Registry.\n"
                       "compute (default) submits three 4096-word Metal compute dispatches on UHD 770;\n"
-                      "render draws a 64x64 offscreen triangle twice and reads every pixel back.");
+                      "render draws a 64x64 offscreen triangle twice and reads every pixel back;\n"
+                      "suite runs texture, blend, depth, 1920x1080 and IOSurface render subtests.");
             std::exit(0);
         }
         if (i + 1 >= argc) fail("Missing value for " + option);
@@ -54,7 +56,8 @@ Options arguments(int argc, char **argv)
         else if (option == "--mode") {
             const std::string mode = value;
             if (mode == "render") result.render = true;
-            else if (mode != "compute") fail("--mode must be compute or render");
+            else if (mode == "suite") result.suite = true;
+            else if (mode != "compute") fail("--mode must be compute, render or suite");
         }
         else if (option == "--deadline") {
             if (!value[0] || value[0] == '-') fail("Invalid deadline");
@@ -419,6 +422,319 @@ void render(const Options &options)
         std::printf("round %u: verified=%u pixels elapsed_ms=%.3f\n", round + 1, kSide * kSide, milliseconds);
     }
 }
+
+// ---- render suite: independent subtests, lowest risk first --------------------------------------------------------
+
+struct SuiteContext {
+    id<MTLDevice> device;
+    id<MTLLibrary> library;
+    id<MTLCommandQueue> queue;
+    uint32_t dispatches = 0;
+};
+
+using PixelRule = uint32_t (*)(uint32_t x, uint32_t y);
+
+uint32_t rgba(uint32_t r, uint32_t g, uint32_t b, uint32_t a) { return r | (g << 8) | (b << 16) | (a << 24); }
+uint32_t textureSource(uint32_t x, uint32_t y) { return rgba(x * 3u, y * 3u, (x ^ y) & 255u, 255u); }
+uint32_t blendResult(uint32_t, uint32_t) { return rgba(144u, 80u, 16u, 255u); }
+uint32_t depthResult(uint32_t, uint32_t) { return rgba(0u, 0u, 255u, 255u); }
+uint32_t coordinateResult(uint32_t x, uint32_t y) { return rgba(x & 255u, y & 255u, (x >> 8) * 16u + (y >> 8), 255u); }
+
+id<MTLRenderPipelineState> suitePipeline(SuiteContext &context, NSString *vertexName, NSString *fragmentName,
+                                         bool additive, bool depth)
+{
+    id<MTLFunction> vertexFunction = [context.library newFunctionWithName:vertexName];
+    id<MTLFunction> fragmentFunction = [context.library newFunctionWithName:fragmentName];
+    if (!vertexFunction || !fragmentFunction)
+        fail(std::string("Suite metallib lacks ") + utf8(vertexName) + "/" + utf8(fragmentName));
+    MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    descriptor.vertexFunction = vertexFunction;
+    descriptor.fragmentFunction = fragmentFunction;
+    descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    if (additive) {
+        descriptor.colorAttachments[0].blendingEnabled = YES;
+        descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+    }
+    if (depth) descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    NSError *error = nil;
+    id<MTLRenderPipelineState> pipeline = [context.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!pipeline) fail(std::string("Cannot create suite pipeline: ") + utf8(error.localizedDescription));
+    return pipeline;
+}
+
+id<MTLTexture> suiteTexture(SuiteContext &context, MTLPixelFormat format, uint32_t width, uint32_t height,
+                            MTLTextureUsage usage)
+{
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width
+                                                                                         height:height mipmapped:NO];
+    descriptor.usage = usage;
+    descriptor.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> texture = [context.device newTextureWithDescriptor:descriptor];
+    if (!texture) fail("Cannot allocate a suite texture");
+    return texture;
+}
+
+id<MTLBuffer> suiteBuffer(SuiteContext &context, NSUInteger bytes)
+{
+    id<MTLBuffer> buffer = [context.device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    if (!buffer || buffer.length < bytes || !buffer.contents) fail("Cannot allocate a CPU-visible suite buffer");
+    std::memset(buffer.contents, 0xa5, bytes);
+    return buffer;
+}
+
+MTLRenderPassDescriptor *suitePass(id<MTLTexture> target, MTLClearColor clear)
+{
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].clearColor = clear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    return pass;
+}
+
+void suiteReadback(id<MTLCommandBuffer> command, id<MTLTexture> target, id<MTLBuffer> buffer)
+{
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    if (!blit) fail("Cannot create Metal blit encoder");
+    const NSUInteger rowBytes = target.width * 4;
+    [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(target.width, target.height, 1) toBuffer:buffer destinationOffset:0
+   destinationBytesPerRow:rowBytes destinationBytesPerImage:rowBytes * target.height];
+    [blit endEncoding];
+}
+
+void suiteSubmit(SuiteContext &context, id<MTLCommandBuffer> command, const char *name)
+{
+    std::printf("dispatch %u: suite %s\n", ++context.dispatches, name);
+    @try {
+        [command commit];
+    } @catch (NSException *exception) {
+        std::fprintf(stderr, "FAIL: commit exception %s: %s; abandoning teardown (exit 2).\n",
+                     utf8(exception.name), utf8(exception.reason));
+        std::fflush(nullptr);
+        std::_Exit(2);
+    }
+    complete(command);
+}
+
+uint32_t suiteVerify(const uint8_t *pixels, NSUInteger rowBytes, uint32_t width, uint32_t height, PixelRule rule,
+                     const char *name)
+{
+    uint32_t mismatches = 0;
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            uint32_t actual = 0;
+            std::memcpy(&actual, pixels + y * rowBytes + x * 4, sizeof actual);
+            const uint32_t expected = rule(x, y);
+            if (actual == expected) continue;
+            if (mismatches < 4) std::fprintf(stderr, "%s mismatch[%u,%u]: expected=%08x actual=%08x\n",
+                                            name, x, y, expected, actual);
+            ++mismatches;
+        }
+    }
+    if (mismatches) fail(std::string(name) + " readback mismatch count=" + std::to_string(mismatches));
+    return width * height;
+}
+
+uint32_t suiteTextureCase(SuiteContext &context)
+{
+    const uint32_t side = kSide;
+    const NSUInteger rowBytes = side * 4, bytes = rowBytes * side;
+    id<MTLBuffer> upload = suiteBuffer(context, bytes);
+    auto *words = static_cast<uint32_t *>(upload.contents);
+    for (uint32_t y = 0; y < side; ++y)
+        for (uint32_t x = 0; x < side; ++x) words[y * side + x] = textureSource(x, y);
+    id<MTLTexture> source = suiteTexture(context, MTLPixelFormatRGBA8Unorm, side, side, MTLTextureUsageShaderRead);
+    id<MTLTexture> target = suiteTexture(context, MTLPixelFormatRGBA8Unorm, side, side, MTLTextureUsageRenderTarget);
+    id<MTLBuffer> readback = suiteBuffer(context, bytes);
+    id<MTLRenderPipelineState> pipeline = suitePipeline(context, @"suite_cover_vertex", @"suite_texture_fragment", false, false);
+    id<MTLCommandBuffer> command = [context.queue commandBuffer];
+    if (!command) fail("Cannot create Metal command buffer");
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    if (!blit) fail("Cannot create Metal blit encoder");
+    [blit copyFromBuffer:upload sourceOffset:0 sourceBytesPerRow:rowBytes sourceBytesPerImage:bytes
+              sourceSize:MTLSizeMake(side, side, 1) toTexture:source destinationSlice:0 destinationLevel:0
+       destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:suitePass(target, MTLClearColorMake(1, 0, 1, 1))];
+    if (!encoder) fail("Cannot create Metal render encoder");
+    [encoder setRenderPipelineState:pipeline];
+    [encoder setFragmentTexture:source atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    suiteReadback(command, target, readback);
+    suiteSubmit(context, command, "texture");
+    return suiteVerify(static_cast<const uint8_t *>(readback.contents), rowBytes, side, side, textureSource, "texture");
+}
+
+uint32_t suiteBlendCase(SuiteContext &context)
+{
+    const uint32_t side = kSide;
+    const NSUInteger rowBytes = side * 4;
+    id<MTLTexture> target = suiteTexture(context, MTLPixelFormatRGBA8Unorm, side, side, MTLTextureUsageRenderTarget);
+    id<MTLBuffer> readback = suiteBuffer(context, rowBytes * side);
+    id<MTLRenderPipelineState> pipeline = suitePipeline(context, @"suite_cover_vertex", @"suite_blend_fragment", true, false);
+    id<MTLCommandBuffer> command = [context.queue commandBuffer];
+    if (!command) fail("Cannot create Metal command buffer");
+    const MTLClearColor clear = MTLClearColorMake(16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 1.0);
+    id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:suitePass(target, clear)];
+    if (!encoder) fail("Cannot create Metal render encoder");
+    [encoder setRenderPipelineState:pipeline];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+    [encoder endEncoding];
+    suiteReadback(command, target, readback);
+    suiteSubmit(context, command, "blend");
+    return suiteVerify(static_cast<const uint8_t *>(readback.contents), rowBytes, side, side, blendResult, "blend");
+}
+
+uint32_t suiteDepthCase(SuiteContext &context)
+{
+    const uint32_t side = kSide;
+    const NSUInteger rowBytes = side * 4;
+    id<MTLTexture> target = suiteTexture(context, MTLPixelFormatRGBA8Unorm, side, side, MTLTextureUsageRenderTarget);
+    id<MTLTexture> depth = suiteTexture(context, MTLPixelFormatDepth32Float, side, side, MTLTextureUsageRenderTarget);
+    id<MTLBuffer> readback = suiteBuffer(context, rowBytes * side);
+    id<MTLRenderPipelineState> nearPipeline = suitePipeline(context, @"suite_depth_near_vertex", @"suite_color_fragment", false, true);
+    id<MTLRenderPipelineState> farPipeline = suitePipeline(context, @"suite_depth_far_vertex", @"suite_color_fragment", false, true);
+    MTLDepthStencilDescriptor *depthDescriptor = [[MTLDepthStencilDescriptor alloc] init];
+    depthDescriptor.depthCompareFunction = MTLCompareFunctionLess;
+    depthDescriptor.depthWriteEnabled = YES;
+    id<MTLDepthStencilState> depthState = [context.device newDepthStencilStateWithDescriptor:depthDescriptor];
+    if (!depthState) fail("Cannot create depth state");
+    id<MTLCommandBuffer> command = [context.queue commandBuffer];
+    if (!command) fail("Cannot create Metal command buffer");
+    MTLRenderPassDescriptor *pass = suitePass(target, MTLClearColorMake(1, 0, 0, 1));
+    pass.depthAttachment.texture = depth;
+    pass.depthAttachment.loadAction = MTLLoadActionClear;
+    pass.depthAttachment.clearDepth = 1.0;
+    pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+    id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+    if (!encoder) fail("Cannot create Metal render encoder");
+    [encoder setDepthStencilState:depthState];
+    [encoder setRenderPipelineState:nearPipeline];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder setRenderPipelineState:farPipeline];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    suiteReadback(command, target, readback);
+    suiteSubmit(context, command, "depth");
+    return suiteVerify(static_cast<const uint8_t *>(readback.contents), rowBytes, side, side, depthResult, "depth");
+}
+
+uint32_t suiteLargeCase(SuiteContext &context)
+{
+    const uint32_t width = 1920, height = 1080;
+    const NSUInteger rowBytes = width * 4;
+    id<MTLTexture> target = suiteTexture(context, MTLPixelFormatRGBA8Unorm, width, height, MTLTextureUsageRenderTarget);
+    id<MTLBuffer> readback = suiteBuffer(context, rowBytes * height);
+    id<MTLRenderPipelineState> pipeline = suitePipeline(context, @"suite_cover_vertex", @"suite_coordinate_fragment", false, false);
+    id<MTLCommandBuffer> command = [context.queue commandBuffer];
+    if (!command) fail("Cannot create Metal command buffer");
+    id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:suitePass(target, MTLClearColorMake(1, 0, 0, 1))];
+    if (!encoder) fail("Cannot create Metal render encoder");
+    [encoder setRenderPipelineState:pipeline];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    suiteReadback(command, target, readback);
+    suiteSubmit(context, command, "large");
+    return suiteVerify(static_cast<const uint8_t *>(readback.contents), rowBytes, width, height, coordinateResult, "large");
+}
+
+uint32_t suiteIOSurfaceCase(SuiteContext &context)
+{
+    // WindowServer composes into IOSurfaces; here the target is one, read back through the surface's own lock.
+    const uint32_t side = kSide;
+    NSDictionary *properties = @{
+        (__bridge NSString *)kIOSurfaceWidth: @(side), (__bridge NSString *)kIOSurfaceHeight: @(side),
+        (__bridge NSString *)kIOSurfaceBytesPerElement: @4, (__bridge NSString *)kIOSurfacePixelFormat: @(0x52474241u),
+    };
+    IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef)properties);
+    if (!surface) fail("Cannot create a 64x64 RGBA IOSurface");
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                          width:side height:side mipmapped:NO];
+    descriptor.usage = MTLTextureUsageRenderTarget;
+    descriptor.storageMode = MTLStorageModeManaged;
+    id<MTLTexture> target = [context.device newTextureWithDescriptor:descriptor iosurface:surface plane:0];
+    if (!target) { CFRelease(surface); fail("Metal refused an IOSurface-backed render target"); }
+    id<MTLRenderPipelineState> pipeline = suitePipeline(context, @"suite_cover_vertex", @"suite_coordinate_fragment", false, false);
+    id<MTLCommandBuffer> command = [context.queue commandBuffer];
+    if (!command) { CFRelease(surface); fail("Cannot create Metal command buffer"); }
+    id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:suitePass(target, MTLClearColorMake(1, 0, 0, 1))];
+    if (!encoder) { CFRelease(surface); fail("Cannot create Metal render encoder"); }
+    [encoder setRenderPipelineState:pipeline];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    if (!blit) { CFRelease(surface); fail("Cannot create Metal blit encoder"); }
+    [blit synchronizeResource:target];
+    [blit endEncoding];
+    suiteSubmit(context, command, "iosurface");
+    if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, nullptr) != kIOReturnSuccess) {
+        CFRelease(surface);
+        fail("Cannot lock the IOSurface for CPU reading");
+    }
+    uint32_t verified = 0;
+    std::string error;
+    try {
+        verified = suiteVerify(static_cast<const uint8_t *>(IOSurfaceGetBaseAddress(surface)), IOSurfaceGetBytesPerRow(surface),
+                               side, side, coordinateResult, "iosurface");
+    } catch (const std::exception &failure) {
+        error = failure.what();
+    }
+    IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
+    CFRelease(surface);
+    if (!error.empty()) fail(error);
+    return verified;
+}
+
+// Returns the number of failed subtests. A GPU timeout inside complete() still ends the process (exit 124).
+uint32_t suite(const Options &options)
+{
+    Identity identity;
+    SuiteContext context;
+    context.device = selectDevice(identity);
+    NSError *error = nil;
+    NSString *path = [[NSString alloc] initWithBytes:options.metallib.data() length:options.metallib.size()
+                                          encoding:NSUTF8StringEncoding];
+    if (!path) fail("--metallib path is not UTF-8");
+    context.library = [context.device newLibraryWithURL:[NSURL fileURLWithPath:path] error:&error];
+    if (!context.library) fail(std::string("Cannot load precompiled suite metallib: ") + utf8(error.localizedDescription));
+    context.queue = [context.device newCommandQueue];
+    if (!context.queue) fail("Cannot create Metal command queue");
+    context.queue.label = @"UHD770 opt-in render suite diagnostic";
+    const struct { const char *name; uint32_t (*run)(SuiteContext &); } cases[] = {
+        {"texture", suiteTextureCase}, {"blend", suiteBlendCase}, {"depth", suiteDepthCase},
+        {"large", suiteLargeCase}, {"iosurface", suiteIOSurfaceCase},
+    };
+    uint32_t failed = 0;
+    for (const auto &item : cases) {
+        const auto started = std::chrono::steady_clock::now();
+        std::string failure;
+        uint32_t verified = 0;
+        @try {
+            try {
+                verified = item.run(context);
+            } catch (const std::exception &caught) {
+                failure = caught.what();
+            }
+        } @catch (NSException *exception) {
+            failure = std::string("Objective-C exception ") + utf8(exception.name) + ": " + utf8(exception.reason);
+        }
+        const double milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        if (failure.empty()) {
+            std::printf("subtest %s: PASS verified=%u pixels elapsed_ms=%.3f\n", item.name, verified, milliseconds);
+        } else {
+            ++failed;
+            std::printf("subtest %s: FAIL %s\n", item.name, failure.c_str());
+        }
+    }
+    return failed;
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -433,6 +749,7 @@ int main(int argc, char **argv)
             @try {
                 cleanEnvironment();
                 std::printf("probe_version=1 scope=%s deadline_s=%u\n",
+                            options.suite ? "Metal-render-suite-readback-only" :
                             options.render ? "Metal-render-readback-only" : "Metal-compute-readback-only", options.deadline);
                 struct utsname system{};
                 if (uname(&system) == 0) std::printf("os=%s release=%s machine=%s\n", system.sysname, system.release, system.machine);
@@ -441,14 +758,25 @@ int main(int argc, char **argv)
                 if (sysctlbyname("kern.osproductversion", version, &length, nullptr, 0) == 0)
                     std::printf("macOS=%s\n", version);
                 std::puts("Kernel GPU submission/completion logs must corroborate any successful result.");
-                if (options.render) render(options);
-                else compute(options);
-                result = 0;
+                if (options.suite) {
+                    const uint32_t failed = suite(options);
+                    if (failed) std::printf("METAL_RENDER_SUITE_FAILED: failed=%u of 5\n", failed);
+                    result = failed ? 3 : 0;
+                } else if (options.render) {
+                    render(options);
+                    result = 0;
+                } else {
+                    compute(options);
+                    result = 0;
+                }
             } @catch (NSException *exception) {
                 std::fprintf(stderr, "FAIL: Objective-C exception %s: %s\n", utf8(exception.name), utf8(exception.reason));
             }
         }
-        if (result == 0 && options.render) {
+        if (result == 0 && options.suite) {
+            std::puts("METAL_RENDER_SUITE_VERIFIED: vendor=8086 device=4680 subtests=5");
+            std::puts("Scope: offscreen texture/blend/depth/1920x1080/IOSurface render; display and WindowServer are untested.");
+        } else if (result == 0 && options.render) {
             std::printf("METAL_RENDER_READBACK_VERIFIED: vendor=8086 device=4680 rounds=%u total_pixels=%u\n",
                         kRenderRounds, kSide * kSide * kRenderRounds);
             std::puts("Scope: one offscreen Metal triangle per round; display and WindowServer are untested.");

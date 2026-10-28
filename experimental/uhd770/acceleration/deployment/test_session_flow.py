@@ -146,7 +146,7 @@ elif name == 'sudo':
     # exact copied selected-user entry point are allowed; no privilege change.
     selected = str(root / 'mac/Library/Application Support/UHD770MVP/session-tools/session-user.sh')
     read_gate = 'for item do [ -r "$item" ] || exit 64; done; [ -x "$1" ] && [ -x "$2" ]'
-    allowed_read_gate = args[3:8] == ['/bin/bash', '-p', '-c', read_gate, '_'] and len(args[8:]) == 6 and \
+    allowed_read_gate = args[3:8] == ['/bin/bash', '-p', '-c', read_gate, '_'] and len(args[8:]) == 7 and \
                         all(pathlib.Path(value).is_relative_to(root) for value in args[8:])
     allowed = args[3:6] == ['/usr/bin/head', '-c', '513'] or \
               (args[3:6] == ['/bin/bash', '-p', selected] and args[6:] in (['preflight'], ['manual'])) or allowed_read_gate
@@ -320,6 +320,7 @@ class SessionFlowTests(unittest.TestCase):
             "components/probe/uhd770-compute-probe": b"cli",
             "components/probe/uhd770-metal-probe": b"cli",
             "components/probe/render.metallib": b"render shaders",
+            "components/probe/suite.metallib": b"suite shaders",
             "stage-state.txt": b"stage=offline-ready\n",
             "probes/run-probe.sh": b'#!/bin/bash\nprintf "%s\\n" "$1" >> "$SESSION_FIXTURE/probe-calls"\n'
                                    b'[ "${SESSION_FAIL:-}" != vulkan-dispatched ] || { printf "dispatch 1: seed=0 words=1\\n"; exit 1; }\n'
@@ -544,7 +545,8 @@ class SessionFlowTests(unittest.TestCase):
         self.assertEqual(self.automatic_reports(), [])
         manual = self.run_session("test", SESSION_BOOT="TEST")
         self.assertEqual(manual.returncode, 0, manual.stderr.decode())
-        self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan", "metal", "metal-render"])
+        self.assertEqual((self.root / "probe-calls").read_text().splitlines(),
+                         ["vulkan", "metal", "metal-render", "metal-suite"])
         reports = self.automatic_reports()
         self.assertEqual(len(reports), 1)
         exported_stages = reports[0] / "system/boot-capture/session-manual-test/stages.txt"
@@ -564,7 +566,8 @@ class SessionFlowTests(unittest.TestCase):
         self.assertEqual(duplicate.returncode, 0, duplicate.stderr.decode())
         self.assertEqual(len(self.automatic_reports()), 1)
         self.run_session("test", SESSION_BOOT="TEST")
-        self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan", "metal", "metal-render"])
+        self.assertEqual((self.root / "probe-calls").read_text().splitlines(),
+                         ["vulkan", "metal", "metal-render", "metal-suite"])
         restored = self.run_session("restore")
         self.assertEqual(restored.returncode, 0, restored.stderr.decode())
         self.assertEqual((self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").read_bytes(), b"original KC")

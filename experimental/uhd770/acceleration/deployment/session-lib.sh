@@ -517,6 +517,17 @@ session_compute_sequence() {
     fi
     [ "$live" != live ] || printf '\nMetal compute/readback passed. Continuing to Metal rendering.\n'
     session_compute_phase "$runner" metal-render "$output/metal-render-runner.txt" "$live" || code=$?
-    printf 'phase=metal-render\nexit=%s\nmetal_started=true\nrender_started=true\n' "$code" > "$output/sequence.txt"
+    if [ "$code" -ne 0 ]; then
+        printf 'phase=metal-render\nexit=%s\nmetal_started=true\nrender_started=true\nsuite_started=false\n' "$code" > "$output/sequence.txt"
+        return "$code"
+    fi
+    if [ -n "$stop" ] && [ -f "$stop" ]; then
+        printf 'phase=metal-render\nexit=124\nmetal_started=true\nrender_started=true\nsuite_started=false\nautomation_deadline=true\n' > "$output/sequence.txt"
+        return 124
+    fi
+    # The suite's subtests report independently; one failed subtest fails only this phase.
+    [ "$live" != live ] || printf '\nMetal render passed. Continuing to the Metal render suite.\n'
+    session_compute_phase "$runner" metal-suite "$output/metal-suite-runner.txt" "$live" || code=$?
+    printf 'phase=metal-suite\nexit=%s\nmetal_started=true\nrender_started=true\nsuite_started=true\n' "$code" > "$output/sequence.txt"
     return "$code"
 }

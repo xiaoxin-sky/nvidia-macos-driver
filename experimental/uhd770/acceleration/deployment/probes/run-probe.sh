@@ -9,7 +9,7 @@ unset CDPATH GLOBIGNORE
 umask 077
 
 usage() {
-    printf '%s\n' 'Usage: run-probe.sh vulkan|metal|metal-render [--output ABSOLUTE_EXISTING_DIRECTORY]' \
+    printf '%s\n' 'Usage: run-probe.sh vulkan|metal|metal-render|metal-suite [--output ABSOLUTE_EXISTING_DIRECTORY]' \
         'Runs ONLY the explicitly selected 45-second compute diagnostic.' \
         'Execute the installed script directly as your normal macOS user; never use sudo.' \
         'No driver loading/installation, NVRAM/EFI edits, or automatic next stage.'
@@ -19,7 +19,7 @@ fail() { printf 'REFUSED: %s\n' "$*" >&2; exit 64; }
 [ "$#" -ge 1 ] || { usage >&2; exit 64; }
 phase=$1
 shift
-case "$phase" in vulkan|metal|metal-render) ;; *) fail 'Choose exactly vulkan, metal or metal-render.' ;; esac
+case "$phase" in vulkan|metal|metal-render|metal-suite) ;; *) fail 'Choose exactly vulkan, metal, metal-render or metal-suite.' ;; esac
 output=
 if [ "$#" -ne 0 ]; then
     [ "$#" -eq 2 ] && [ "$1" = --output ] || fail 'Invalid arguments.'
@@ -147,6 +147,7 @@ else
     binary="$COMPONENTS/probe/uhd770-metal-probe"
     shader="$COMPONENTS/probe/smoke.metallib"
     [ "$phase" != metal-render ] || shader="$COMPONENTS/probe/render.metallib"
+    [ "$phase" != metal-suite ] || shader="$COMPONENTS/probe/suite.metallib"
     [ -x "$binary" ] && [ -f "$shader" ] || fail 'Incomplete Metal payload.'
     # The frontend directly opens /Library/GPUBundles/nvmtl and the probe rejects
     # override variables. Match installed bytes/links before its first API call.
@@ -189,6 +190,9 @@ else
     if [ "$phase" = metal-render ]; then
         command=("$binary" --metallib "$shader" --mode render --deadline 45)
         verified=METAL_RENDER_READBACK_VERIFIED
+    elif [ "$phase" = metal-suite ]; then
+        command=("$binary" --metallib "$shader" --mode suite --deadline 45)
+        verified=METAL_RENDER_SUITE_VERIFIED
     else
         command=("$binary" --metallib "$shader" --deadline 45)
         verified=METAL_COMPUTE_READBACK_VERIFIED

@@ -72,7 +72,7 @@ finish() {
     trap - EXIT INT TERM HUP
     set +e
     if [ "$code" -eq 0 ]; then
-        printf '\nFINISHED: Vulkan compute, Metal compute and Metal render readback all passed. Desktop acceleration is not established.\n'
+        printf '\nFINISHED: Vulkan compute, Metal compute, Metal render and the Metal render suite all passed. Desktop acceleration is not established.\n'
     else
         printf '\nSTOPPED: manual test exited with status %s. This is not a GPU success result.\n' "$code"
     fi

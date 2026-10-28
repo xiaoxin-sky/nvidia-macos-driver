@@ -19,9 +19,10 @@ import statistics
 import sys
 from pathlib import Path
 
-PHASES = ("vulkan", "metal", "metal-render")
+PHASES = ("vulkan", "metal", "metal-render", "metal-suite")
 ROUND = re.compile(r"^(?:iteration|round) \d+: verified=\d+(?: pixels)? elapsed_ms=([0-9.]+)$")
-MARKER = re.compile(r"^((?:METAL_)?(?:COMPUTE|RENDER)_READBACK_VERIFIED):")
+MARKER = re.compile(r"^((?:METAL_)?(?:COMPUTE|RENDER)_READBACK_VERIFIED|METAL_RENDER_SUITE_VERIFIED):")
+SUBTEST = re.compile(r"^subtest (\S+): (PASS|FAIL)(?: verified=\d+ pixels elapsed_ms=([0-9.]+))?(.*)$")
 
 
 def read(path):
@@ -46,9 +47,15 @@ def phase_summary(report, phase):
     markers = [m.group(1) for m in map(MARKER.match, log) if m]
     rounds = [float(m.group(1)) for m in map(ROUND.match, log) if m]
     failures = [line for line in log if line.startswith("FAIL:")]
-    return {"ran": True, "directory": run.name, "state": result.get("state", "missing"),
-            "runner_exit": result.get("runner_exit"), "marker": markers[-1] if markers else None,
-            "round_ms": rounds, "failure": failures[-1] if failures else None}
+    subtests = {m.group(1): {"result": m.group(2), "ms": float(m.group(3)) if m.group(3) else None,
+                             "detail": m.group(4).strip() or None}
+                for m in map(SUBTEST.match, log) if m}
+    summary = {"ran": True, "directory": run.name, "state": result.get("state", "missing"),
+               "runner_exit": result.get("runner_exit"), "marker": markers[-1] if markers else None,
+               "round_ms": rounds, "failure": failures[-1] if failures else None}
+    if subtests:
+        summary["subtests"] = subtests
+    return summary
 
 
 def kernel_lines(report, boot):
@@ -106,6 +113,10 @@ def compare(current, baseline):
                                + (f" ({new['failure']})" if new.get("failure") else ""))
         elif passed(new) and not passed(old):
             notes.append(f"{name}: passes now; the baseline had no pass")
+        for subtest, outcome in old.get("subtests", {}).items():
+            now = new.get("subtests", {}).get(subtest, {}).get("result")
+            if outcome["result"] == "PASS" and now != "PASS":
+                regressions.append(f"{name}/{subtest}: baseline passed, now {now or 'not run'}")
         if passed(old) and passed(new) and old.get("round_ms") and new.get("round_ms"):
             before, after = statistics.median(old["round_ms"]), statistics.median(new["round_ms"])
             line = f"{name}: median round {after:.3f} ms (baseline {before:.3f} ms)"
