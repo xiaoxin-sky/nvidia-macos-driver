@@ -120,7 +120,7 @@ jobs:
           data = plistlib.loads(path.read_bytes())
           assert data['Label'] == 'com.uhd770.mvp.capture'
           assert data['RunAtLoad'] is True and data['KeepAlive'] is False
-          assert data['ProgramArguments'] == ['/bin/bash', '/Library/Application Support/UHD770MVP/capture/collector.sh', '--duration', '300']
+          assert data['ProgramArguments'] == ['/bin/bash', '/Library/Application Support/UHD770MVP/capture/collector.sh', '--duration', '120']
           assert data['StandardErrorPath'].startswith('/private/var/log/UHD770MVP/')
           assert data['ExitTimeOut'] >= 15
           print('Launchd template validated only; no registration, driver load or GPU execution.')
