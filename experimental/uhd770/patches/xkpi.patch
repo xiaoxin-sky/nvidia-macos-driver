@@ -6870,7 +6870,7 @@
 -        if (u->pages[i] == 0)
 +        if (u->pages[i] == 0) {
 +            printf("NullMoth mmap: fault inserted no page index=%llu/%llu pgoff=0x%llx fault=0x%x\n",
-+                   (unsigned long long)i, (unsigned long long)u->npages, (unsigned long long)vmf.pgoff, (unsigned)r);
++                   (uint64_t)i, (uint64_t)u->npages, (uint64_t)vmf.pgoff, (unsigned)r);
              return r == VM_FAULT_OOM ? ENOMEM : EFAULT;
 +        }
      }
@@ -6886,7 +6886,7 @@
 +/* Diagnostic: Mesa's own message loses errno on Darwin, so each refusal names itself here. */
 +#define NMX_MMAP_FAIL(stage, e) \
 +    printf("NullMoth mmap: stage=%s err=%d offset=0x%llx size=0x%llx prot=%u flags=%u\n", (stage), (int)(e), \
-+           (unsigned long long)req->offset, (unsigned long long)req->size, req->prot, req->flags)
++           (uint64_t)req->offset, (uint64_t)req->size, req->prot, req->flags)
      uint64_t fixed = (req->flags & NMX_DRM_MMAP_FIXED) ? req->addr : 0;
      req->addr = 0;
      if ((req->flags & ~NMX_DRM_MMAP_FIXED) != 0 || (req->offset & PAGE_MASK) != 0 || req->size == 0 ||
@@ -6947,7 +6947,7 @@
      if (err) {
 +        NMX_MMAP_FAIL(stage, err);
 +        printf("NullMoth mmap: pages=%llu/%llu cache=%d mixed=%d writable=%d\n",
-+               (unsigned long long)vma->vm_pfn_count, (unsigned long long)u->npages, u->cache, u->mixed_cache,
++               (uint64_t)vma->vm_pfn_count, (uint64_t)u->npages, u->cache, u->mixed_cache,
 +               (vma->vm_flags & VM_WRITE) != 0);
          umap_free(u);
          return err;
