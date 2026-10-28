@@ -207,9 +207,27 @@ printf 'PREPARATION_COMPLETE\n' > "$session/preparation-complete.marker"
 sync
 trap - EXIT
 # This applies only to the child. No launchctl/setenv, shell profile, or system
-# Metal preference changes are made. The Metal probe sets NVMTL_ENABLE internally.
+# Metal preference changes are made. r25 showed the frontend refusing the probe
+# ("not allow-listed") although the probe calls setenv("NVMTL_ENABLE") in main,
+# so the Metal child receives it at exec, before any framework initializer.
+probe_env=()
+[ "$phase" != metal ] || probe_env=(NVMTL_ENABLE=1)
+started_local=$(date '+%Y-%m-%d %H:%M:%S')
 code=0
 uhd_run_bounded "$session" "$verified" 55 \
     /usr/bin/env -i PATH="$PATH" HOME="$user_home" USER="$account" LOGNAME="$account" TMPDIR="$session/tmp/" \
-    "${command[@]}" || code=$?
+    ${probe_env[@]+"${probe_env[@]}"} "${command[@]}" || code=$?
+if [ "$phase" = metal ] && [ "$code" -ne 0 ]; then
+    # The release frontend reports why it refused a device only to the unified
+    # log ("NullMoth: ..."); keep that and the probe's own Metal messages.
+    pid=$(sed -n 's/^probe_pid=\([0-9][0-9]*\)$/\1/p' "$session/probe-pid.txt" 2>/dev/null || :)
+    predicate='eventMessage CONTAINS "NullMoth:"'
+    [ -z "$pid" ] || predicate="processID == $pid OR $predicate"
+    log show --start "$started_local" --info --style compact --predicate "$predicate" \
+        > "$session/metal-unified-log.txt" 2>&1 &
+    logger=$!
+    for _ in $(seq 1 30); do kill -0 "$logger" 2>/dev/null || break; sleep 1; done
+    kill "$logger" 2>/dev/null || :
+    wait "$logger" 2>/dev/null || :
+fi
 exit "$code"
