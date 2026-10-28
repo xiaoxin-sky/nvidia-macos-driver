@@ -365,7 +365,7 @@ session_recorder_valid() {
           split($i,a,"="); if (!seen++) first=a[2]; last=a[2]
         }
       }
-      END { exit !(seen >= 2 && last-first >= 250) }
+      END { exit !(seen >= 2 && last-first >= 100) }
     ' "$report/stages.txt" || return 1
     grep -q 'collector_command_exit=0' "$report/dmesg-0.txt" || return 1
     grep -q 'collector_command_exit=0' "$report/ioreg-NMXGPU-0.txt" || return 1

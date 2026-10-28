@@ -71,6 +71,10 @@ hash() { shasum -a 256 "$1" | awk '{print $1}'; }
 MANUAL_STARTUP_LIMIT=25
 MANUAL_COORDINATOR_LIMIT=600
 MANUAL_OBSERVE_LIMIT=180
+# A failed run whose probes never printed "dispatch N:" (each probe prints it
+# immediately before submitting) gave the GPU no work, so no delayed display
+# failure can follow; a short observation still records any late panic line.
+MANUAL_OBSERVE_SHORT_LIMIT=15
 MANUAL_LOADED_AFTER_LIMIT=10
 MANUAL_CAPTURE_LIMIT=900
 MANUAL_REQUIRED_LIMIT=$((MANUAL_STARTUP_LIMIT + MANUAL_COORDINATOR_LIMIT + MANUAL_OBSERVE_LIMIT + MANUAL_LOADED_AFTER_LIMIT))
@@ -488,8 +492,8 @@ prepare() {
     [ ! -e /Library/LaunchDaemons/com.uhd770.mvp.capture.plist ] || die 'An earlier capture job exists; it was preserved.'
     /bin/bash -p "$HERE/manage.sh" install-recorder
     local elapsed=0 found='' report
-    printf 'Checking the automatic recorder for one 300-second normal-desktop session...\n'
-    while [ "$elapsed" -lt 330 ]; do
+    printf 'Checking the automatic recorder for one 120-second normal-desktop session...\n'
+    while [ "$elapsed" -lt 150 ]; do
         for report in /private/var/log/UHD770MVP/session-*; do
             if session_recorder_valid "$report" "$current"; then found=$report; break; fi
         done
@@ -624,7 +628,7 @@ prepare() {
     session_bounded 30 "$PRIVATE/arm-sync.txt" sync || die 'Cannot confirm test config flush.'
     printf 'armed\n' > "$PUBLIC/state.txt"
     printf '\nPREPARED. Restart ONCE through the same 1401 USB and choose macOS 15.\n'
-    printf 'Log in normally. GPU takeover waits 180 seconds after firmware availability.\n'
+    printf 'Log in normally. GPU takeover waits 60 seconds after firmware availability.\n'
     printf 'The next-boot opt-out is restored automatically. No compute test starts at login.\n'
     printf 'After login, run this kit Run-UHD770-Test.command with sudo /bin/bash -p when YOU choose.\n'
     printf 'If black, wait 6 minutes after signal loss, then restart through the same USB.\n'
@@ -738,7 +742,13 @@ run_manual_test() {
     fi
     printf '\nManual coordinator exit=%s. Compute is stopped; observing the display before exporting...\n' "$code"
     printf 'manual_authorization=closed\nboot=%s\n' "$current" > "$PUBLIC/manual-authorization-$current.txt"
-    session_observe_capture "$MANUAL_CAPTURE" "$current" "$MANUAL_OBSERVE_LIMIT" "$PRIVATE/post-test-observation-$current.txt"
+    local observe=$MANUAL_OBSERVE_LIMIT
+    if [ "$code" -ne 0 ] && [ "$code" -ne 124 ] && \
+        ! grep -Eq '^dispatch [0-9]+:' "$PRIVATE/manual-coordinator-$current.txt"; then
+        observe=$MANUAL_OBSERVE_SHORT_LIMIT
+        printf 'No probe reached GPU submission; shortening the observation.\n'
+    fi
+    session_observe_capture "$MANUAL_CAPTURE" "$current" "$observe" "$PRIVATE/post-test-observation-$current.txt"
     finish_capture "$current" "$MANUAL_CAPTURE"
     printf 'finished\n' > "$PUBLIC/state.txt"
     printf 'boot=%s\nmanual_exit=%s\n' "$current" "$code" > "$PUBLIC/manual-result-$current.txt"

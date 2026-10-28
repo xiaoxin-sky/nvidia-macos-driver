@@ -276,11 +276,13 @@ class SessionFlowTests(unittest.TestCase):
             text = text.replace("/usr/libexec/PlistBuddy", str(mock / "PlistBuddy"))
             text = text.replace("/usr/bin/sudo", str(mock / "sudo"))
             # Delay semantics are exercised by the inert helper fixture. Only
-            # the observation duration is compressed in full-flow adapters; a
+            # the observation durations are compressed in full-flow adapters; a
             # missing anchor would silently make every flow wait the full 180 s.
             if name == "session.sh":
                 self.assertEqual(text.count("\nMANUAL_OBSERVE_LIMIT=180\n"), 1)
                 text = text.replace("\nMANUAL_OBSERVE_LIMIT=180\n", "\nMANUAL_OBSERVE_LIMIT=2\n")
+                self.assertEqual(text.count("\nMANUAL_OBSERVE_SHORT_LIMIT=15\n"), 1)
+                text = text.replace("\nMANUAL_OBSERVE_SHORT_LIMIT=15\n", "\nMANUAL_OBSERVE_SHORT_LIMIT=1\n")
             self.assertIsNone(re.search(r"[\"'= ]/(Library|private|System|Volumes|Users)/",
                                        text.replace(str(self.root), "$FIXTURE")))
             path.write_text(text, encoding="utf-8")
@@ -318,7 +320,9 @@ class SessionFlowTests(unittest.TestCase):
             "components/probe/uhd770-compute-probe": b"cli",
             "components/probe/uhd770-metal-probe": b"cli",
             "stage-state.txt": b"stage=offline-ready\n",
-            "probes/run-probe.sh": b'#!/bin/bash\nprintf "%s\\n" "$1" >> "$SESSION_FIXTURE/probe-calls"\n[ "${SESSION_FAIL:-}" != vulkan ]\n',
+            "probes/run-probe.sh": b'#!/bin/bash\nprintf "%s\\n" "$1" >> "$SESSION_FIXTURE/probe-calls"\n'
+                                   b'[ "${SESSION_FAIL:-}" != vulkan-dispatched ] || { printf "dispatch 1: seed=0 words=1\\n"; exit 1; }\n'
+                                   b'[ "${SESSION_FAIL:-}" != vulkan ]\n',
         }.items():
             path = seed / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -571,7 +575,21 @@ class SessionFlowTests(unittest.TestCase):
         terminal = self.mac / "Users/fixture/Library/Logs/UHD770MVP/manual-TEST/terminal.txt"
         self.assertIn("coordinator_exit=1\n", terminal.read_text())
         self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan"])
-        self.assertEqual(len(self.automatic_reports()), 1)
+        reports = self.automatic_reports()
+        self.assertEqual(len(reports), 1)
+        # Nothing was submitted, so the observation is the short one.
+        observation = (reports[0] / "preparation/post-test-observation-TEST.txt").read_text()
+        self.assertIn("observation_limit_s=1\n", observation)
+
+    def test_failure_after_dispatch_keeps_the_full_observation(self):
+        self.prepare_test_boot()
+        manual = self.run_session("test", SESSION_BOOT="TEST", SESSION_FAIL="vulkan-dispatched")
+        self.assertNotEqual(manual.returncode, 0)
+        self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan"])
+        reports = self.automatic_reports()
+        self.assertEqual(len(reports), 1)
+        observation = (reports[0] / "preparation/post-test-observation-TEST.txt").read_text()
+        self.assertIn("observation_limit_s=2\n", observation)
 
     def test_initialization_failure_publishes_terminal_without_gpu_submission(self):
         self.prepare_test_boot()

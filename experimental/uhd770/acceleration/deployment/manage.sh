@@ -17,7 +17,7 @@ die() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 usage() {
     printf '%s\n' 'Usage: sudo /bin/bash -p tools/manage.sh COMMAND' \
         '  stage              Verify and privately stage candidates; isolated KC preflight only.' \
-        '  install-recorder   Register/start the read-only 300-second boot recorder.' \
+        '  install-recorder   Register/start the read-only 120-second boot recorder.' \
         '  recorder-status    Inspect the recorder without starting a test.' \
         '  remove-recorder    Unregister this recorder; keep its logs.' \
         '  export             Copy surviving reports to a new /Users/Shared directory.' \
@@ -202,7 +202,7 @@ install_recorder() {
     if ! launchctl bootstrap system "$PLIST"; then
         die 'launchctl bootstrap failed; keep its plist and inspect recorder-status. No driver was enabled.'
     fi
-    printf 'Read-only recorder registered and started for 300 seconds; future boots also record. No reboot required.\n'
+    printf 'Read-only recorder registered and started for 120 seconds; future boots also record. No reboot required.\n'
 }
 
 export_reports() {

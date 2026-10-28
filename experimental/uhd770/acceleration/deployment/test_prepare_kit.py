@@ -119,7 +119,7 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(test["Kernel"], original["Kernel"])
         self.assertEqual(test["NVRAM"]["Delete"], original["NVRAM"]["Delete"])
         self.assertEqual(test["NVRAM"]["Add"][guid]["boot-args"],
-                         "-v -igfxvesa amfi=0x80 nmxintel=1 nmxdiagdelay=180")
+                         "-v -igfxvesa amfi=0x80 nmxintel=1 nmxdiagdelay=60")
         identity = json.loads(payload["session-target/identity.json"])
         self.assertEqual(identity["safe_hash"], kit.sha256(raw))
         self.assertEqual(plistlib.loads(payload["session-target/identity.plist"]), identity)

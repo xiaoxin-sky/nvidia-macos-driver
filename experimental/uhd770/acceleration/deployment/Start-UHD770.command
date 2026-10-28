@@ -21,7 +21,7 @@ fi
 case $- in *p*) ;; *) printf 'STOP: use /bin/bash -p.\n' >&2; exit 64 ;; esac
 REPORT=$(mktemp -d /Users/Shared/UHD770MVP-bootstrap.XXXXXX)
 chmod 700 "$REPORT"
-printf 'UHD770 准备中：通常 10–25 分钟。请保持终端打开，不要重启。\n'
+printf 'UHD770 准备中：通常 5–15 分钟。请保持终端打开，不要重启。\n'
 
 # Clear whatever an earlier package left, with the same tools a person would
 # otherwise run by hand after a refusal. Each keeps all of its own checks; the

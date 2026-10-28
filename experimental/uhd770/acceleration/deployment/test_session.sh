@@ -91,8 +91,15 @@ if session_restore_one "$TASK_TMP/journal" ../escape "$TASK_TMP/target"; then ex
 
 mkdir "$TASK_TMP/report"
 printf 'kern.bootsessionuuid: CURRENT\n' > "$TASK_TMP/report/boot-identity.txt"
-printf '%s\n' 'elapsed_s=1 heartbeat stream_alive=1' 'elapsed_s=275 heartbeat stream_alive=1' \
-    'elapsed_s=300 collector_end reason=duration_complete' > "$TASK_TMP/report/stages.txt"
+printf '%s\n' 'elapsed_s=1 heartbeat stream_alive=1' 'elapsed_s=60 heartbeat stream_alive=1' \
+    'elapsed_s=60 collector_end reason=duration_complete' > "$TASK_TMP/report/stages.txt"
+for name in dmesg-0 ioreg-NMXGPU-0 ioreg-NMXAccel-0; do
+    printf 'collector_command_exit=0\n' > "$TASK_TMP/report/$name.txt"
+done
+# The 120-second validation recorder needs at least 100 seconds of heartbeats.
+if session_recorder_valid "$TASK_TMP/report" CURRENT; then exit 1; fi
+printf '%s\n' 'elapsed_s=1 heartbeat stream_alive=1' 'elapsed_s=115 heartbeat stream_alive=1' \
+    'elapsed_s=120 collector_end reason=duration_complete' > "$TASK_TMP/report/stages.txt"
 for name in dmesg-0 ioreg-NMXGPU-0 ioreg-NMXAccel-0; do
     printf 'collector_command_exit=0\n' > "$TASK_TMP/report/$name.txt"
 done
