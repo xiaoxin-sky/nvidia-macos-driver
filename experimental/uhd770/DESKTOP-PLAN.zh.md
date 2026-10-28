@@ -56,6 +56,6 @@
 | F | 插件放行 WindowServer（参考 `nvmtl_desktop_policy.h` 和串行提交），每次只改一个变量 | 高 | 多次 |
 | G | 流畅度和稳定性：命令池、管线缓存、长时间运行、睡眠唤醒 | 中 | 多次 |
 
-## 4. 需要你决定的事
-1. 到 F 步之前，要不要像 Meteor Lake 项目那样降低 SIP 和 AMFI 的安全设置。WindowServer 加载未签名插件可能需要这样做。
-2. NMIntelFB 的许可证是 PolyForm-Noncommercial。仅个人使用没问题，如果以后要分发，需要留意。
+## 4. 已确认的决定（2026-10-28）
+1. 可以像 Meteor Lake 项目那样降低 SIP 和 AMFI 的安全设置，用于 F 步及之后。具体值到那一步再定，改动只写进测试配置，安全配置保持不变，保证 `-nvoff` 恢复路径始终可用。
+2. NMIntelFB 的 PolyForm-Noncommercial 许可证可以接受，可以基于它移植帧缓冲 kext。
