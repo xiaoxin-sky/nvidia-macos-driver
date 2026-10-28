@@ -1,5 +1,5 @@
 /*
- * Opt-in UHD 770 Metal compute/readback diagnostic. CI compiles this executable
+ * Opt-in UHD 770 Metal compute or render/readback diagnostic. CI compiles this executable
  * without running it. Device selection is tied to NMXAccel's real PCI ancestry;
  * a pass still needs matching kernel execution logs, not a device-name claim.
  */
@@ -28,11 +28,13 @@ namespace {
 constexpr uint32_t kCount = 4096;
 constexpr uint32_t kRounds = 3;
 constexpr uint32_t kThreads = 64;
+constexpr uint32_t kSide = 64;
+constexpr uint32_t kRenderRounds = 2;
 
 [[noreturn]] void fail(const std::string &message) { throw std::runtime_error(message); }
 const char *utf8(NSString *value) { return value ? value.UTF8String : "(nil)"; }
 
-struct Options { std::string metallib; uint32_t deadline = 45; };
+struct Options { std::string metallib; uint32_t deadline = 45; bool render = false; };
 
 Options arguments(int argc, char **argv)
 {
@@ -40,14 +42,20 @@ Options arguments(int argc, char **argv)
     for (int i = 1; i < argc; ++i) {
         const std::string option = argv[i];
         if (option == "--help") {
-            std::puts("Usage: uhd770-metal-probe --metallib PATH [--deadline 45]\n"
+            std::puts("Usage: uhd770-metal-probe --metallib PATH [--mode compute|render] [--deadline 45]\n"
                       "Requires the matched diagnostic package. --help does not enumerate Metal or I/O Registry.\n"
-                      "A normal run submits three 4096-word Metal compute dispatches on UHD 770.");
+                      "compute (default) submits three 4096-word Metal compute dispatches on UHD 770;\n"
+                      "render draws a 64x64 offscreen triangle twice and reads every pixel back.");
             std::exit(0);
         }
         if (i + 1 >= argc) fail("Missing value for " + option);
         const char *value = argv[++i];
         if (option == "--metallib") result.metallib = value;
+        else if (option == "--mode") {
+            const std::string mode = value;
+            if (mode == "render") result.render = true;
+            else if (mode != "compute") fail("--mode must be compute or render");
+        }
         else if (option == "--deadline") {
             if (!value[0] || value[0] == '-') fail("Invalid deadline");
             size_t consumed = 0;
@@ -316,6 +324,101 @@ void compute(const Options &options)
         std::printf("round %u: verified=%u elapsed_ms=%.3f\n", round + 1, kCount, milliseconds);
     }
 }
+uint32_t expectedPixel(uint32_t x, uint32_t y)
+{
+    // RGBA8Unorm bytes (4x, 4y, 128, 255) read as one little-endian word.
+    return (x * 4u) | ((y * 4u) << 8) | (128u << 16) | (255u << 24);
+}
+
+void render(const Options &options)
+{
+    Identity identity;
+    id<MTLDevice> device = selectDevice(identity);
+    NSError *error = nil;
+    NSString *path = [[NSString alloc] initWithBytes:options.metallib.data() length:options.metallib.size()
+                                          encoding:NSUTF8StringEncoding];
+    if (!path) fail("--metallib path is not UTF-8");
+    id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:path] error:&error];
+    if (!library) fail(std::string("Cannot load precompiled render metallib: ") + utf8(error.localizedDescription));
+    id<MTLFunction> vertexFunction = [library newFunctionWithName:@"render_vertex"];
+    id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"render_fragment"];
+    if (!vertexFunction || vertexFunction.functionType != MTLFunctionTypeVertex ||
+        !fragmentFunction || fragmentFunction.functionType != MTLFunctionTypeFragment)
+        fail("Metallib lacks the render_vertex/render_fragment functions");
+    MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    descriptor.vertexFunction = vertexFunction;
+    descriptor.fragmentFunction = fragmentFunction;
+    descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    error = nil;
+    id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!pipeline) fail(std::string("Cannot create Metal render pipeline: ") + utf8(error.localizedDescription));
+    MTLTextureDescriptor *textureDescriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:kSide height:kSide
+                                                       mipmapped:NO];
+    textureDescriptor.usage = MTLTextureUsageRenderTarget;
+    textureDescriptor.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> target = [device newTextureWithDescriptor:textureDescriptor];
+    if (!target) fail("Cannot allocate the 64x64 render target");
+    const NSUInteger rowBytes = kSide * 4, bytes = rowBytes * kSide;
+    id<MTLBuffer> readback = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    if (!readback || readback.length < bytes || readback.storageMode != MTLStorageModeShared || !readback.contents)
+        fail("Cannot allocate a CPU-visible Metal readback buffer");
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    if (!queue) fail("Cannot create Metal command queue");
+    queue.label = @"UHD770 opt-in render/readback diagnostic";
+    std::printf("pipeline: render target=%ux%u RGBA8Unorm private, readback via blit\n", kSide, kSide);
+    // A different clear each round: a draw that did not run leaves that clear
+    // color behind, and a stale previous result cannot match this round's check.
+    const MTLClearColor clears[kRenderRounds] = { MTLClearColorMake(1, 0, 0, 1), MTLClearColorMake(0, 1, 0, 1) };
+    auto *pixels = static_cast<const uint8_t *>(readback.contents);
+    for (uint32_t round = 0; round < kRenderRounds; ++round) {
+        std::memset(readback.contents, 0xa5, bytes);
+        id<MTLCommandBuffer> command = [queue commandBuffer];
+        if (!command) fail("Cannot create Metal command buffer");
+        MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = target;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].clearColor = clears[round];
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+        if (!encoder) fail("Cannot create Metal render encoder");
+        [encoder setRenderPipelineState:pipeline];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder endEncoding];
+        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+        if (!blit) fail("Cannot create Metal blit encoder");
+        [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(kSide, kSide, 1) toBuffer:readback destinationOffset:0
+       destinationBytesPerRow:rowBytes destinationBytesPerImage:bytes];
+        [blit endEncoding];
+        std::printf("dispatch %u: render triangle %ux%u clear=%s\n", round + 1, kSide, kSide, round ? "green" : "red");
+        const auto started = std::chrono::steady_clock::now();
+        @try {
+            [command commit];
+        } @catch (NSException *exception) {
+            std::fprintf(stderr, "FAIL: commit exception %s: %s; abandoning teardown (exit 2).\n",
+                         utf8(exception.name), utf8(exception.reason));
+            std::fflush(nullptr);
+            std::_Exit(2);
+        }
+        complete(command);
+        uint32_t mismatches = 0;
+        for (uint32_t y = 0; y < kSide; ++y) {
+            for (uint32_t x = 0; x < kSide; ++x) {
+                uint32_t actual = 0;
+                std::memcpy(&actual, pixels + y * rowBytes + x * 4, sizeof actual);
+                const uint32_t expected = expectedPixel(x, y);
+                if (actual == expected) continue;
+                if (mismatches < 8) std::fprintf(stderr, "mismatch[%u,%u]: expected=%08x actual=%08x\n",
+                                                x, y, expected, actual);
+                ++mismatches;
+            }
+        }
+        if (mismatches) fail("Metal render readback mismatch count=" + std::to_string(mismatches));
+        const double milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        std::printf("round %u: verified=%u pixels elapsed_ms=%.3f\n", round + 1, kSide * kSide, milliseconds);
+    }
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -329,7 +432,8 @@ int main(int argc, char **argv)
         @autoreleasepool {
             @try {
                 cleanEnvironment();
-                std::printf("probe_version=1 scope=Metal-compute-readback-only deadline_s=%u\n", options.deadline);
+                std::printf("probe_version=1 scope=%s deadline_s=%u\n",
+                            options.render ? "Metal-render-readback-only" : "Metal-compute-readback-only", options.deadline);
                 struct utsname system{};
                 if (uname(&system) == 0) std::printf("os=%s release=%s machine=%s\n", system.sysname, system.release, system.machine);
                 char version[128]{};
@@ -337,13 +441,18 @@ int main(int argc, char **argv)
                 if (sysctlbyname("kern.osproductversion", version, &length, nullptr, 0) == 0)
                     std::printf("macOS=%s\n", version);
                 std::puts("Kernel GPU submission/completion logs must corroborate any successful result.");
-                compute(options);
+                if (options.render) render(options);
+                else compute(options);
                 result = 0;
             } @catch (NSException *exception) {
                 std::fprintf(stderr, "FAIL: Objective-C exception %s: %s\n", utf8(exception.name), utf8(exception.reason));
             }
         }
-        if (result == 0) {
+        if (result == 0 && options.render) {
+            std::printf("METAL_RENDER_READBACK_VERIFIED: vendor=8086 device=4680 rounds=%u total_pixels=%u\n",
+                        kRenderRounds, kSide * kSide * kRenderRounds);
+            std::puts("Scope: one offscreen Metal triangle per round; display and WindowServer are untested.");
+        } else if (result == 0) {
             std::printf("METAL_COMPUTE_READBACK_VERIFIED: vendor=8086 device=4680 rounds=%u total_words=%u\n",
                         kRounds, kCount * kRounds);
             std::puts("Scope: offscreen Metal compute only; rendering, display and WindowServer are untested.");

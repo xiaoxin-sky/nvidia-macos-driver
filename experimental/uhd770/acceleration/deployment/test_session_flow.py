@@ -319,6 +319,7 @@ class SessionFlowTests(unittest.TestCase):
             "components/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver": b"frontend",
             "components/probe/uhd770-compute-probe": b"cli",
             "components/probe/uhd770-metal-probe": b"cli",
+            "components/probe/render.metallib": b"render shaders",
             "stage-state.txt": b"stage=offline-ready\n",
             "probes/run-probe.sh": b'#!/bin/bash\nprintf "%s\\n" "$1" >> "$SESSION_FIXTURE/probe-calls"\n'
                                    b'[ "${SESSION_FAIL:-}" != vulkan-dispatched ] || { printf "dispatch 1: seed=0 words=1\\n"; exit 1; }\n'
@@ -543,7 +544,7 @@ class SessionFlowTests(unittest.TestCase):
         self.assertEqual(self.automatic_reports(), [])
         manual = self.run_session("test", SESSION_BOOT="TEST")
         self.assertEqual(manual.returncode, 0, manual.stderr.decode())
-        self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan", "metal"])
+        self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan", "metal", "metal-render"])
         reports = self.automatic_reports()
         self.assertEqual(len(reports), 1)
         exported_stages = reports[0] / "system/boot-capture/session-manual-test/stages.txt"
@@ -563,7 +564,7 @@ class SessionFlowTests(unittest.TestCase):
         self.assertEqual(duplicate.returncode, 0, duplicate.stderr.decode())
         self.assertEqual(len(self.automatic_reports()), 1)
         self.run_session("test", SESSION_BOOT="TEST")
-        self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan", "metal"])
+        self.assertEqual((self.root / "probe-calls").read_text().splitlines(), ["vulkan", "metal", "metal-render"])
         restored = self.run_session("restore")
         self.assertEqual(restored.returncode, 0, restored.stderr.decode())
         self.assertEqual((self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").read_bytes(), b"original KC")

@@ -44,7 +44,7 @@ jobs:
                       selected.update(['userland', 'metal'])
                   elif path.startswith(tuple(root+x for x in ['probe/', 'tests/', 'patches/', 'node-tests/'])) or path == root+'build_userland.sh':
                       selected.add('userland')
-                  elif path.startswith(root+'compiler-smoke/') or path == root+'build_metal.sh':
+                  elif path.startswith((root+'compiler-smoke/', root+'metal-probe/')) or path == root+'build_metal.sh':
                       selected.add('metal')
               selected = sorted(selected)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:

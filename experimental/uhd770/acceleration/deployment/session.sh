@@ -581,6 +581,7 @@ prepare() {
         "$ROOT/components/Library/GPUBundles/nvmtl/libvulkan.1.dylib" \
         "$ROOT/components/Library/GPUBundles/nvmtl/libvulkan_intel.dylib" \
         "$ROOT/components/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver" \
+        "$ROOT/components/probe/render.metallib" \
         || die 'Selected-user payload readability preflight failed; no live file changed.'
     [ ! -e /Library/LaunchDaemons/$LABEL.plist ] && [ ! -L /Library/LaunchDaemons/$LABEL.plist ] && \
         [ ! -e /Library/LaunchAgents/$LABEL.plist ] && [ ! -L /Library/LaunchAgents/$LABEL.plist ] || die 'An unrelated session job exists.'

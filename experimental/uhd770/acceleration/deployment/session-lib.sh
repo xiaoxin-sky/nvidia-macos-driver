@@ -507,6 +507,16 @@ session_compute_sequence() {
     fi
     [ "$live" != live ] || printf '\nVulkan compute/readback passed. Continuing to Metal.\n'
     session_compute_phase "$runner" metal "$output/metal-runner.txt" "$live" || code=$?
-    printf 'phase=metal\nexit=%s\nmetal_started=true\n' "$code" > "$output/sequence.txt"
+    if [ "$code" -ne 0 ]; then
+        printf 'phase=metal\nexit=%s\nmetal_started=true\nrender_started=false\n' "$code" > "$output/sequence.txt"
+        return "$code"
+    fi
+    if [ -n "$stop" ] && [ -f "$stop" ]; then
+        printf 'phase=metal\nexit=124\nmetal_started=true\nrender_started=false\nautomation_deadline=true\n' > "$output/sequence.txt"
+        return 124
+    fi
+    [ "$live" != live ] || printf '\nMetal compute/readback passed. Continuing to Metal rendering.\n'
+    session_compute_phase "$runner" metal-render "$output/metal-render-runner.txt" "$live" || code=$?
+    printf 'phase=metal-render\nexit=%s\nmetal_started=true\nrender_started=true\n' "$code" > "$output/sequence.txt"
     return "$code"
 }

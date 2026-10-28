@@ -42,6 +42,7 @@ The real archive paths are:
   components/probe/verify.comp.spv
   components/probe/uhd770-metal-probe
   components/probe/smoke.metallib
+  components/probe/render.metallib
 Preserve the signed air-runtime -> ../../../nvmtl and the loader's
 libvulkan.dylib -> libvulkan.1.dylib links. Other staged links are refused.
 

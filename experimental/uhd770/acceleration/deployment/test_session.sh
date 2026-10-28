@@ -175,6 +175,7 @@ printf '%s\n' "$1" >> "$TASK_TMP/calls"
 case "$1:$TASK_RUN" in
     vulkan:fail-vulkan) exit 31 ;;
     metal:fail-metal) exit 32 ;;
+    metal-render:fail-render) exit 33 ;;
     vulkan:stop-after-vulkan) : > "$TASK_TMP/stop-probes" ;;
 esac
 RUNNER
@@ -210,8 +211,13 @@ session_compute_sequence "$TASK_TMP/runner" "$TASK_TMP/output" '' live > "$TASK_
 grep -q metal_started=false "$TASK_TMP/output/sequence.txt"
 : > "$TASK_TMP/calls"; TASK_RUN=success
 session_compute_sequence "$TASK_TMP/runner" "$TASK_TMP/output" '' live > "$TASK_TMP/live-terminal.txt"
-[ "$(wc -l < "$TASK_TMP/calls" | tr -d ' ')" = 2 ]
+[ "$(tr '\n' ' ' < "$TASK_TMP/calls")" = 'vulkan metal metal-render ' ]
 grep -q exit=0 "$TASK_TMP/output/sequence.txt"
+grep -q phase=metal-render "$TASK_TMP/output/sequence.txt"
+# A failed render keeps the passed Metal compute phase and reports its own exit.
+: > "$TASK_TMP/calls"; TASK_RUN=fail-render; sequence_code=0
+session_compute_sequence "$TASK_TMP/runner" "$TASK_TMP/output" || sequence_code=$?
+[ "$sequence_code" -eq 33 ] && grep -q render_started=true "$TASK_TMP/output/sequence.txt"
 
 # A successful runner with failed persistent logging is not accepted as a
 # successful phase, even though its terminal pipeline reached completion.

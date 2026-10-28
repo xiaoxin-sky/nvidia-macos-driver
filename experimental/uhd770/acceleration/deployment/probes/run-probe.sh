@@ -9,7 +9,7 @@ unset CDPATH GLOBIGNORE
 umask 077
 
 usage() {
-    printf '%s\n' 'Usage: run-probe.sh vulkan|metal [--output ABSOLUTE_EXISTING_DIRECTORY]' \
+    printf '%s\n' 'Usage: run-probe.sh vulkan|metal|metal-render [--output ABSOLUTE_EXISTING_DIRECTORY]' \
         'Runs ONLY the explicitly selected 45-second compute diagnostic.' \
         'Execute the installed script directly as your normal macOS user; never use sudo.' \
         'No driver loading/installation, NVRAM/EFI edits, or automatic next stage.'
@@ -19,7 +19,7 @@ fail() { printf 'REFUSED: %s\n' "$*" >&2; exit 64; }
 [ "$#" -ge 1 ] || { usage >&2; exit 64; }
 phase=$1
 shift
-case "$phase" in vulkan|metal) ;; *) fail 'Choose exactly vulkan or metal.' ;; esac
+case "$phase" in vulkan|metal|metal-render) ;; *) fail 'Choose exactly vulkan, metal or metal-render.' ;; esac
 output=
 if [ "$#" -ne 0 ]; then
     [ "$#" -eq 2 ] && [ "$1" = --output ] || fail 'Invalid arguments.'
@@ -146,6 +146,7 @@ else
     require_loaded com.nullmoth.NMXAccel "$COMPONENTS/Library/Extensions/NMXAccel.kext/Contents/MacOS/NMXAccel"
     binary="$COMPONENTS/probe/uhd770-metal-probe"
     shader="$COMPONENTS/probe/smoke.metallib"
+    [ "$phase" != metal-render ] || shader="$COMPONENTS/probe/render.metallib"
     [ -x "$binary" ] && [ -f "$shader" ] || fail 'Incomplete Metal payload.'
     # The frontend directly opens /Library/GPUBundles/nvmtl and the probe rejects
     # override variables. Match installed bytes/links before its first API call.
@@ -185,15 +186,20 @@ else
     done
     printf 'metal_plugin_name=%s\nwaited_s=%s\n' "$ready" "$waited" > "$session/metal-readiness.txt"
     [ "$ready" = yes ] || fail 'NMXAccel did not publish MetalPluginName within 90 s.'
-    command=("$binary" --metallib "$shader" --deadline 45)
-    verified=METAL_COMPUTE_READBACK_VERIFIED
+    if [ "$phase" = metal-render ]; then
+        command=("$binary" --metallib "$shader" --mode render --deadline 45)
+        verified=METAL_RENDER_READBACK_VERIFIED
+    else
+        command=("$binary" --metallib "$shader" --deadline 45)
+        verified=METAL_COMPUTE_READBACK_VERIFIED
+    fi
 fi
 # The one-session installer signs separate CLI copies; original component bytes
 # remain untouched. Accept only its protected, signature-verified derivation.
 # The Metal copy is named mtlprobe, one of the frontend's built-in diagnostic
 # names (session-lib.sh session_derived_probe_name).
 derived="$ROOT/derived-probes/$(basename "$binary")"
-[ "$phase" != metal ] || derived="$ROOT/derived-probes/mtlprobe"
+[ "$phase" = vulkan ] || derived="$ROOT/derived-probes/mtlprobe"
 if [ -e "$derived" ]; then
     [ -d "$ROOT/derived-probes" ] && [ ! -L "$ROOT/derived-probes" ] || fail 'Unsafe derived probe directory.'
     check_owned "$ROOT/derived-probes"
@@ -214,7 +220,7 @@ trap - EXIT
 # ("not allow-listed") although the probe calls setenv("NVMTL_ENABLE") in main,
 # so the Metal child receives it at exec, before any framework initializer.
 probe_env=()
-[ "$phase" != metal ] || probe_env=(NVMTL_ENABLE=1)
+[ "$phase" = vulkan ] || probe_env=(NVMTL_ENABLE=1)
 # Record only the variable names the child will see (r26 left it unexplained
 # why the frontend's getenv missed NVMTL_ENABLE); values may be private.
 /usr/bin/env -i PATH="$PATH" HOME="$user_home" USER="$account" LOGNAME="$account" TMPDIR="$session/tmp/" \
@@ -224,7 +230,7 @@ code=0
 uhd_run_bounded "$session" "$verified" 55 \
     /usr/bin/env -i PATH="$PATH" HOME="$user_home" USER="$account" LOGNAME="$account" TMPDIR="$session/tmp/" \
     ${probe_env[@]+"${probe_env[@]}"} "${command[@]}" || code=$?
-if [ "$phase" = metal ] && [ "$code" -ne 0 ]; then
+if [ "$phase" != vulkan ] && [ "$code" -ne 0 ]; then
     # The release frontend reports why it refused a device only to the unified
     # log ("NullMoth: ..."); keep that and the probe's own Metal messages.
     pid=$(sed -n 's/^probe_pid=\([0-9][0-9]*\)$/\1/p' "$session/probe-pid.txt" 2>/dev/null || :)
