@@ -7,6 +7,9 @@ on:
       - 'experimental/uhd770/sources.json'
       - 'experimental/uhd770/patches/**'
       - 'experimental/uhd770/tools/**'
+      # Report comparison runs on exported test reports; the kernel build never reads it.
+      - '!experimental/uhd770/tools/compare_report.py'
+      - '!experimental/uhd770/tools/test_compare_report.py'
       - 'experimental/uhd770/tests/**'
 permissions:
   contents: write
