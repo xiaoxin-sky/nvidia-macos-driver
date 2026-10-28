@@ -353,6 +353,17 @@ session_observe_capture() {
 
 # Accept a completed normal-desktop recorder session, never an old boot or an
 # empty/timeout-only report. GPU success is deliberately outside this predicate.
+# The Metal frontend gives a device only to allow-listed process names. r25 and
+# r26 showed it refusing "uhd770-metal-probe" although NVMTL_ENABLE was set both
+# in main and at exec; "mtlprobe" is one of its built-in diagnostic names, so the
+# signed copy runs under that name and no system allow-list file is installed.
+session_derived_probe_name() {
+    case "$1" in
+        uhd770-metal-probe) printf 'mtlprobe\n' ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
 session_recorder_valid() {
     local report=$1 boot=$2
     [ -f "$report/stages.txt" ] && [ -f "$report/boot-identity.txt" ] || return 1

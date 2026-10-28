@@ -302,4 +302,8 @@ GROUP_EXIT_LEADER
 session_bounded_group 5 "$TASK_TMP/group-completed.txt" /bin/bash "$TASK_TMP/group-exit-leader"
 grep -q command_exit_status=0 "$TASK_TMP/group-completed.txt"
 assert_tree_stopped
+# The Metal frontend allows its own diagnostic names; only the Metal copy is renamed.
+[ "$(session_derived_probe_name uhd770-metal-probe)" = mtlprobe ]
+[ "$(session_derived_probe_name uhd770-compute-probe)" = uhd770-compute-probe ]
+
 printf 'Session transaction, terminal/deadline export, recorder and sequential failure gates passed; no GPU accessed.\n'

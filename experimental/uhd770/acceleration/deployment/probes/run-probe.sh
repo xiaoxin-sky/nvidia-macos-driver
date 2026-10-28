@@ -190,7 +190,10 @@ else
 fi
 # The one-session installer signs separate CLI copies; original component bytes
 # remain untouched. Accept only its protected, signature-verified derivation.
+# The Metal copy is named mtlprobe, one of the frontend's built-in diagnostic
+# names (session-lib.sh session_derived_probe_name).
 derived="$ROOT/derived-probes/$(basename "$binary")"
+[ "$phase" != metal ] || derived="$ROOT/derived-probes/mtlprobe"
 if [ -e "$derived" ]; then
     [ -d "$ROOT/derived-probes" ] && [ ! -L "$ROOT/derived-probes" ] || fail 'Unsafe derived probe directory.'
     check_owned "$ROOT/derived-probes"
@@ -212,6 +215,10 @@ trap - EXIT
 # so the Metal child receives it at exec, before any framework initializer.
 probe_env=()
 [ "$phase" != metal ] || probe_env=(NVMTL_ENABLE=1)
+# Record only the variable names the child will see (r26 left it unexplained
+# why the frontend's getenv missed NVMTL_ENABLE); values may be private.
+/usr/bin/env -i PATH="$PATH" HOME="$user_home" USER="$account" LOGNAME="$account" TMPDIR="$session/tmp/" \
+    ${probe_env[@]+"${probe_env[@]}"} /usr/bin/env | sed 's/=.*//' > "$session/child-env-names.txt" 2>&1 || :
 started_local=$(date '+%Y-%m-%d %H:%M:%S')
 code=0
 uhd_run_bounded "$session" "$verified" 55 \

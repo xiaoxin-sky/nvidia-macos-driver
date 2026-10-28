@@ -544,12 +544,14 @@ prepare() {
     # Local x86 CLI executables have no developer signature. Sign only derived
     # copies, retain their original bytes and record the transformation.
     mkdir "$ROOT/derived-probes"; chmod 755 "$ROOT/derived-probes"
+    local derived
     for key in uhd770-compute-probe uhd770-metal-probe; do
-        cp "$ROOT/components/probe/$key" "$ROOT/derived-probes/$key"
-        codesign --force --sign - "$ROOT/derived-probes/$key" >> "$PRIVATE/probe-signatures.txt" 2>&1
-        codesign --verify --strict "$ROOT/derived-probes/$key" >> "$PRIVATE/probe-signatures.txt" 2>&1
-        chmod 755 "$ROOT/derived-probes/$key"
-        shasum -a 256 "$ROOT/components/probe/$key" "$ROOT/derived-probes/$key" >> "$PRIVATE/probe-signatures.txt"
+        derived=$(session_derived_probe_name "$key")
+        cp "$ROOT/components/probe/$key" "$ROOT/derived-probes/$derived"
+        codesign --force --sign - "$ROOT/derived-probes/$derived" >> "$PRIVATE/probe-signatures.txt" 2>&1
+        codesign --verify --strict "$ROOT/derived-probes/$derived" >> "$PRIVATE/probe-signatures.txt" 2>&1
+        chmod 755 "$ROOT/derived-probes/$derived"
+        shasum -a 256 "$ROOT/components/probe/$key" "$ROOT/derived-probes/$derived" >> "$PRIVATE/probe-signatures.txt"
     done
     # Complete every permission/link/signature/ordinary-user gate before the
     # first live rename. Never recurse chmod through the signed AIR symlink.
@@ -575,7 +577,7 @@ prepare() {
     cp "$user_preflight" "$PRIVATE/user-job-preflight.txt"
     session_bounded 20 "$PRIVATE/user-payload-preflight.txt" sudo -n -u "#$uid" /bin/bash -p -c \
         'for item do [ -r "$item" ] || exit 64; done; [ -x "$1" ] && [ -x "$2" ]' _ \
-        "$ROOT/derived-probes/uhd770-compute-probe" "$ROOT/derived-probes/uhd770-metal-probe" \
+        "$ROOT/derived-probes/uhd770-compute-probe" "$ROOT/derived-probes/$(session_derived_probe_name uhd770-metal-probe)" \
         "$ROOT/components/Library/GPUBundles/nvmtl/libvulkan.1.dylib" \
         "$ROOT/components/Library/GPUBundles/nvmtl/libvulkan_intel.dylib" \
         "$ROOT/components/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver" \
