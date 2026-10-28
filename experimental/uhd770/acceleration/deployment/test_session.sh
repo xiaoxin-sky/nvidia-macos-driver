@@ -302,6 +302,11 @@ GROUP_EXIT_LEADER
 session_bounded_group 5 "$TASK_TMP/group-completed.txt" /bin/bash "$TASK_TMP/group-exit-leader"
 grep -q command_exit_status=0 "$TASK_TMP/group-completed.txt"
 assert_tree_stopped
+# A follower must be gone even when TERM is ignored, as when it lands before exec.
+( trap '' TERM; exec sleep 30 ) & follower=$!
+session_stop_follower "$follower"
+if kill -0 "$follower" 2>/dev/null; then exit 1; fi
+
 # The Metal frontend allows its own diagnostic names; only the Metal copy is renamed.
 [ "$(session_derived_probe_name uhd770-metal-probe)" = mtlprobe ]
 [ "$(session_derived_probe_name uhd770-compute-probe)" = uhd770-compute-probe ]

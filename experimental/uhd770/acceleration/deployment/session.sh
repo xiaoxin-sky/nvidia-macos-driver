@@ -736,7 +736,7 @@ run_manual_test() {
     tail -n +1 -f "$PRIVATE/manual-coordinator-$current.txt" & FOLLOWER=$!
     session_bounded_group "$MANUAL_COORDINATOR_LIMIT" "$PRIVATE/manual-coordinator-$current.txt" \
         sudo -n -u "#$uid" /bin/bash -p "$ROOT/session-tools/session-user.sh" manual || code=$?
-    kill -TERM "$FOLLOWER" 2>/dev/null || :; FOLLOWER=''
+    session_stop_follower "$FOLLOWER"; FOLLOWER=''
     session_bounded "$MANUAL_LOADED_AFTER_LIMIT" "$PRIVATE/manual-loaded-after-$current.txt" kmutil showloaded || :
     if [ "$code" -eq 124 ]; then
         printf 'boot=%s\ntrigger=manual-timeout\npartial=true\n' "$current" > "$PUBLIC/deadline-$current.txt"
@@ -765,7 +765,7 @@ failed() {
     local code=$1
     trap - EXIT INT TERM HUP
     set +e
-    [ -z "$FOLLOWER" ] || kill -TERM "$FOLLOWER" 2>/dev/null || :
+    [ -z "$FOLLOWER" ] || session_stop_follower "$FOLLOWER"
     if [ "$MODE" = test ] && [ "$MANUAL_ACTIVE" -eq 1 ]; then
         local manual_boot
         manual_boot=$(sysctl -n kern.bootsessionuuid)

@@ -351,8 +351,6 @@ session_observe_capture() {
     printf 'observation_elapsed_s=%s\nobservation_end=%s\n' "$elapsed" "$reason" >> "$evidence"
 }
 
-# Accept a completed normal-desktop recorder session, never an old boot or an
-# empty/timeout-only report. GPU success is deliberately outside this predicate.
 # The Metal frontend gives a device only to allow-listed process names. r25 and
 # r26 showed it refusing "uhd770-metal-probe" although NVMTL_ENABLE was set both
 # in main and at exec; "mtlprobe" is one of its built-in diagnostic names, so the
@@ -364,6 +362,21 @@ session_derived_probe_name() {
     esac
 }
 
+# Stop the terminal follower of a transcript. A TERM that lands between its fork
+# and exec is taken by the inherited shell trap and lost, leaving "tail -f" on
+# the caller's stdout forever (the intermittent manual-timeout flow hang), so an
+# uncatchable KILL follows a short grace period and the child is always reaped.
+session_stop_follower() {
+    local pid=$1
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    kill -TERM "$pid" 2>/dev/null || :
+    sleep 0.2
+    kill -KILL "$pid" 2>/dev/null || :
+    wait "$pid" 2>/dev/null || :
+}
+
+# Accept a completed normal-desktop recorder session, never an old boot or an
+# empty/timeout-only report. GPU success is deliberately outside this predicate.
 session_recorder_valid() {
     local report=$1 boot=$2
     [ -f "$report/stages.txt" ] && [ -f "$report/boot-identity.txt" ] || return 1
