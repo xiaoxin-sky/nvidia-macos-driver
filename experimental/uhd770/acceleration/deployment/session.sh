@@ -346,7 +346,9 @@ restore_optout() {
         return 1
     fi
     [ "$(hash "$cfg")" = "$safe" ] || return 1
-    session_bounded 5 "$PRIVATE/optout-sync.txt" sync || return 1
+    # A global sync on the target routinely outlasts 5 s; the config is already
+    # verified above, so only the flush confirmation needs the longer bound.
+    session_bounded 30 "$PRIVATE/optout-sync.txt" sync || return 1
 }
 
 restore_files() {
@@ -619,7 +621,7 @@ prepare() {
     cp "$KIT/session-target/config.test.plist" "$cfg.uhd770-pending"
     [ "$(hash "$cfg.uhd770-pending")" = "$(property test_hash)" ] || die 'Test config copy failed.'
     mv -f "$cfg.uhd770-pending" "$cfg"
-    session_bounded 5 "$PRIVATE/arm-sync.txt" sync || die 'Cannot confirm test config flush.'
+    session_bounded 30 "$PRIVATE/arm-sync.txt" sync || die 'Cannot confirm test config flush.'
     printf 'armed\n' > "$PUBLIC/state.txt"
     printf '\nPREPARED. Restart ONCE through the same 1401 USB and choose macOS 15.\n'
     printf 'Log in normally. GPU takeover waits 180 seconds after firmware availability.\n'
