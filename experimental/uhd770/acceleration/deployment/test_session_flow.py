@@ -146,7 +146,7 @@ elif name == 'sudo':
     # exact copied selected-user entry point are allowed; no privilege change.
     selected = str(root / 'mac/Library/Application Support/UHD770MVP/session-tools/session-user.sh')
     read_gate = 'for item do [ -r "$item" ] || exit 64; done; [ -x "$1" ] && [ -x "$2" ]'
-    allowed_read_gate = args[3:8] == ['/bin/bash', '-p', '-c', read_gate, '_'] and len(args[8:]) == 5 and \
+    allowed_read_gate = args[3:8] == ['/bin/bash', '-p', '-c', read_gate, '_'] and len(args[8:]) == 6 and \
                         all(pathlib.Path(value).is_relative_to(root) for value in args[8:])
     allowed = args[3:6] == ['/usr/bin/head', '-c', '513'] or \
               (args[3:6] == ['/bin/bash', '-p', selected] and args[6:] in (['preflight'], ['manual'])) or allowed_read_gate
