@@ -6960,3 +6960,18 @@
  }
  
  static int nmx_munmap(struct nmx_open *o, struct nmx_drm_munmap *req)
+--- a/override/src/nmx_linux_cdev.c
++++ b/override/src/nmx_linux_cdev.c
+@@ -559,8 +559,10 @@ static int nmx_mmap(struct nmx_open *o, struct nmx_drm_mmap *req)
+            (uint64_t)req->offset, (uint64_t)req->size, req->prot, req->flags)
+     uint64_t fixed = (req->flags & NMX_DRM_MMAP_FIXED) ? req->addr : 0;
+     req->addr = 0;
+-    if ((req->flags & ~NMX_DRM_MMAP_FIXED) != 0 || (req->offset & PAGE_MASK) != 0 || req->size == 0 ||
+-        req->size > (1ULL << 40) || (fixed & PAGE_MASK) != 0 || ((req->flags & NMX_DRM_MMAP_FIXED) && fixed == 0)) {
++    /* linux/mm.h makes PAGE_MASK the Linux ~(PAGE_SIZE - 1), so test the in-page bits explicitly */
++    if ((req->flags & ~NMX_DRM_MMAP_FIXED) != 0 || (req->offset & (PAGE_SIZE - 1)) != 0 || req->size == 0 ||
++        req->size > (1ULL << 40) || (fixed & (PAGE_SIZE - 1)) != 0 ||
++        ((req->flags & NMX_DRM_MMAP_FIXED) && fixed == 0)) {
+         NMX_MMAP_FAIL("args", EINVAL);
+         return EINVAL;
+     }

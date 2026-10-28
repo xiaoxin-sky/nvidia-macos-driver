@@ -25,7 +25,8 @@ typedef uintptr_t pgprot_t;
 typedef int vm_fault_t;
 #define PAGE_SHIFT 12
 #define PAGE_SIZE 4096ULL
-#define PAGE_MASK (PAGE_SIZE - 1)
+/* The node code includes linux/mm.h, so it sees LinuxKPI's PAGE_MASK and round_page. */
+#define PAGE_MASK (~(PAGE_SIZE - 1))
 #define VM_READ 1
 #define VM_WRITE 2
 #define VM_MAYWRITE 4
@@ -43,7 +44,7 @@ typedef int vm_fault_t;
 #define M_WAITOK 1
 #define M_ZERO 2
 #define MTX_DEF 0
-#define round_page(value) (((value) + PAGE_MASK) & ~PAGE_MASK)
+#define round_page(value) ((((uintptr_t)(value)) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
 #define unlikely(value) (value)
 #define __containerof(ptr, type, field) ((type *)((char *)(ptr) - offsetof(type, field)))
 /* Darwin string.h imports the fortified bzero macro from strings.h. The
@@ -278,6 +279,19 @@ int main(void)
         assert(!strcmp(events, "PMXUG"));
         clean(&open);
     }
+    /* GEM fake offsets start above 4 GiB (r24 saw 0x100000000); they are page aligned, not zero */
+    reset(&open); req = request(); req.offset = 0x100000000ULL;
+    assert(nmx_mmap(&open, &req) == 0 && fault_calls == 6 && !strcmp(events, "PM"));
+    umap_release_all(&open); clean(&open);
+    reset(&open); req = request(); req.offset = 0x100000000ULL + 8;
+    assert(nmx_mmap(&open, &req) == EINVAL && !singleton_calls && !strcmp(events, ""));
+    clean(&open);
+    reset(&open); req = request(); req.flags = NMX_DRM_MMAP_FIXED; req.addr = 0x7f0000000000ULL;
+    assert(nmx_mmap(&open, &req) == 0 && req.addr == 0x100000);
+    umap_release_all(&open); clean(&open);
+    reset(&open); req = request(); req.flags = NMX_DRM_MMAP_FIXED; req.addr = 0x7f0000000000ULL + 8;
+    assert(nmx_mmap(&open, &req) == EINVAL && !singleton_calls);
+    clean(&open);
     for (type = I915_MMAP_TYPE_GTT; type <= I915_MMAP_TYPE_FIXED + 1; type++) {
         reset(&open); offset_node.mmap_type = type; req = request();
         assert(nmx_mmap(&open, &req) == EOPNOTSUPP);
