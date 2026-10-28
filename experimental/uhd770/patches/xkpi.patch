@@ -6802,3 +6802,161 @@
  	return 3;
  #else
  	return 5;
+--- a/fork_i915_gem_mman.py
++++ b/fork_i915_gem_mman.py
+@@ -99,5 +99,29 @@ text = replace_once(
+     "int i915_gem_mmap_gtt_version(void)\n{\n#ifdef NMXKPI\n\treturn 4;\n#elif __FreeBSD_version",
+     "Darwin mmap offset version",
+ )
++# Mesa prints a failed map as "mmap failed: m" on Darwin (no %m), so name
++# each i915 refusal in the kernel log.
++text = replace_once(
++    text,
++    "\t     mmo->mmap_type != I915_MMAP_TYPE_UC)) {\n\t\ti915_gem_object_put(obj);\n",
++    "\t     mmo->mmap_type != I915_MMAP_TYPE_UC)) {\n"
++    "\t\tprintf(\"NullMoth mmap: i915 refused mmo=%d shmem=%d type=%d\\n\", mmo != NULL,\n"
++    "\t\t       i915_gem_object_is_shmem(obj), mmo != NULL ? (int)mmo->mmap_type : -1);\n"
++    "\t\ti915_gem_object_put(obj);\n",
++    "mapping scope refusal diagnostic",
++)
++text = replace_once(
++    text,
++    "\tdefault:\n\t\treturn -EINVAL;\n\t}\n\n"
++    "\treturn __assign_mmap_offset_handle(file, args->handle, type, &args->offset);\n}\n",
++    "\tdefault:\n"
++    "\t\tprintf(\"NullMoth mmap: offset flags=0x%llx refused\\n\", (unsigned long long)args->flags);\n"
++    "\t\treturn -EINVAL;\n\t}\n\n"
++    "\terr = __assign_mmap_offset_handle(file, args->handle, type, &args->offset);\n"
++    "\tif (err)\n"
++    "\t\tprintf(\"NullMoth mmap: offset handle=%u type=%d -> %d\\n\", args->handle, (int)type, err);\n"
++    "\treturn err;\n}\n",
++    "mmap offset diagnostic",
++)
+ pathlib.Path(sys.argv[2]).write_text(text, encoding="utf-8", newline="\n")
+ print("i915_gem_mman.c Darwin CPU mapping fork applied")
+--- a/override/i915/i915_gem_mman.c
++++ b/override/i915/i915_gem_mman.c
+@@ -951,10 +951,14 @@ i915_gem_mmap_offset_ioctl(struct drm_device *dev, void *data,
+ 		break;
+ 
+ 	default:
++		printf("NullMoth mmap: offset flags=0x%llx refused\n", (unsigned long long)args->flags);
+ 		return -EINVAL;
+ 	}
+ 
+-	return __assign_mmap_offset_handle(file, args->handle, type, &args->offset);
++	err = __assign_mmap_offset_handle(file, args->handle, type, &args->offset);
++	if (err)
++		printf("NullMoth mmap: offset handle=%u type=%d -> %d\n", args->handle, (int)type, err);
++	return err;
+ }
+ 
+ static void vm_open(struct vm_area_struct *vma)
+@@ -1059,6 +1063,8 @@ i915_gem_object_mmap(struct drm_i915_gem_object *obj,
+ 	    (mmo->mmap_type != I915_MMAP_TYPE_WB &&
+ 	     mmo->mmap_type != I915_MMAP_TYPE_WC &&
+ 	     mmo->mmap_type != I915_MMAP_TYPE_UC)) {
++		printf("NullMoth mmap: i915 refused mmo=%d shmem=%d type=%d\n", mmo != NULL,
++		       i915_gem_object_is_shmem(obj), mmo != NULL ? (int)mmo->mmap_type : -1);
+ 		i915_gem_object_put(obj);
+ 		return -EOPNOTSUPP;
+ 	}
+--- a/override/src/nmx_linux_cdev.c
++++ b/override/src/nmx_linux_cdev.c
+@@ -522,9 +522,14 @@ static int umap_populate(struct nmx_umap *u)
+             pause("nmxflt", 1);
+             r = vma->vm_ops->fault(&vmf);
+         }
+-        if (u->pages[i] == 0)
++        if (u->pages[i] == 0) {
++            printf("NullMoth mmap: fault inserted no page index=%llu/%llu pgoff=0x%llx fault=0x%x\n",
++                   (unsigned long long)i, (unsigned long long)u->npages, (unsigned long long)vmf.pgoff, (unsigned)r);
+             return r == VM_FAULT_OOM ? ENOMEM : EFAULT;
++        }
+     }
++    if (u->mixed_cache)
++        printf("NullMoth mmap: mixed cache modes, first=%d\n", u->cache);
+     return u->mixed_cache ? EINVAL : 0;
+ }
+ 
+@@ -548,14 +553,22 @@ static void umap_free(struct nmx_umap *u)
+ 
+ static int nmx_mmap(struct nmx_open *o, struct nmx_drm_mmap *req)
+ {
++/* Diagnostic: Mesa's own message loses errno on Darwin, so each refusal names itself here. */
++#define NMX_MMAP_FAIL(stage, e) \
++    printf("NullMoth mmap: stage=%s err=%d offset=0x%llx size=0x%llx prot=%u flags=%u\n", (stage), (int)(e), \
++           (unsigned long long)req->offset, (unsigned long long)req->size, req->prot, req->flags)
+     uint64_t fixed = (req->flags & NMX_DRM_MMAP_FIXED) ? req->addr : 0;
+     req->addr = 0;
+     if ((req->flags & ~NMX_DRM_MMAP_FIXED) != 0 || (req->offset & PAGE_MASK) != 0 || req->size == 0 ||
+-        req->size > (1ULL << 40) || (fixed & PAGE_MASK) != 0 || ((req->flags & NMX_DRM_MMAP_FIXED) && fixed == 0))
++        req->size > (1ULL << 40) || (fixed & PAGE_MASK) != 0 || ((req->flags & NMX_DRM_MMAP_FIXED) && fixed == 0)) {
++        NMX_MMAP_FAIL("args", EINVAL);
+         return EINVAL;
++    }
+     struct linux_file *filp = o->fp->f_data;
+-    if (o->fp->f_ops == NULL || filp == NULL || filp->f_op == NULL || filp->f_op->mmap == NULL)
++    if (o->fp->f_ops == NULL || filp == NULL || filp->f_op == NULL || filp->f_op->mmap == NULL) {
++        NMX_MMAP_FAIL("no-mmap-op", ENODEV);
+         return ENODEV;
++    }
+     uint64_t size = round_page(req->size);
+     struct nmx_umap *u = malloc(sizeof(*u), M_NMXCDEV, M_WAITOK | M_ZERO);
+     if (u == NULL)
+@@ -575,6 +588,7 @@ static int nmx_mmap(struct nmx_open *o, struct nmx_drm_mmap *req)
+         mtx_destroy(&u->obj.lock);
+         free(u->pages, M_NMXCDEV);
+         free(u, M_NMXCDEV);
++        NMX_MMAP_FAIL("no-mm", EINVAL);
+         return EINVAL;
+     }
+     struct vm_area_struct *vma = &u->vma;
+@@ -591,19 +605,24 @@ static int nmx_mmap(struct nmx_open *o, struct nmx_drm_mmap *req)
+     curthread->td_fpop = o->fp;
+     down_write(&mm->mmap_sem);
+     int err = -filp->f_op->mmap(filp, vma);
++    const char *stage = "driver-mmap";
+     if (err == 0) {
+         u->vm_opened = vma->vm_ops != NULL;
+         if (vma->vm_ops != NULL && vma->vm_ops->fault != NULL) {
+             /* pass 1 lets the driver place the buffer; pinned, pass 2 reads where it now stays */
++            stage = "populate";
+             err = umap_populate(u);
+             if (err == 0 && u->pin != NULL) {
++                stage = "pin";
+                 err = -u->pin(u->pin_arg, true);
+                 if (err == 0) {
+                     u->pinned = 1;
++                    stage = "populate-pinned";
+                     err = umap_populate(u);
+                 }
+             }
+         } else if (vma->vm_pfn_count != (int)u->npages) {
++            stage = "partial-map";
+             err = EINVAL;   /* no fault handler and the mmap handler did not map every page */
+         }
+     }
+@@ -613,8 +632,14 @@ static int nmx_mmap(struct nmx_open *o, struct nmx_drm_mmap *req)
+     if (err == 0) {
+         int writable = (vma->vm_flags & VM_WRITE) != 0;
+         err = nmx_xnu_map_user(u->pages, u->npages, u->cache, writable, fixed, &u->uaddr, &u->xmap);
++        if (err != 0)
++            stage = "map-user";
+     }
+     if (err) {
++        NMX_MMAP_FAIL(stage, err);
++        printf("NullMoth mmap: pages=%llu/%llu cache=%d mixed=%d writable=%d\n",
++               (unsigned long long)vma->vm_pfn_count, (unsigned long long)u->npages, u->cache, u->mixed_cache,
++               (vma->vm_flags & VM_WRITE) != 0);
+         umap_free(u);
+         return err;
+     }
+@@ -624,6 +649,7 @@ static int nmx_mmap(struct nmx_open *o, struct nmx_drm_mmap *req)
+     mtx_unlock(&o->maps_mtx);
+     req->addr = u->uaddr;
+     return 0;
++#undef NMX_MMAP_FAIL
+ }
+ 
+ static int nmx_munmap(struct nmx_open *o, struct nmx_drm_munmap *req)
