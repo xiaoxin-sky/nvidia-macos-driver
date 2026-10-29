@@ -7312,11 +7312,11 @@ new file mode 100644
 new file mode 100644
 --- /dev/null
 +++ b/xnu/nmx_intelfb.cpp
-@@ -0,0 +1,494 @@
+@@ -0,0 +1,568 @@
 +/*
 + * UHD 770 plan step E (experimental/uhd770/DESKTOP-PLAN.zh.md 3.4): upstream kexts/NMIntelFB/intelfb.cpp, unchanged
-+ * except the opt-in, the owner flag and summary NMXGPU reads, and a NullMoth log prefix (the session keeps only
-+ * NullMoth kernel lines); compiled into NMXGPU.kext as a second personality in the IOFramebuffer match category. It takes
++ * except the opt-in, the owner flag and summary NMXGPU reads, a NullMoth log prefix (the session keeps only
++ * NullMoth kernel lines) and the step guard below; compiled into NMXGPU.kext as a second personality in the IOFramebuffer match category. It takes
 + * the IGPU from the firmware framebuffer at boot and publishes the scan-out the firmware lit, which i915 later adopts
 + * in place (r31), so WindowServer opens a framebuffer of this driver from the start. Same license as the original.
 + */
@@ -7342,6 +7342,7 @@ new file mode 100644
 +#include <IOKit/IOWorkLoop.h>
 +#include <kern/thread_call.h>
 +#include <sys/sysctl.h>
++#include <IOKit/IONVRAM.h>
 +
 +#define IFBLOG(fmt, ...) IOLog("NullMoth NMIntelFB: " fmt "\n", ##__VA_ARGS__)
 +
@@ -7350,6 +7351,62 @@ new file mode 100644
 +bool nmx_intel_opted_in(IOPCIDevice *pci);
 +volatile bool g_nmx_intelfb_owner = false;
 +char g_nmx_intelfb_summary[160];   // what was adopted; NMXGPU records it, since the session report reads NMXGPU only
++
++// Step guard. r32 froze the boot right after probe, before any of start()'s own lines, and the session's recovery
++// never ran. Every step below is printed on the verbose console and written to NVRAM before it runs; the marker goes
++// away when start() declines or when NMXGPU's attach completes (nmx_intelfb_boot_completed). A boot that finds it
++// still set follows one that stopped inside these steps: this driver stays out for that boot (the firmware
++// framebuffer keeps the screen and the session restores the USB opt-out as before) and reports the step.
++static const char *const kIntelFBStepMarker = "nullmoth-intelfb-step";
++
++static IODTNVRAM *nmx_intelfb_nvram()
++{
++    IORegistryEntry *e = IORegistryEntry::fromPath("/options", gIODTPlane);
++    IODTNVRAM *n = OSDynamicCast(IODTNVRAM, e);
++    if (n == nullptr && e != nullptr) e->release();
++    return n;
++}
++
++// the step a previous boot left behind, or false
++static bool nmx_intelfb_previous_step(char *out, size_t len)
++{
++    IODTNVRAM *n = nmx_intelfb_nvram();
++    if (n == nullptr) return false;
++    OSData *d = OSDynamicCast(OSData, n->copyProperty(kIntelFBStepMarker));
++    bool set = d != nullptr;
++    if (d) {
++        size_t m = d->getLength() < len - 1 ? d->getLength() : len - 1;
++        memcpy(out, d->getBytesNoCopy(), m);
++        out[m] = '\0';
++        d->release();
++    }
++    n->release();
++    return set;
++}
++
++// step == nullptr clears the marker
++static void nmx_intelfb_step(const char *step)
++{
++    if (step) IOLog("NullMoth NMIntelFB: step %s\n", step);
++    IODTNVRAM *n = nmx_intelfb_nvram();
++    if (n == nullptr) { if (step) IOLog("NullMoth NMIntelFB: no NVRAM; the step guard is off\n"); return; }
++    const OSSymbol *k = OSSymbol::withCString(kIntelFBStepMarker);
++    if (k) {
++        if (step) {
++            OSData *d = OSData::withBytes(step, (unsigned)strlen(step));
++            if (d == nullptr || !n->setProperty(k, d)) IOLog("NullMoth NMIntelFB: could not set the step guard\n");
++            if (d) d->release();
++        } else {
++            n->removeProperty(k);
++        }
++        k->release();
++    }
++    n->sync();
++    n->release();
++}
++
++// NMXGPU's attach completed on this boot: whatever NMIntelFB did, it did not stop the boot
++void nmx_intelfb_boot_completed() { nmx_intelfb_step(nullptr); }
 +
 +namespace {
 +// display version by PCI device ID, from Linux include/drm/intel/pciids.h (MIT); 0 = not ours
@@ -7568,6 +7625,15 @@ new file mode 100644
 +    fVer = displayVersion(dev);
 +    if (!fVer) return nullptr;   // an Intel GPU this driver does not know (older ones have Apple's own driver)
 +    IFBLOG("8086:%04x display version %u", dev, fVer);
++    char previous[32];
++    if (nmx_intelfb_previous_step(previous, sizeof previous)) {
++        snprintf(g_nmx_intelfb_summary, sizeof g_nmx_intelfb_summary,
++                 "parked: the previous boot stopped at step %s", previous);
++        IFBLOG("the previous boot stopped at step %s - leaving the firmware screen for this boot", previous);
++        nmx_intelfb_step(nullptr);   // one boot only: the next test session tries again
++        return nullptr;
++    }
++    nmx_intelfb_step("probe");
 +    return IOFramebuffer::probe(provider, score);
 +}
 +
@@ -7640,16 +7706,21 @@ new file mode 100644
 +    IFBLOG("virtual panel published (1920x1080 at phys 0x%llx)", (unsigned long long)fApertureBase);
 +    return true;
 +#endif
++    nmx_intelfb_step("start");
 +    fPCI = OSDynamicCast(IOPCIDevice, provider);
-+    if (!fPCI) return false;
++    if (!fPCI) { nmx_intelfb_step(nullptr); return false; }
 +    fPCI->setMemoryEnable(true);
++    nmx_intelfb_step("bars");
 +    fMMIO = fPCI->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
 +    IODeviceMemory *ap = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);
-+    if (!fMMIO || !ap) { IFBLOG("BAR0 or BAR2 is not mapped - leaving the firmware screen"); OSSafeReleaseNULL(fMMIO); return false; }
++    if (!fMMIO || !ap) { IFBLOG("BAR0 or BAR2 is not mapped - leaving the firmware screen"); OSSafeReleaseNULL(fMMIO); nmx_intelfb_step(nullptr); return false; }
 +    fRegs = (volatile uint8_t *)fMMIO->getVirtualAddress();
 +    fApertureBase = ap->getPhysicalAddress(); fApertureLen = ap->getLength();
-+    if (!adoptFirmwareMode()) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
-+    if (!IOFramebuffer::start(provider)) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
++    nmx_intelfb_step("adopt");
++    if (!adoptFirmwareMode()) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; nmx_intelfb_step(nullptr); return false; }
++    nmx_intelfb_step("iofb-start");
++    if (!IOFramebuffer::start(provider)) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; nmx_intelfb_step(nullptr); return false; }
++    nmx_intelfb_step("surface-map");
 +    // Head 4 of the NVIDIA accelerator (NVAccel): WindowServer composites this panel on the NVIDIA card and the
 +    // display pipe copies each frame into fSurfMap. Without NVAccel the panel stays a plain framebuffer.
 +    if (IODeviceMemory *sm = IODeviceMemory::withRange(fApertureBase + fSurf, (IOPhysicalLength)fRowBytes * fHeight)) {
@@ -7662,8 +7733,11 @@ new file mode 100644
 +    setProperty("NMIntelFBPipe", fPipe, 32);
 +    setProperty("NMIntelFBDisplayVersion", fVer, 32);
 +    setProperty("built-in", kOSBooleanTrue);   // the panel is the laptop's own (kConnectionFlags says so too)
++    nmx_intelfb_step("vbl");
 +    armVbl();
++    nmx_intelfb_step("power");
 +    registerPowerDriver(this, kPowerStates, 2);
++    nmx_intelfb_step("published");   // kept until NMXGPU's attach completes: a freeze after start() is caught too
 +    IFBLOG("built-in panel published (%ux%u)", fWidth, fHeight);
 +    snprintf(g_nmx_intelfb_summary, sizeof g_nmx_intelfb_summary,
 +             "pipe %c %ux%u stride %u surf 0x%x refresh %u.%02u Hz aperture 0x%llx", 'A' + fPipe, fWidth, fHeight,
@@ -7809,7 +7883,7 @@ new file mode 100644
 +#endif
 --- a/xnu/nmx_kext.cpp
 +++ b/xnu/nmx_kext.cpp
-@@ -125,6 +125,14 @@ static bool opted_in(IOPCIDevice *pci, uint16_t vendor)
+@@ -125,6 +125,15 @@ static bool opted_in(IOPCIDevice *pci, uint16_t vendor)
      return false;
  }
  
@@ -7820,11 +7894,12 @@ new file mode 100644
 +}
 +extern volatile bool g_nmx_intelfb_owner;
 +extern char g_nmx_intelfb_summary[160];
++void nmx_intelfb_boot_completed();
 +
  IOService *NMXGPU::probe(IOService *provider, SInt32 *score)
  {
      IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
-@@ -375,10 +383,18 @@ void NMXGPU::attachNow()
+@@ -375,10 +384,19 @@ void NMXGPU::attachNow()
      nmx_gpu_stage_record("publish.after", 0);
      /* light the outputs and hand them to macOS; without it the device still renders, with no screen of its own */
      if (abortIfStopping()) return;
@@ -7837,16 +7912,17 @@ new file mode 100644
 -    if (fb_ == nullptr) {
 +    fb_ = intelfb ? nullptr : nmx_fb_publish(this, dev_);
 +    nmx_gpu_stage_record("framebuffer.after", fb_ != nullptr || intelfb ? 0 : -1);
++    if (g_nmx_intelfb_summary[0])
++        setProperty("nmxdiag-display-intelfb", g_nmx_intelfb_summary);   // what it adopted, or why it stayed out
 +    if (intelfb) {
 +        setProperty("nmxdiag-display-state", "owned-by-NMIntelFB");
-+        setProperty("nmxdiag-display-intelfb", g_nmx_intelfb_summary);
 +        IOLog("NullMoth GPU: the screen belongs to NMIntelFB; no second framebuffer\n");
 +    }
 +    if (fb_ == nullptr && !intelfb) {
          /* The GPU may have reset the firmware display already. A completed
           * device probe with no framebuffer is a failed display start: preserve
           * the existing guard so the next boot parks this attempt before reset. */
-@@ -394,7 +410,7 @@ void NMXGPU::attachNow()
+@@ -394,9 +412,10 @@ void NMXGPU::attachNow()
      IOLog("NullMoth GPU: initialized %04x:%04x; display waits for native open\n", pci_->configRead16(kIOPCIConfigVendorID),
            pci_->configRead16(kIOPCIConfigDeviceID));
      OSSynchronizeIO();
@@ -7854,7 +7930,10 @@ new file mode 100644
 +    nmx_gpu_stage_record("attach.complete", fb_ != nullptr || intelfb ? 0 : -1);
      lifecycle_.complete(1);
      setProperty("nmxdiag-attach-complete", kOSBooleanTrue);
++    nmx_intelfb_boot_completed();
      nmx_display_snapshot(pci_, this, "attached");
+     char report[384];
+     const int report_ret = nmx_fb_display_report(dev_, report, sizeof report);
 new file mode 100644
 --- /dev/null
 +++ b/xnu/nvrm_vram_abi.h

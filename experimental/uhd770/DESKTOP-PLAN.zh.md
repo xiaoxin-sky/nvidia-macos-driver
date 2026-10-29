@@ -109,6 +109,10 @@
 - NMXGPU 接管完成时，如果屏幕已归 NMIntelFB，就不发布 NMXGPUFB，记录 `nmxdiag-display-state = owned-by-NMIntelFB` 和 `nmxdiag-display-intelfb`（pipe、尺寸、步长、表面地址、刷新率、显存窗口）。
 - 会话脚本 `session_registry_ready` 把 `owned-by-NMIntelFB` 也当作就绪，相当于原来的"有 NMXGPUFB"。
 
+**r32 结果（2026-10-29）：开机卡死。** 两次测试启动都停在开机文字界面：屏幕上能看到 NMIntelFB 的探测日志，但它 start() 里的日志一行都没出现；这时 i915 还没开始接管显示。会话的开机任务也没来得及运行，U 盘一直是测试配置，最后在 Windows 上用 `Restore-UHD770.ps1` 才恢复。会话日志里没有这两次启动的任何记录。
+
+**r33 的应对。** 在 NMIntelFB 里加了"步骤记号"：探测和 start() 的每一步，都先打印到屏幕（`NullMoth NMIntelFB: step …`），再写进 NVRAM 变量 `nullmoth-intelfb-step`。start() 放弃接管时清掉这个变量；NMXGPU 接管完成时也清掉它。如果某次开机卡在这些步骤里，下次开机就会读到这个变量还在：NMIntelFB 这次不接管，把停在哪一步记进 `nmxdiag-display-intelfb`（`parked: the previous boot stopped at step …`），并清掉变量，下一轮测试会重新尝试。系统按 r31 的方式启动，会话照常恢复 U 盘配置，不需要再回 Windows。前提是这台机器的 NVRAM 写入能跨重启保留。
+
 **风险。** 中等。这是第一次在开机阶段换掉 WindowServer 的帧缓冲。NMIntelFB 原本只在笔记本内屏上验证过，台式机外接显示器上没试过。合成仍然在 CPU 上，桌面性能和现在相同；这一步的价值是让屏幕归我们的驱动所有，为 F 步（WindowServer 走 GPU）打基础。
 
 ## 4. 已确认的决定（2026-10-28）
