@@ -93,6 +93,11 @@ def stage(repository, root, cache, group):
             path = sources / "kexts/NVRM" / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(git_bytes(repository, pins["historical_revision"], "kexts/NVRM/" + name))
+        # UHD 770 plan step F on the pinned frontend: NMXAccel takes NMIntelFB as head 0 and gets its own arm
+        # switches; the plugin lets WindowServer composite on an armed AMD/Intel accelerator
+        patch = package / "patches/frontend-nmx.patch"
+        subprocess.run(["git", "-C", str(sources), "apply", "--check", str(patch)], check=True)
+        subprocess.run(["git", "-C", str(sources), "apply", str(patch)], check=True)
     (root / "sources.json").write_text(json.dumps(pins, indent=2) + "\n", encoding="utf-8")
 
 

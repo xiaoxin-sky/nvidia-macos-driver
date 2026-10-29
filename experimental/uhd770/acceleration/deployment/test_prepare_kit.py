@@ -102,6 +102,9 @@ class PreparationTests(unittest.TestCase):
             self.assertTrue((output / "tools/com.uhd770.mvp.session-root.plist").is_file())
             manifest = (output / "SHA256SUMS").read_text(encoding="utf-8")
             self.assertIn("  Run-UHD770-Test.command\n", manifest)
+            self.assertEqual((output / "Run-UHD770-Desktop.command").read_bytes(),
+                             (source / "Run-UHD770-Desktop.command").read_bytes())
+            self.assertIn("  Run-UHD770-Desktop.command\n", manifest)
             self.assertIn("  Archive-UHD770-Failed.command\n", manifest)
             self.assertNotIn("com.uhd770.mvp.session-user.plist", manifest)
 
@@ -119,7 +122,7 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(test["Kernel"], original["Kernel"])
         self.assertEqual(test["NVRAM"]["Delete"], original["NVRAM"]["Delete"])
         self.assertEqual(test["NVRAM"]["Add"][guid]["boot-args"],
-                         "-v -igfxvesa amfi=0x80 nmxintel=1 nmxdiagdelay=60")
+                         "-v -igfxvesa amfi=0x80 nmxintel=1 nmxdiagdelay=60 amfi_get_out_of_my_way=0x1")
         identity = json.loads(payload["session-target/identity.json"])
         self.assertEqual(identity["safe_hash"], kit.sha256(raw))
         self.assertEqual(plistlib.loads(payload["session-target/identity.plist"]), identity)
@@ -131,7 +134,7 @@ class PreparationTests(unittest.TestCase):
                                              "Delete": {guid: deletes if deletes is not None else ["boot-args"]}},
                                    "Kernel": {"Add": entries or []}})
         for raw in (configuration("-v"), configuration(deletes=[]),
-                    configuration("-nvoff nmxintel=1"),
+                    configuration("-nvoff nmxintel=1"), configuration("-nvoff amfi_get_out_of_my_way=0x1"),
                     configuration(entries=[{"Enabled": True, "BundlePath": "NMXGPU.kext"}])):
             with self.subTest(raw=raw), self.assertRaises(kit.InvalidKit):
                 kit.session_payload(raw, "1401")
@@ -140,7 +143,7 @@ class PreparationTests(unittest.TestCase):
 
     def test_recovery_copy_preserves_unrelated_settings_and_source(self):
         guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
-        original = {"NVRAM": {"Add": {guid: {"boot-args": "-v nmxintel=1 nmxdiagdelay=90 debug=0x100 -nvoff"}},
+        original = {"NVRAM": {"Add": {guid: {"boot-args": "-v nmxintel=1 nmxdiagdelay=90 amfi_get_out_of_my_way=0x1 debug=0x100 -nvoff"}},
                               "Delete": {guid: ["existing"]}},
                     "DeviceProperties": {"Add": {"GPU": {"nullmoth-gpu": b"\x01"}}},
                     "Kernel": {"Add": [{"Enabled": True, "BundlePath": "Lilu.kext"}]}}

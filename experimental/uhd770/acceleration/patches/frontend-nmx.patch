@@ -1,0 +1,151 @@
+diff --git a/kexts/NVRM/accel/nvrm-accel.cpp b/kexts/NVRM/accel/nvrm-accel.cpp
+index 2eb9c21..7550e3a 100644
+--- a/kexts/NVRM/accel/nvrm-accel.cpp
++++ b/kexts/NVRM/accel/nvrm-accel.cpp
+@@ -417,6 +417,11 @@ public:
+     void onCountGrewLocked() {
+         deliverModeChange();
+         gNvAccelArmed = 1;
++#ifdef NMX_ACCEL
++        gNvHeadless = 0;
++        removeProperty("NMXAccelHeadless");
++        ALOG("  debug.nmxaccel_headless now reads 0 -- a WindowServer started from now on composites on this GPU");
++#endif
+         if (fMetalPlugin && !getProperty("MetalPluginName")) {
+             setProperty("MetalPluginName", fMetalPlugin);
+             ALOG("  MetalPluginName restored -- a NEW process that asks Metal for this accelerator "
+@@ -629,7 +634,9 @@ public:
+             gNvHeadless = 1;
+             setProperty("NMXAccelHeadless", kOSBooleanTrue);
+             ALOG("AMD/Intel accelerator up: Metal device for apps, frames copied to the framebuffer WindowServer draws");
+-            OSDictionary *fbm = nullptr;
++            // UHD 770 plan step F: the screen belongs to NMIntelFB (dependent index 0) from boot. Watching it makes it
++            // head 0 of this accelerator; nothing changes until debug.nmxaccelfb arms it, and a reboot disarms it.
++            OSDictionary *fbm = serviceMatching("NMIntelFB");
+ #else
+             OSDictionary *fbm = serviceMatching("NVRMNVDAFramebuffer");
+ #endif
+@@ -637,6 +644,7 @@ public:
+                 fFBNote = addMatchingNotification(gIOFirstPublishNotification, fbm, &NVAccel::fbPublished, this, nullptr, 0);
+                 fbm->release();
+                 ALOG("watching for NVRMFramebuffer to publish -> notifier %p", fFBNote);
++#ifndef NMX_ACCEL
+                 // a laptop whose built-in panel is on the Intel GPU: NMIntelFB publishes as head 4 of this accelerator
+                 if (OSDictionary *im = serviceMatching("NMIntelFB")) {
+                     fIntelNote = addMatchingNotification(gIOFirstPublishNotification, im, &NVAccel::fbPublished, this, nullptr, 0);
+@@ -652,6 +660,11 @@ public:
+                          "`sysctl -w debug.nvaccelfb=1` puts it back, and a reboot takes it away again");
+                     armHeadlessCheck();
+                 }
++#else
++                // apps keep their Metal device (MetalPluginName stays); only WindowServer waits for the arm
++                ALOG("watching for the Intel framebuffer (NMIntelFB) as head 0 -- arm with debug.nmxaccelfb=3 and "
++                     "debug.nmxaccel_iop=1, then restart WindowServer; a reboot disarms");
++#endif
+             } else ALOG("serviceMatching(NVRMFramebuffer) returned NULL -- cannot watch for the framebuffer");
+         }
+         return r;
+@@ -1237,13 +1250,37 @@ static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS;
+ SYSCTL_PROC(_debug, OID_AUTO, nvaccel_crc, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, nvaccel_crc_sysctl, "I",
+             "b85k-crc: display CRC32 of what head nvaccel_crc_head is showing (0 = unavailable)");
+ static bool gSysctlInstalled = false;
++#ifdef NMX_ACCEL
++// UHD 770 plan step F: the same switches under names the NVIDIA accelerator does not own
++SYSCTL_PROC(_debug, OID_AUTO, nmxaccelfb, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
++            NULL, 0, nvaccelfb_sysctl, "I", "as debug.nvaccelfb, for NMXAccel: 1 = register NMIntelFB, 3 = also open the scanout gate");
++SYSCTL_PROC(_debug, OID_AUTO, nmxaccel_iop, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
++            NULL, 0, nvacceliop_sysctl, "I", "as debug.nvaccel_iop, for NMXAccel: 1 = perform display-pipe transactions");
++NVACCEL_CNT(nmxaccel_iop_ok,          gCntIopOk,          "frames copied to the screen");
++NVACCEL_CNT(nmxaccel_iop_ok_h0,       gCntIopOkHead[0],   "frames copied to head 0 (NMIntelFB)");
++NVACCEL_CNT(nmxaccel_iop_fail,        gCntIopFail,        "transactions refused (see the capped iop: log lines)");
++NVACCEL_CNT(nmxaccel_iop_empty,       gCntIopEmpty,       "transactions with no plane");
++NVACCEL_CNT(nmxaccel_iop_src_surf,    gCntIopSrcSurf,     "frames sourced from IOSurface memory");
++NVACCEL_CNT(nmxaccel_iop_blank,       gCntIopBlank,       "frames copied whose 64 samples were all one colour");
++SYSCTL_UINT(_debug, OID_AUTO, nmxaccel_heads_published, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvHeadsPublished, 0, "bit i = head i published");
++SYSCTL_UINT(_debug, OID_AUTO, nmxaccel_heads_registered, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvHeadsRegistered, 0, "bit i = head i registered");
++SYSCTL_UINT(_debug, OID_AUTO, nmxaccel_heads_piped, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvHeadsPiped, 0, "bit i = head i has a display pipe");
++#endif
+ static void nvaccelInstallSysctl(void)
+ {
+     if (gSysctlInstalled) return;
+ #ifdef NMX_ACCEL
+-    // only this one: the NVIDIA accelerator may be loaded too, and owns the debug.nvaccel* names
++    // the NVIDIA accelerator may be loaded too, and owns the debug.nvaccel* names
+     sysctl_register_oid(&sysctl__debug_nmxaccel_headless);
++    sysctl_register_oid(&sysctl__debug_nmxaccelfb);           sysctl_register_oid(&sysctl__debug_nmxaccel_iop);
++    sysctl_register_oid(&sysctl__debug_nmxaccel_iop_ok);      sysctl_register_oid(&sysctl__debug_nmxaccel_iop_ok_h0);
++    sysctl_register_oid(&sysctl__debug_nmxaccel_iop_fail);    sysctl_register_oid(&sysctl__debug_nmxaccel_iop_empty);
++    sysctl_register_oid(&sysctl__debug_nmxaccel_iop_src_surf); sysctl_register_oid(&sysctl__debug_nmxaccel_iop_blank);
++    sysctl_register_oid(&sysctl__debug_nmxaccel_heads_published);
++    sysctl_register_oid(&sysctl__debug_nmxaccel_heads_registered);
++    sysctl_register_oid(&sysctl__debug_nmxaccel_heads_piped);
+     gSysctlInstalled = true;
++    ALOG("sysctl debug.nmxaccelfb / debug.nmxaccel_iop installed (UHD 770 plan step F)");
+ #else
+     sysctl_register_oid(&sysctl__debug_nvaccelfb);
+     sysctl_register_oid(&sysctl__debug_nvaccel_headless);
+diff --git a/plugin/NVMTLDevice.m b/plugin/NVMTLDevice.m
+index cf161db..3416efe 100644
+--- a/plugin/NVMTLDevice.m
++++ b/plugin/NVMTLDevice.m
+@@ -387,10 +387,20 @@ static bool nvmtl_process_is_allowed(void)
+     // A headless NVIDIA GPU (the display is on the Intel or AMD GPU) is a Metal device for apps only: WindowServer stays
+     // on the GPU that owns the display, as on Apple's two-GPU Macs. The list below cannot express this: "*" matches
+     // WindowServer before its "!WindowServer" line is reached.
+-    { int hv = 0; size_t hn = sizeof hv;
+-      if (!strcmp(me, "WindowServer") && (nvmtl_vk_vendor() != 0x10de ||
+-                                          (sysctlbyname("debug.nvaccel_headless", &hv, &hn, NULL, 0) == 0 && hv))) {
+-          nvlog("  headless GPU: no device for WindowServer (it composites on the GPU that owns the display)"); return false; } }
++    // AMD/Intel (NMXAccel) stays headless unless its accelerator was armed with its own framebuffer
++    // (debug.nmxaccelfb, UHD 770 plan step F; the reference Meteor Lake port reads the same sysctl): then
++    // WindowServer composites here, as "!WindowServer" (armed-only) would allow.
++    if (!strcmp(me, "WindowServer")) {
++        int hv = 0; size_t hn = sizeof hv;
++        if (nvmtl_vk_vendor() != 0x10de) {
++            if (sysctlbyname("debug.nmxaccel_headless", &hv, &hn, NULL, 0) != 0 || hv) {
++                nvlog("  headless GPU: no device for WindowServer (it composites on the GPU that owns the display)"); return false; }
++            nvlog("  armed AMD/Intel accelerator: a device for WindowServer");
++            return true;
++        }
++        if (sysctlbyname("debug.nvaccel_headless", &hv, &hn, NULL, 0) == 0 && hv) {
++            nvlog("  headless GPU: no device for WindowServer (it composites on the GPU that owns the display)"); return false; }
++    }
+     if (getenv("NVMTL_ENABLE")) return true;
+     if (!strcmp(me, "mtlprobe") || !strcmp(me, "nvmtltest") || !strcmp(me, "nvmtlrender")) return true;
+     FILE *f = fopen("/Library/GPUBundles/nvmtl-allow.txt", "r");
+diff --git a/plugin/nvmtl_vk.c b/plugin/nvmtl_vk.c
+index f0c9c58..8ee6e9b 100644
+--- a/plugin/nvmtl_vk.c
++++ b/plugin/nvmtl_vk.c
+@@ -697,6 +697,16 @@ static int nvmtl_vk_initialize(void)
+             }
+         }
+     }
++    /* Intel WindowServer: the display pipe copies its frames with the CPU, which reads compressed (CCS) surfaces as
++       garbage. The reference Meteor Lake port sets this too; ANV parses INTEL_DEBUG once, so before it loads. */
++    if (nvmtl_vk_vendor() == 0x8086 && getprogname() && !strcmp(getprogname(), "WindowServer")) {
++        const char *was = getenv("INTEL_DEBUG");
++        char flags[512];
++        int n = snprintf(flags, sizeof flags, "%s%snoccs", was ? was : "", was && *was ? "," : "");
++        if (n > 0 && (size_t)n < sizeof flags && setenv("INTEL_DEBUG", flags, 1) == 0)
++            nvlog("vk: WindowServer on Intel: INTEL_DEBUG=%s", flags);
++        else nvlog("vk: WindowServer on Intel: could not add noccs to INTEL_DEBUG");
++    }
+     g_lib = dlopen(NVMTL_ICD_LIB, RTLD_NOW | RTLD_LOCAL);
+     if (g_lib) {
+         pvkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(g_lib, "vkGetInstanceProcAddr");
+@@ -1834,8 +1844,12 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
+ static int nvmtl_gpu_headless(void)
+ {
+     static int h = -1;
+-    /* AMD/Intel (NMXAccel): WindowServer draws into NMXGPU's framebuffer, so this device is always an app-only GPU */
+-    if (h < 0 && nvmtl_vk_vendor() != 0x10de) { h = 1; nvlog("AMD/Intel GPU: IOSurfaces are copied out to system memory"); }
++    /* AMD/Intel (NMXAccel): app-only unless the accelerator was armed with its own framebuffer (UHD 770 plan step F) */
++    if (h < 0 && nvmtl_vk_vendor() != 0x10de) {
++        int v = 1; size_t n = sizeof v;
++        h = sysctlbyname("debug.nmxaccel_headless", &v, &n, NULL, 0) != 0 || v;
++        nvlog(h ? "AMD/Intel GPU: IOSurfaces are copied out to system memory" : "AMD/Intel GPU drives the display: armed accelerator");
++    }
+     if (h < 0) { int v = 0; size_t n = sizeof v; h = sysctlbyname("debug.nvaccel_headless", &v, &n, NULL, 0) == 0 && v;
+                  if (h) nvlog("headless GPU: the display belongs to another GPU - IOSurfaces are copied out to system memory"); }
+     return h;

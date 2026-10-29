@@ -89,6 +89,8 @@ jobs:
           /bin/bash -p experimental/uhd770/acceleration/deployment/session.sh --help
           /bin/bash -p experimental/uhd770/acceleration/deployment/Start-UHD770.command --help
           /bin/bash -p experimental/uhd770/acceleration/deployment/Run-UHD770-Test.command --help
+          /bin/bash -n experimental/uhd770/acceleration/deployment/Run-UHD770-Desktop.command
+          /bin/bash -p experimental/uhd770/acceleration/deployment/Run-UHD770-Desktop.command --help
           /bin/bash -n experimental/uhd770/acceleration/deployment/Archive-UHD770-Failed.command
           /bin/bash -p experimental/uhd770/acceleration/deployment/Archive-UHD770-Failed.command --help
       - name: Mock capture and probe supervision (never opens a GPU)

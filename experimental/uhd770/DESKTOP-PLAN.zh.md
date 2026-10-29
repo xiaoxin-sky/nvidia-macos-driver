@@ -136,6 +136,46 @@
 
 **风险。** 中等。这是第一次在开机阶段换掉 WindowServer 的帧缓冲。NMIntelFB 原本只在笔记本内屏上验证过，台式机外接显示器上没试过。合成仍然在 CPU 上，桌面性能和现在相同；这一步的价值是让屏幕归我们的驱动所有，为 F 步（WindowServer 走 GPU）打基础。
 
+## 3.5 F 步：调研结论与分步方案（2026-10-29，未实现）
+**现在为什么 WindowServer 不走 GPU。** 有三处把 AMD/Intel 写死成"只给应用用的 GPU"：
+- 插件 `plugin/NVMTLDevice.m` 的 `nvmtl_process_is_allowed`：只要不是 NVIDIA（厂商 ID 不是 0x10de），就拒绝给 WindowServer 建 Metal 设备（`headless GPU: no device for WindowServer`）。
+- 插件 `plugin/nvmtl_vk.c` 的 `nvmtl_gpu_headless`：把 AMD/Intel 一律当作 headless，IOSurface 要拷回系统内存。
+- 内核 `kexts/NVRM/accel/nvrm-accel.cpp` 的 NMX 版本（NMXAccel）：不去找任何帧缓冲（`fbm = nullptr`），开机就设 `gNvHeadless = 1` 和 `debug.nmxaccel_headless = 1`。
+
+**现成可用的部分。** 同一份 nvrm-accel.cpp 在 NVIDIA 版本里，已经有把画面送到 NMIntelFB 的完整路径：
+- 监听 NMIntelFB 的发布（`fbPublished`，按 `IOFBDependentIndex` 分配 head）。
+- 用 `sysctl debug.nvaccelfb=1` 把帧缓冲交给 IOAccelerator 的显示机（`found_framebuffer`），然后"上膛"（恢复 `MetalPluginName`）；`=3` 再打开扫描输出闸门。
+- NMIntelFB 通过 `callPlatformFunction(nvScanoutInfo)` 交出扫描缓冲的写合并 CPU 映射（phys 为 0）。显示管线不为它建显存资源，每帧在 `performTransaction` 里拷进这块映射（计数器 `debug.nvaccel_iop_ok_h*`）。
+- 这些开关都在运行时用 sysctl 打开，重启后自动回到关闭。上游就是这么设计的，理由是"万一卡住，重启就能撤销，不需要动手恢复"。
+
+**参考项目（VedCloud）怎么放行 WindowServer。**
+- 插件不再按厂商判断，改为读内核的 `debug.nmxaccel_headless`（AMD/Intel）或 `debug.nvaccel_headless`（NVIDIA），值为 0 时才放行 WindowServer。值由 NMXAccel 决定：只有显示屏真正挂在它名下时才设成 0。
+- `nvmtl_desktop_policy.h` 里只对 WindowServer 生效的几条策略（都按设备 ID 8086:7d45 判断）：提交串行化、独立的读回暂存区、启动前设 `INTEL_DEBUG=noccs` 关掉 CCS 压缩，以及首次提交的等待策略。
+- 内核和显示部分改动很多（NullMoth-Xe 有 47 个补丁）。其中不少是虚拟机 virtio-gpu 专用的，真机版 LatitudeMTLFB 用的是"把合成好的画面拷进固件扫描缓冲"（scanout copy，0.3.19）。
+
+**构建方面的前提。** `acceleration/stage.py` 用 `git archive` 从固定的前端版本 fd917ea 取 `kexts/NVRM`、`plugin`、`translator`，中间没有打补丁这一步。F 步要先加一个前端补丁（例如 `acceleration/patches/frontend-nmx.patch`），像 Mesa 的补丁那样在暂存时应用。
+
+**分步方案（每步都可退回）。**
+| 步骤 | 内容 | 开机行为 | 风险 | 上机 |
+|---|---|---|---|---|
+| F1 | 加前端补丁机制。NMXAccel 的 NMX 版本也监听 NMIntelFB，让它成为 head 0（显示组编号 0）；开机仍是 headless。插件改成按 `debug.nmxaccel_headless` 放行 WindowServer，并加上 8086:4680 的 WindowServer 策略（串行提交、关 CCS 等）。 | 与 r34 相同，WindowServer 仍走 CPU | 低 | 1 次：确认 NMXAccel 看到了 head 0，四个测试照常通过 |
+| F2 | 新增一个手动脚本：登录后依次写 `debug.nvaccelfb=1`（登记显示管线、上膛）和 `=3`（开扫描闸门），记录日志后重启 WindowServer（会注销一次），看桌面是否由 GPU 合成、帧是否被拷进 NMIntelFB。 | 只在运行时打开，重启即恢复 | 高，但重启可退回 | 1–多次 |
+| F3 | 如果 WindowServer 因为签名不肯加载插件，就在**测试配置**里放宽 AMFI/SIP（之前已同意，参考值 `csr-active-config=0x0A43`、`amfi_get_out_of_my_way=0x1`）。安全配置保持不变。 | 测试配置 | 中 | 1 次 |
+| F4 | F2 稳定后，改成开机自动上膛；之后进入 G 步（流畅度、长时间运行、睡眠唤醒）。 | 测试配置 | 中 | 多次 |
+
+**实现（r35，2026-10-29）：F1–F3 合并成一轮测试。** 用户希望少重启几次，所以 F1、F2、F3 放进同一轮：一次 Start、一次重启，进桌面后先跑 Run-UHD770-Test，再跑新的 Run-UHD770-Desktop。
+- 前端补丁 `acceleration/patches/frontend-nmx.patch`，由 `stage.py` 在 Metal 组件暂存时应用：
+  - NMXAccel 监听 NMIntelFB，让它成为 head 0；新增自己的开关 `debug.nmxaccelfb` 和 `debug.nmxaccel_iop`，以及拷帧计数器 `debug.nmxaccel_iop_ok*` 等。上膛后 `debug.nmxaccel_headless` 变为 0。开机时仍是 headless，应用照常有 Metal 设备。
+  - 插件：Intel/AMD 上只有 `debug.nmxaccel_headless` 读到 0 时才给 WindowServer 设备，不用放行名单；headless 判断也改读这个 sysctl；Intel 上的 WindowServer 在加载 ANV 前设 `INTEL_DEBUG=noccs`，因为 CPU 拷贝读不了压缩表面。
+- 测试配置的启动参数加上 `amfi_get_out_of_my_way=0x1`（F3），只在测试配置里，安全配置不变。SIP 的值这次没动。
+- `Run-UHD770-Desktop.command`（F2）：要求本次开机已经跑完 Run-UHD770-Test。它通过 launchd 以 root 身份在后台依次写 `debug.nmxaccel_iop=1` 和 `debug.nmxaccelfb=3`，然后重启 WindowServer，在 20 秒和 60 秒时各记录一次开关、计数器和注册表，再记录内核、插件和 WindowServer 的日志，最后拷到 U 盘的 `UHD770-desktop-reports/`。重启即撤销所有改动。
+- 参考项目的串行提交、独立读回暂存区等 WindowServer 策略，这一轮还没有移植；先看基本路径能不能通。
+
+**主要未知数。**
+- 拷贝路径原本是"NVIDIA 显存 → Intel 内屏"。现在源和目的都在 Intel 这边（ANV 的系统内存表面 → BAR2 扫描缓冲），`performTransaction` 怎么读取源表面，要在 F1 里读代码确认，可能还要改。
+- IOAccelerator 显示机对帧缓冲和加速器的配对规则（显示组编号、`IOAccelIndex` 等）还没有逐行确认。
+- WindowServer 的沙盒和签名限制（参考项目的补丁 0045 处理了沙盒进程打开 GPU 设备）。
+
 ## 4. 已确认的决定（2026-10-28）
 1. 可以像 Meteor Lake 项目那样降低 SIP 和 AMFI 的安全设置，用于 F 步及之后。具体值到那一步再定，改动只写进测试配置，安全配置保持不变，保证 `-nvoff` 恢复路径始终可用。
 2. NMIntelFB 的 PolyForm-Noncommercial 许可证可以接受，可以基于它移植帧缓冲 kext。

@@ -166,11 +166,17 @@ def recovery_copy(source):
         raise InvalidKit("reference config lacks explicit OpenCore boot-args Add/Delete") from error
     require(isinstance(args, str) and isinstance(deletes, list) and
             all(isinstance(x, str) for x in deletes), "invalid OpenCore boot-args types")
-    words = [w for w in args.split() if not w.startswith(("nmxintel=", "nmxdiagdelay=")) and w != "-nvoff"]
+    words = [w for w in args.split() if not w.startswith(TEST_ONLY_ARGS) and w != "-nvoff"]
     data["NVRAM"]["Add"][guid]["boot-args"] = " ".join(words + ["-nvoff"])
     if "boot-args" not in deletes:
         deletes.append("boot-args")
     return plistlib.dumps(data, sort_keys=False)
+
+
+# Boot arguments only the one-boot test config carries. AMFI is relaxed there for
+# plan step F (WindowServer loading the ad-hoc signed Metal plugin), as the user
+# approved on 2026-10-28; the safe -nvoff config never has it.
+TEST_ONLY_ARGS = ("nmxintel=", "nmxdiagdelay=", "amfi_get_out_of_my_way=")
 
 
 def session_payload(source, volume_label):
@@ -187,7 +193,7 @@ def session_payload(source, volume_label):
     require(isinstance(args, str) and isinstance(deletes, list) and
             "boot-args" in deletes, "session USB requires an existing boot-args refresh rule")
     words = args.split()
-    require("-nvoff" in words and not any(w.startswith(("nmxintel=", "nmxdiagdelay=")) for w in words),
+    require("-nvoff" in words and not any(w.startswith(TEST_ONLY_ARGS) for w in words),
             "session USB must already be in clean -nvoff recovery mode")
     for entry in data.get("Kernel", {}).get("Add", []):
         require(not (entry.get("Enabled") and
@@ -195,7 +201,7 @@ def session_payload(source, volume_label):
                 "session cannot replace a competing EFI-injected NMX bundle")
     require(re.fullmatch(r"[A-Za-z0-9_-]{1,32}", volume_label) is not None, "invalid USB label")
     data["NVRAM"]["Add"][guid]["boot-args"] = " ".join(
-        [w for w in words if w != "-nvoff"] + ["nmxintel=1", "nmxdiagdelay=60"])
+        [w for w in words if w != "-nvoff"] + ["nmxintel=1", "nmxdiagdelay=60", "amfi_get_out_of_my_way=0x1"])
     test = plistlib.dumps(data, sort_keys=False)
     identity = {"safe_hash": sha256(source), "test_hash": sha256(test), "volume_label": volume_label}
     return {"session-target/config.safe.plist": source,
@@ -251,8 +257,8 @@ def prepare(candidate, firmware, output, source, config_backup=None, session_con
                                  "note": "Saved reference only. Compare with the actual booting EFI before any later edit."}
     if session_config:
         payload.update(session_payload(session_config.read_bytes(), volume_label))
-        for name in ("Start-UHD770.command", "Run-UHD770-Test.command", "Archive-UHD770-Failed.command",
-                     "Restore-UHD770.ps1", "README-session.txt"):
+        for name in ("Start-UHD770.command", "Run-UHD770-Test.command", "Run-UHD770-Desktop.command",
+                     "Archive-UHD770-Failed.command", "Restore-UHD770.ps1", "README-session.txt"):
             payload[name] = (source / name).read_bytes()
         plan.update({"classification": "opt-in-manual-session-candidate",
                      "driver_installation_enabled": True,
