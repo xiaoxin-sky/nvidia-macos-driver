@@ -552,8 +552,11 @@ class SessionFlowTests(unittest.TestCase):
         # The finished report is also copied, whole, next to the EFI on the prepared USB.
         usb_copy = self.mac / "Volumes/1401/UHD770-session-reports" / reports[0].name
         self.assertIn(f"USB copy: {usb_copy}".encode(), manual.stdout)
+        # Only the flush record is written after the copy, so it stays local.
         self.assertEqual(sorted(p.relative_to(usb_copy).as_posix() for p in usb_copy.rglob("*")),
-                         sorted(p.relative_to(reports[0]).as_posix() for p in reports[0].rglob("*")))
+                         sorted(p.relative_to(reports[0]).as_posix() for p in reports[0].rglob("*")
+                                if p.name != "usb-copy-sync.txt"))
+        self.assertTrue((usb_copy / "usb-copy-volume.plist").is_file())
         self.assertEqual(self.usb.read_bytes(), self.safe)
         exported_stages = reports[0] / "system/boot-capture/session-manual-test/stages.txt"
         self.assertIn("collector_end", exported_stages.read_text())

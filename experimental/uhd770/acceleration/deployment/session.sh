@@ -317,21 +317,32 @@ export_all() {
 # A second copy of the finished report on the prepared 1401 USB, so it reaches
 # Windows without a manual copy. Only the USB selected during preparation is
 # used, and only while its config is still this session's safe or test bytes;
-# the copy goes into a new directory and never touches the EFI.
+# the copy goes into a new directory and never touches the EFI. Export must not
+# change session state, so unlike usb_config this never mounts the volume and
+# keeps its own records inside the report.
 copy_report_to_usb() {
-    local output=$1 cfg mount actual destination
+    local output=$1 uuid info cfg mount actual destination
     [ -f "$PLAN" ] && [ ! -L "$PLAN" ] || return 1
-    cfg=$(usb_config) || return 1
+    uuid=$(property volume_uuid)
+    case "$uuid" in ''|*[!a-zA-Z0-9-]*) return 1 ;; esac
+    info="$output/usb-copy-volume.plist"
+    session_bounded 15 "$output/usb-copy-volume.txt" diskutil info -plist "$uuid" || return 1
+    sed '/^command_exit_status=/d' "$output/usb-copy-volume.txt" > "$info"
+    mount=$(plutil -extract MountPoint raw -o - "$info" 2>/dev/null || :)
+    case "$mount" in /Volumes/*) ;; *) return 1 ;; esac
+    [ "$(plutil -extract BusProtocol raw -o - "$info")" = USB ] || return 1
+    [ "$(plutil -extract VolumeName raw -o - "$info")" = "$(property volume_label)" ] || return 1
+    cfg="$mount/EFI/OC/config.plist"
+    [ ! -L "$mount/EFI" ] && [ ! -L "$mount/EFI/OC" ] && [ -f "$cfg" ] && [ ! -L "$cfg" ] || return 1
     actual=$(hash "$cfg")
     [ "$actual" = "$(property safe_hash)" ] || [ "$actual" = "$(property test_hash)" ] || return 1
-    mount=${cfg%/EFI/OC/config.plist}
     destination="$mount/UHD770-session-reports"
     [ -e "$destination" ] || [ -L "$destination" ] || mkdir "$destination" || return 1
     [ -d "$destination" ] && [ ! -L "$destination" ] || return 1
     destination="$destination/${output##*/}"
     [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
     mkdir "$destination" && ditto "$output" "$destination" || return 1
-    session_bounded 30 "$PRIVATE/usb-report-sync.txt" sync || return 1
+    session_bounded 30 "$output/usb-copy-sync.txt" sync || return 1
     printf 'USB copy: %s\n' "$destination"
 }
 
