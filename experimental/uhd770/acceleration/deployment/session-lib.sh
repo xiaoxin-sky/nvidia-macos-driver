@@ -402,7 +402,9 @@ session_recorder_valid() {
 session_registry_ready() {
     local report=$1
     grep -Eq 'failed:|parked:|cancelled:|attach.no_framebuffer' "$report" && return 1
-    grep -q 'class NMXGPUFB' "$report" || return 1
+    # A framebuffer of this driver owns the screen: NMXGPU's own, or (plan step E)
+    # NMIntelFB, in which case NMXGPU publishes no second one and says so.
+    grep -Eq 'class NMXGPUFB|"nmxdiag-display-state"[[:space:]]*=[[:space:]]*"owned-by-NMIntelFB"' "$report" || return 1
     if grep -q '"nmxdiag-attach-complete"' "$report"; then
         grep -Eq '"nmxdiag-attach-complete"[[:space:]]*=[[:space:]]*Yes' "$report"
         return

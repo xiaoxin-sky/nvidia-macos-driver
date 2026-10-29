@@ -114,6 +114,11 @@ printf 'class NMXGPUFB\n"nmxdiag-stage" = "pm.callback.after ret=0"\n' > "$TASK_
 session_registry_ready "$TASK_TMP/registry"
 printf 'class NMXGPUFB\n"nmxdiag-attach-complete" = Yes\n"nmxdiag-stage" = "fb.commit.after ret=0"\n' > "$TASK_TMP/registry"
 session_registry_ready "$TASK_TMP/registry"
+# Plan step E: NMIntelFB owns the screen and NMXGPU publishes no framebuffer of its own.
+printf '"nmxdiag-display-state" = "owned-by-NMIntelFB"\n"nmxdiag-attach-complete" = Yes\n' > "$TASK_TMP/registry"
+session_registry_ready "$TASK_TMP/registry"
+printf '"nmxdiag-display-state" = "awaiting-native-open"\n"nmxdiag-attach-complete" = Yes\n' > "$TASK_TMP/registry"
+if session_registry_ready "$TASK_TMP/registry"; then exit 1; fi
 printf 'class NMXGPUFB\n"nmxdiag-attach-complete" = No\n"nmxdiag-stage" = "pm.callback.after ret=0"\n' > "$TASK_TMP/registry"
 if session_registry_ready "$TASK_TMP/registry"; then exit 1; fi
 printf '"nullmoth-gpu-state" = "failed: port attach; guard retained"\n' >> "$TASK_TMP/registry"

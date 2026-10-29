@@ -90,6 +90,27 @@
 - 结论：固件画面已经由上游 i915 保护好了，D 步**不需要移植**参考项目 1.0.15 的补丁。可以进入 E 步。
 - 对 E 步的意义：i915 的主平面已经持有一个指向固件画面的 framebuffer 对象。比起另外写一个读寄存器的帧缓冲 kext（NMIntelFB 的做法），E 步可以让我们现有的 NMXGPUFB 直接发布这个已有的 framebuffer（通过 BAR2 显存窗口加 GGTT 偏移 0 访问），不分配新缓冲，也不做模式设置。
 
+## 3.4 E 步：设计（2026-10-29，未实现）
+**现状为什么不行。** NMXGPUFB 是 NMXGPU 的子服务，要等 i915 接管完成才发布（`nmxdiagdelay=60`，约开机 60 秒后），这时 WindowServer 早已打开 IGPU 上的固件帧缓冲 `.Display_boot`（IONDRVFramebuffer）。r29–r31 的注册表里，NMXGPUFB 下面一直没有 `display0`（IODisplayConnect），状态一直是 `awaiting-native-open`，也就是从来没有被打开过。
+
+**上游的做法。** NMIntelFB 开机时直接匹配 IGPU：`IOMatchCategory=IOFramebuffer`，`IOProbeScore=60000`，高于 IONDRVFramebuffer，所以它会顶替 `.Display_boot`，成为 WindowServer 开机就用的帧缓冲。NMXGPU 没有设置 IOMatchCategory，用的是默认类别，所以两者能同时挂在 IGPU 上。
+- NMIntelFB 的接管条件，r30 快照全部满足：4680 在它的列表里（显示版本 12），pipe A 点亮，XRGB8888，线性，表面在 BAR2+0 范围内。
+- 它不写任何显示寄存器。只要有一项不认识，start() 就失败，IONDRVFramebuffer 照常接手。这是开机时就有的退路。
+
+**E 步方案（建议）。**
+1. **NMIntelFB 加进构建和测试包**：在 CI 里编译上游 `kexts/NMIntelFB`（真实硬件版本，不定义 `NMINTELFB_VIRTUAL`），和 NMXGPU 一起装进 `/Library/Extensions`，只在测试会话里加载。许可证已确认可接受。
+2. **NMXGPU 不再发布第二个帧缓冲**：IGPU 上已经有 NMIntelFB 时，跳过 NMXGPUFB 的发布，记录 `nmxdiag-display-state = owned-by-NMIntelFB`，不再当成失败处理。否则 WindowServer 可能把 NMXGPUFB 当成第二块屏幕打开，`enableController` 就会触发 i915 模式设置，把屏幕切到一块空白缓冲上。
+3. **一次上机**：验证开机由 NMIntelFB 接管并正常显示；60 秒后 i915 接管时画面不中断（r30/r31 已证明 i915 原地保留这块画面）；四个计算/渲染测试照常通过。
+   - 失败时的退路：start() 拒绝时，IONDRV 照常接手；万一黑屏，等 6 分钟后重启，测试启动已经把 U 盘配置恢复成安全配置（`-nvoff`），这两个 kext 都不会加载。
+
+**实际实现（2026-10-29，r32）。** 不再单独做第三个 kext：部署流程（安装、日志记录、内核集合、签名和测试）都按 NMXGPU、NMXAccel 两个 kext 写死，加一个要改很多地方。改为把上游源码编进 NMXGPU.kext：
+- `xnu/nmx_intelfb.cpp` 是上游 `intelfb.cpp` 的副本。改动只有四处：去掉它自己的 kmod 声明；加上和 NMXGPU 相同的启用条件（`nmxintel=1`，`-nvoff` 时不加载）；记录"屏幕归 NMIntelFB"的标志和接管摘要；日志加 `NullMoth` 前缀，因为会话只采集带这个前缀的内核日志。`-nmintelfboff` 仍然可以单独关掉它。
+- `kext/Info.plist` 新增匹配项 `NMXIntelFB`：IOClass 为 NMIntelFB，`IOMatchCategory=IOFramebuffer`，探测优先级 60000。
+- NMXGPU 接管完成时，如果屏幕已归 NMIntelFB，就不发布 NMXGPUFB，记录 `nmxdiag-display-state = owned-by-NMIntelFB` 和 `nmxdiag-display-intelfb`（pipe、尺寸、步长、表面地址、刷新率、显存窗口）。
+- 会话脚本 `session_registry_ready` 把 `owned-by-NMIntelFB` 也当作就绪，相当于原来的"有 NMXGPUFB"。
+
+**风险。** 中等。这是第一次在开机阶段换掉 WindowServer 的帧缓冲。NMIntelFB 原本只在笔记本内屏上验证过，台式机外接显示器上没试过。合成仍然在 CPU 上，桌面性能和现在相同；这一步的价值是让屏幕归我们的驱动所有，为 F 步（WindowServer 走 GPU）打基础。
+
 ## 4. 已确认的决定（2026-10-28）
 1. 可以像 Meteor Lake 项目那样降低 SIP 和 AMFI 的安全设置，用于 F 步及之后。具体值到那一步再定，改动只写进测试配置，安全配置保持不变，保证 `-nvoff` 恢复路径始终可用。
 2. NMIntelFB 的 PolyForm-Noncommercial 许可证可以接受，可以基于它移植帧缓冲 kext。

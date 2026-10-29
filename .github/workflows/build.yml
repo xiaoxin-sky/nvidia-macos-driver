@@ -419,19 +419,26 @@ jobs:
           BIN="$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU"
           xcrun nm -arch x86_64 "$BIN" > /tmp/nmxgpu-symbols.txt \
             || { echo "::error::cannot read NMXGPU symbols"; exit 1; }
-          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set _nmx_fb_display_state _nmx_fb_set_mode _nmx_fb_reprobe _nmx_i915_display_report _nmx_fb_display_report; do
+          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set _nmx_fb_display_state _nmx_fb_set_mode _nmx_fb_reprobe _nmx_i915_display_report _nmx_fb_display_report __ZN9NMIntelFB10gMetaClassE __Z18nmx_intel_opted_inP11IOPCIDevice; do
             grep -Eq "[[:space:]][TtDdSsBbRr][[:space:]]$sym$" /tmp/nmxgpu-symbols.txt \
               || { echo "::error::missing defined symbol $sym (undefined imports do not count)"; exit 1; }
           done
           strings -a "$BIN" > /tmp/nmxgpu-strings.txt \
             || { echo "::error::cannot read NMXGPU diagnostic strings"; exit 1; }
-          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete' 'NullMoth PCI enum v1' 'pch_detect type=' 'hpd_tables pch=' 'pch_hpd missing' 'igtt.pin.before' 'igtt.iomap.after' 'boot guard retained for recovery' 'ADL-S CPU scanout, FBC disabled' 'failed: port attach; guard retained' 'display-snapshot %s: pipe %c' 'display-i915: ret=%d' 'stolen-nodes=%u overlapping-fb=%u'; do
+          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete' 'NullMoth PCI enum v1' 'pch_detect type=' 'hpd_tables pch=' 'pch_hpd missing' 'igtt.pin.before' 'igtt.iomap.after' 'boot guard retained for recovery' 'ADL-S CPU scanout, FBC disabled' 'failed: port attach; guard retained' 'display-snapshot %s: pipe %c' 'display-i915: ret=%d' 'stolen-nodes=%u overlapping-fb=%u' 'built-in panel published' 'owned-by-NMIntelFB' 'nmxdiag-display-intelfb' 'NullMoth NMIntelFB: '; do
             grep -Fq "$marker" /tmp/nmxgpu-strings.txt \
               || { echo "::error::missing diagnostic marker $marker"; exit 1; }
           done
           test -f /tmp/nmx-pci-class-test-ok || { echo "::error::PCI class iterator fixture did not pass"; exit 1; }
           test -f /tmp/nmx-display-fixtures-ok || { echo "::error::display lifecycle/fault fixtures did not pass"; exit 1; }
           echo "NMXGPU diagnostic symbols and stage markers verified"
+          # Plan step E: the firmware-mode framebuffer is a personality of this kext, in its own match category.
+          /usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:NMXIntelFB:IOClass' \
+            "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/Info.plist" | grep -qx NMIntelFB \
+            || { echo "::error::NMXIntelFB personality missing"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:NMXIntelFB:IOMatchCategory' \
+            "$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/Info.plist" | grep -qx IOFramebuffer \
+            || { echo "::error::NMXIntelFB must match in the IOFramebuffer category"; exit 1; }
           grep -Eq '[[:space:]][Tt][[:space:]]_nmx_fb_activate$' /tmp/nmxgpu-symbols.txt \
             || { echo "::error::native display handoff entry missing"; exit 1; }
           for marker in 'fb.commit.deferred' 'native enableController' 'nmxdiag-attach-complete'; do
