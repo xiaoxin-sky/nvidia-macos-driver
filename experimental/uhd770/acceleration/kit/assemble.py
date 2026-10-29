@@ -179,11 +179,11 @@ def check_component(archive, entries, name, spec):
     if name == "kernel":
         for path, pattern in [("logs/all.log", r"sources: 900\s+compiled: 900\s+failed: 0"),
                               ("logs/i915.log", r"sources: 274\s+compiled: 274\s+failed: 0"),
-                              ("logs/rt.log", r"runtime sources: 76\s+failed: 0")]:
+                              ("logs/rt.log", r"runtime sources: 77\s+failed: 0")]:
             require(re.search(pattern, read(path)), f"kernel: failed/incomplete source count {path}")
         units = [path for path in entries if (path.startswith(("logs/logs/", "logs/logs-i915/", "logs/lklogs/"))
                  and path.endswith(".log")) or (path.startswith(("logs/srclog_", "logs/xlog_")) and path.endswith(".txt"))]
-        require(len(units) == 1250 and not any(path.endswith(".failed") for path in entries),
+        require(len(units) == 1251 and not any(path.endswith(".failed") for path in entries),
                 "kernel: incomplete/failed compilation logs")
         require("CPU scope, persistent pins, failure cleanup and fd-close PASS" in read("logs/nmx-i915-mmap-test.log"),
                 "kernel: mapping lifecycle fixture did not pass")
