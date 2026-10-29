@@ -88,13 +88,19 @@ def summarize(report):
     observation = {}
     for path in sorted((report / "preparation").glob("post-test-observation-*.txt")):
         observation = fields(read(path))
+    # Read-only scan-out snapshots NMXGPU publishes before and after i915 attaches (informational, never compared).
+    display = {}
+    for path in (report / "preparation").glob("final-NMXGPU-*.txt"):
+        for m in re.finditer(r'"nmxdiag-display-(\w+)" = "([^"]*)"', read(path)):
+            display[m.group(1)] = m.group(2)
     identity = fields(read(report / "boot-identity.txt").replace(": ", "="))
     boot = identity.get("kern.bootsessionuuid", "")
     summary = {"report": report.name, "boot": boot, "boot_args": identity.get("kern.bootargs"),
                "manual_exit": manual.get("manual_exit"),
                "phases": {phase: phase_summary(report, phase) for phase in PHASES},
                "loaded_uuids": dict(sorted(uuids.items())),
-               "observation": {k: observation.get(k) for k in ("observation_limit_s", "observation_end")}}
+               "observation": {k: observation.get(k) for k in ("observation_limit_s", "observation_end")},
+               "display_snapshot": display}
     summary.update(kernel_lines(report, boot))
     return summary
 

@@ -6975,3 +6975,80 @@
          NMX_MMAP_FAIL("args", EINVAL);
          return EINVAL;
      }
+--- a/xnu/nmx_kext.cpp
++++ b/xnu/nmx_kext.cpp
+@@ -56,6 +56,58 @@ static IOLock *g_lock;
+ static bool g_started;
+ static int g_devices;
+ 
++/* Read-only record of what scans out, taken before i915 attaches and again after: each pipe's transcoder and primary
++ * plane (the registers upstream NMIntelFB reads to adopt a firmware-lit mode), the surface's GGTT entry and stolen
++ * memory, so a later framebuffer can reuse the firmware scan-out without a mode set. Nothing is written. Display 12/13
++ * layout: TRANSCONF 0x70008, PLANE_CTL/STRIDE/SIZE/SURF 0x70180/88/90/9C and FRMCOUNT 0x70040 per pipe (+0x1000),
++ * transcoder HTOTAL/VTOTAL 0x60000/0C, GGTT 8 MiB into BAR0, BDSM at config 0xC0/0xC4. */
++static void nmx_display_snapshot(IOPCIDevice *pci, IOService *owner, const char *when)
++{
++    IOMemoryMap *mmio = pci->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
++    if (!mmio) {
++        IOLog("NullMoth display-snapshot %s: BAR0 not mapped\n", when);
++        return;
++    }
++    volatile uint8_t *regs = (volatile uint8_t *)mmio->getVirtualAddress();
++    const uint64_t length = mmio->getLength();
++    auto rd = [&](uint32_t offset) -> uint32_t {
++        return offset + 4 <= length ? *(volatile uint32_t *)(regs + offset) : 0xffffffffu;
++    };
++    const uint64_t gtt = 8ull << 20;
++    const uint64_t bdsm = pci->configRead32(0xC0) | ((uint64_t)pci->configRead32(0xC4) << 32);
++    IODeviceMemory *aperture = pci->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);
++    IOLog("NullMoth display-snapshot %s: bar0_len=0x%llx bdsm=0x%llx aperture=0x%llx+0x%llx\n", when,
++          (unsigned long long)length, (unsigned long long)bdsm,
++          aperture ? (unsigned long long)aperture->getPhysicalAddress() : 0ull,
++          aperture ? (unsigned long long)aperture->getLength() : 0ull);
++    uint32_t frames[4];
++    for (int pipe = 0; pipe < 4; pipe++) frames[pipe] = rd(0x70040u + pipe * 0x1000u);
++    IOSleep(100);
++    char summary[256] = "";
++    size_t used = 0;
++    for (int pipe = 0; pipe < 4; pipe++) {
++        const uint32_t base = pipe * 0x1000u;
++        const uint32_t conf = rd(0x70008u + base), ctl = rd(0x70180u + base), surf = rd(0x7019Cu + base);
++        const uint64_t slot = gtt + (uint64_t)(surf >> 12) * 8;
++        const uint64_t pte = slot + 8 <= length ? *(volatile uint64_t *)(regs + slot) : ~0ull;
++        const uint32_t vblanks = rd(0x70040u + base) - frames[pipe];
++        IOLog("NullMoth display-snapshot %s: pipe %c transconf=0x%08x plane_ctl=0x%08x size=0x%08x stride=0x%08x "
++              "surf=0x%08x htotal=0x%08x vtotal=0x%08x vblanks_100ms=%u surf_pte=0x%016llx\n", when, 'A' + pipe, conf,
++              ctl, rd(0x70190u + base), rd(0x70188u + base), surf, rd(0x60000u + base), rd(0x6000Cu + base), vblanks,
++              (unsigned long long)pte);
++        if ((conf & (1u << 31)) && (ctl & (1u << 31)) && used < sizeof summary) {
++            const int wrote = snprintf(summary + used, sizeof summary - used,
++                                       "%spipe %c ctl=0x%08x size=0x%08x surf=0x%08x pte=0x%llx", used ? "; " : "",
++                                       'A' + pipe, ctl, rd(0x70190u + base), surf, (unsigned long long)pte);
++            if (wrote > 0) used += (size_t)wrote;
++        }
++    }
++    char key[64];
++    snprintf(key, sizeof key, "nmxdiag-display-%s", when);
++    owner->setProperty(key, summary[0] ? summary : "no lit pipe");
++    mmio->release();
++}
++
+ static bool opted_in(IOPCIDevice *pci, uint16_t vendor)
+ {
+     int v = 0;
+@@ -272,6 +324,7 @@ void NMXGPU::attachNow()
+     nmx_marker_write(true);
+     nmx_gpu_stage_record("guard.set.after", 0);
+     if (abortIfStopping()) return;
++    nmx_display_snapshot(pci_, this, "firmware");
+     nmx_gpu_stage_record("port.before", 0);
+     dev_ = nmx_port_attach(pci_);
+     nmx_gpu_stage_record("port.after", dev_ != nullptr ? 0 : -1);
+@@ -343,6 +396,7 @@ void NMXGPU::attachNow()
+     nmx_gpu_stage_record("attach.complete", fb_ != nullptr ? 0 : -1);
+     lifecycle_.complete(1);
+     setProperty("nmxdiag-attach-complete", kOSBooleanTrue);
++    nmx_display_snapshot(pci_, this, "attached");
+ }
+ 
+ void NMXGPU::stop(IOService *provider)

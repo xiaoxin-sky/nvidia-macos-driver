@@ -56,6 +56,13 @@
 | F | 插件放行 WindowServer（参考 `nvmtl_desktop_policy.h` 和串行提交），每次只改一个变量 | 高 | 多次 |
 | G | 流畅度和稳定性：命令池、管线缓存、长时间运行、睡眠唤醒 | 中 | 多次 |
 
+## 3.1 B 步结论（2026-10-28）
+- **我们的 NMXGPU 里已经有一套 i915 模式设置的显示桥**：`override/src/nmx_fb_bridge.c`（DRM 客户端：探测接口、分配 XRGB8888 缓冲、指向每个点亮的 CRTC）、`override/i915/nmx_i915_scanout.c`（GGTT 固定和 CPU 窗口映射）、`xnu/nmx_fb.cpp`（NMXGPUFB，一个 IOFramebuffer）。
+  - 硬件提交被推迟到 WindowServer 打开它、调用 `enableController` 之后。r29 的注册表里是 `nmxdiag-display-state = awaiting-native-open`，WindowServer 仍在用固件画面，所以这套代码一直没有真正生效。
+  - 走这套代码就是"i915 自己做模式设置"，也就是高风险路线。r9 测试期间出现过黑屏和 `IOFramebuffer::powerStateWillChangeTo` 的 panic（见 MAINLINE-CHECKPOINT.txt 第 4 节）。
+- **NMIntelFB 的接管方式**：遍历 pipe A–D，找到 TRANSCONF 和平面 1 都启用的那个；要求平面格式是线性的 XRGB8888（format 8、tiling 0），读出宽高、步长、SURF（GGTT 偏移）和时序，统计 250 ms 内的 vblank 次数来测刷新率，再通过 BAR2 加 SURF 把表面发布出去。全程只读。
+- **C 步诊断的设计**：在 NMXGPU 的 `port.before`（i915 接管之前）和 `attach.complete` 之后，各做一次只读快照，包括每个 pipe 的 TRANSCONF、PLANE_CTL/SIZE/STRIDE/SURF、HTOTAL/VTOTAL、100 ms 内的 vblank 次数、表面的 GGTT 页表项（BAR0+8 MiB），以及 BDSM（stolen 内存基址）和 BAR2 范围。结果写进内核日志（`NullMoth display-snapshot …`）和 NMXGPU 的注册表属性（`nmxdiag-display-firmware` 和 `nmxdiag-display-attached`）。两次快照对比，能看出固件画面在哪里、i915 接管后有没有被改动。
+
 ## 4. 已确认的决定（2026-10-28）
 1. 可以像 Meteor Lake 项目那样降低 SIP 和 AMFI 的安全设置，用于 F 步及之后。具体值到那一步再定，改动只写进测试配置，安全配置保持不变，保证 `-nvoff` 恢复路径始终可用。
 2. NMIntelFB 的 PolyForm-Noncommercial 许可证可以接受，可以基于它移植帧缓冲 kext。

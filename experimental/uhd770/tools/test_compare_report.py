@@ -36,6 +36,8 @@ def report(root, metal_passes=True, kernel=""):
     write(suite / "probe.log", "subtest texture: PASS verified=4096 pixels elapsed_ms=2.000\n"
                                "subtest iosurface: FAIL Metal refused an IOSurface-backed render target\n")
     write(root / f"preparation/final-dmesg-{BOOT}.txt", kernel)
+    write(root / f"preparation/final-NMXGPU-{BOOT}.txt",
+          '|   "nmxdiag-display-firmware" = "pipe A ctl=0x84000000 size=0x0437077f surf=0x00000000 pte=0x1"\n')
     # An older boot's capture must not count against this report.
     write(root / "system/boot-capture/session-old/boot-identity.txt", "kern.bootsessionuuid: OLD\n")
     write(root / "system/boot-capture/session-old/kernel-stream.txt", "NullMoth mmap: stage=args err=22\n")
@@ -54,6 +56,7 @@ class CompareReportTests(unittest.TestCase):
         subtests = summary["phases"]["metal-suite"]["subtests"]
         self.assertEqual(subtests["texture"], {"result": "PASS", "ms": 2.0, "detail": None})
         self.assertEqual(subtests["iosurface"]["result"], "FAIL")
+        self.assertTrue(summary["display_snapshot"]["firmware"].startswith("pipe A ctl=0x84000000"))
 
     def test_lost_pass_and_new_panic_are_regressions(self):
         with tempfile.TemporaryDirectory() as temporary:
