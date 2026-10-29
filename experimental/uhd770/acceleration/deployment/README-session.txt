@@ -71,6 +71,8 @@ nullmoth-gpu-attaching，它会先保存原值，再只删除这一个旧标记�
    /Users/Shared/UHD770MVP-session-reports.XXXXXX。
    同一份报告会再拷一份到 1401 U 盘的 UHD770-session-reports/ 下（终端打印 USB copy:）；
    拷贝不成功时终端会说明，这时再手动拷 /Users/Shared 下的原件。
+   U 盘副本只带最近 4 次开机采集（其余列在 system/boot-capture-omitted.txt），原件仍是完整的；
+   Start 清理上一轮会话时的导出只留在 /Users/Shared，不再拷到 U 盘（终端打印 USB copy: skipped）。
    10 分钟只限制这次手动命令的最长运行时间，不从开机或登录开始倒计时。
    不必卡着登录时间运行；即使开机采集已经结束，手动入口也会重新启动有界采集。
    一次启动只允许执行一轮计算，重复点击会明确拒绝；保留现有日志，不要反复重跑。

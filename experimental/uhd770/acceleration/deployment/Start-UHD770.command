@@ -58,10 +58,11 @@ auto_clean() {
     fi
     printf 'cleanup: earlier session state=%s\n' "${state:-unknown}"
     case "$state" in
-        failed) /bin/bash -p "$KIT/Archive-UHD770-Failed.command" ;;
-        restored) /bin/bash -p "$KIT/Archive-UHD770-Failed.command" --restored-session ;;
-        *) /bin/bash -p "$KIT/tools/session.sh" restore &&
-           /bin/bash -p "$KIT/Archive-UHD770-Failed.command" --restored-session ;;
+        # The previous test report already reached the USB: these exports stay local.
+        failed) UHD770_USB_COPY=0 /bin/bash -p "$KIT/Archive-UHD770-Failed.command" ;;
+        restored) UHD770_USB_COPY=0 /bin/bash -p "$KIT/Archive-UHD770-Failed.command" --restored-session ;;
+        *) UHD770_USB_COPY=0 /bin/bash -p "$KIT/tools/session.sh" restore &&
+           UHD770_USB_COPY=0 /bin/bash -p "$KIT/Archive-UHD770-Failed.command" --restored-session ;;
     esac
 }
 

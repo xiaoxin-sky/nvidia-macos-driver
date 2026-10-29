@@ -210,7 +210,7 @@ case "$1" in
    ;;
  export)
    output=$(mktemp -d "$base/Users/Shared/UHD770MVP-reports.XXXXXX")
-   cp -R "$base/private/var/log/UHD770MVP" "$output/boot-capture"
+   cp -Rp "$base/private/var/log/UHD770MVP" "$output/boot-capture"   # ditto keeps times
    printf 'export\n' >> "$SESSION_FIXTURE/flow-events"
    printf 'Reports exported to: %s\n' "$output"
    ;;
@@ -577,9 +577,33 @@ class SessionFlowTests(unittest.TestCase):
         self.run_session("test", SESSION_BOOT="TEST")
         self.assertEqual((self.root / "probe-calls").read_text().splitlines(),
                          ["vulkan", "metal", "metal-render", "metal-suite"])
-        restored = self.run_session("restore")
+        # Start's cleanup of an earlier session exports locally only.
+        usb_reports = sorted((self.mac / "Volumes/1401/UHD770-session-reports").iterdir())
+        restored = self.run_session("restore", UHD770_USB_COPY="0")
         self.assertEqual(restored.returncode, 0, restored.stderr.decode())
+        self.assertIn(b"USB copy: skipped", restored.stdout)
+        self.assertEqual(sorted((self.mac / "Volumes/1401/UHD770-session-reports").iterdir()), usb_reports)
         self.assertEqual((self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").read_bytes(), b"original KC")
+
+    def test_usb_copy_keeps_only_the_newest_boot_captures(self):
+        self.prepare_test_boot()
+        captures = self.mac / "private/var/log/UHD770MVP"
+        for index in range(6):
+            old = captures / f"session-old-{index}"
+            old.mkdir()
+            (old / "stages.txt").write_text("old boot\n")
+            os.utime(old, (1000000 + index, 1000000 + index))
+        manual = self.run_session("test", SESSION_BOOT="TEST")
+        self.assertEqual(manual.returncode, 0, manual.stderr.decode())
+        report = self.automatic_reports()[0]
+        local = sorted(path.name for path in (report / "system/boot-capture").iterdir())
+        usb = self.mac / "Volumes/1401/UHD770-session-reports" / report.name / "system"
+        kept = sorted(path.name for path in (usb / "boot-capture").iterdir())
+        omitted = (usb / "boot-capture-omitted.txt").read_text().split()
+        self.assertEqual(len(kept), 4)
+        self.assertEqual(sorted(kept + omitted), local)
+        self.assertIn("session-manual-test", kept)
+        self.assertTrue(set(omitted) <= {f"session-old-{index}" for index in range(6)})
 
     def test_failed_probe_ends_wait_without_running_metal(self):
         self.prepare_test_boot()

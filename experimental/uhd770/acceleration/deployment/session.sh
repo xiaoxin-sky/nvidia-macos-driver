@@ -311,7 +311,43 @@ export_all() {
         chown -hR "$SUDO_UID:$SUDO_GID" "$output"
     fi
     printf 'Report: %s\n' "$output"
-    copy_report_to_usb "$output" || printf 'USB copy: not made; bring the report above back by hand.\n'
+    # Start clears the previous session with restore/archive exports; that
+    # session's test report already reached the USB, and these local copies stay.
+    if [ "${UHD770_USB_COPY:-1}" = 0 ]; then
+        printf 'USB copy: skipped for this cleanup export; the report stays in /Users/Shared.\n'
+    else
+        copy_report_to_usb "$output" || printf 'USB copy: not made; bring the report above back by hand.\n'
+    fi
+}
+
+# Every report carries all boot captures ever recorded (85 sessions, 84 MB by
+# r31), and writing them to the FAT USB took minutes per export. The USB copy
+# keeps only the newest few capture sessions, which hold this boot and the one
+# before it, and lists the others; the local report stays complete.
+USB_COPY_CAPTURES=4
+copy_report_tree() {
+    local source=$1 target=$2 item name capture kept=0
+    for item in "$source"/* "$source"/.[!.]*; do
+        [ -e "$item" ] || [ -L "$item" ] || continue
+        name=${item##*/}
+        if [ "$name" = system ] && [ -d "$item/boot-capture" ] && [ ! -L "$item/boot-capture" ]; then
+            mkdir "$target/system" "$target/system/boot-capture" || return 1
+            for capture in "$item"/* "$item"/.[!.]*; do
+                [ -e "$capture" ] || [ -L "$capture" ] || continue
+                [ "${capture##*/}" = boot-capture ] || ditto "$capture" "$target/system/${capture##*/}" || return 1
+            done
+            while IFS= read -r capture; do
+                if [ "$kept" -lt "$USB_COPY_CAPTURES" ]; then
+                    ditto "$item/boot-capture/$capture" "$target/system/boot-capture/$capture" || return 1
+                    kept=$((kept + 1))
+                else
+                    printf '%s\n' "$capture" >> "$target/system/boot-capture-omitted.txt"
+                fi
+            done < <(ls -t "$item/boot-capture")
+        else
+            ditto "$item" "$target/$name" || return 1
+        fi
+    done
 }
 
 # A second copy of the finished report on the prepared 1401 USB, so it reaches
@@ -341,7 +377,7 @@ copy_report_to_usb() {
     [ -d "$destination" ] && [ ! -L "$destination" ] || return 1
     destination="$destination/${output##*/}"
     [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
-    mkdir "$destination" && ditto "$output" "$destination" || return 1
+    mkdir "$destination" && copy_report_tree "$output" "$destination" || return 1
     session_bounded 30 "$output/usb-copy-sync.txt" sync || return 1
     printf 'USB copy: %s\n' "$destination"
 }
