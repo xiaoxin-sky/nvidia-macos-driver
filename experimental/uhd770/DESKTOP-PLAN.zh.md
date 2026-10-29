@@ -127,6 +127,13 @@
 - 步骤记号延伸到发布之后：IOFramebuffer 的每类回调第一次发生时，都在线程里写一次 NVRAM（`cb-vbl`、`cb-enable`、`cb-mode`、`cb-irq`、`cb-power-on/off`、`cb-power-attr`、`cb-conn-set`、`cb-aperture`）。万一还卡，下次开机就能看到最后一次交互是什么。NMXGPU 接管完成后，就不再记录。
 - 开测前：如果本次开机的恢复记录已经是 `verified`，而 U 盘上现在就是安全配置，就不再执行全局 `sync`。
 
+**r34 结果（2026-10-29）：E 步完成。** 测试启动正常进入桌面，没有黑屏；四个测试阶段全部通过，没有 panic，和 r31 基线比没有回归（当前基线 r34）。
+- `nmxdiag-display-state = owned-by-NMIntelFB`。`nmxdiag-display-intelfb`：pipe A，1920x1080，步长 7680，表面 0x0，刷新率 59.98 Hz，显存窗口 0x4000000000。
+- WindowServer 确实在用这块帧缓冲：内核日志里依次出现 `cb-enable`（打开）、`cb-mode`（设置模式）、`cb-irq`（注册帧中断）、`cb-vbl`（帧中断开始触发）、`cb-conn-set`。
+- i915 接管前后的快照和 stolen 报告与 r31 相同：固件画面仍在原地，没有被其他分配压到。
+- r33 和 r34 的差别只在显示组和内置屏标志，所以 r33 卡死的原因基本可以确定，就是 NVIDIA 显示组在 start 之后才设置。
+- 桌面仍由 CPU 合成。下一步是 F 步：插件放行 WindowServer，让它走 GPU。
+
 **风险。** 中等。这是第一次在开机阶段换掉 WindowServer 的帧缓冲。NMIntelFB 原本只在笔记本内屏上验证过，台式机外接显示器上没试过。合成仍然在 CPU 上，桌面性能和现在相同；这一步的价值是让屏幕归我们的驱动所有，为 F 步（WindowServer 走 GPU）打基础。
 
 ## 4. 已确认的决定（2026-10-28）
