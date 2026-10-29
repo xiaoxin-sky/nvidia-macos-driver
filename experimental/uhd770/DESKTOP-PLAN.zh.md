@@ -63,6 +63,16 @@
 - **NMIntelFB 的接管方式**：遍历 pipe A–D，找到 TRANSCONF 和平面 1 都启用的那个；要求平面格式是线性的 XRGB8888（format 8、tiling 0），读出宽高、步长、SURF（GGTT 偏移）和时序，统计 250 ms 内的 vblank 次数来测刷新率，再通过 BAR2 加 SURF 把表面发布出去。全程只读。
 - **C 步诊断的设计**：在 NMXGPU 的 `port.before`（i915 接管之前）和 `attach.complete` 之后，各做一次只读快照，包括每个 pipe 的 TRANSCONF、PLANE_CTL/SIZE/STRIDE/SURF、HTOTAL/VTOTAL、100 ms 内的 vblank 次数、表面的 GGTT 页表项（BAR0+8 MiB），以及 BDSM（stolen 内存基址）和 BAR2 范围。结果写进内核日志（`NullMoth display-snapshot …`）和 NMXGPU 的注册表属性（`nmxdiag-display-firmware` 和 `nmxdiag-display-attached`）。两次快照对比，能看出固件画面在哪里、i915 接管后有没有被改动。
 
+## 3.2 C 步结果（r30，2026-10-29）
+- 固件只点亮了 **pipe A**：1920×1080，时序 2200×1125（约 148.5 MHz，即 1080p60），100 ms 内有 6 次 vblank。
+- 主平面：PLANE_CTL 0x84000008，即启用、XRGB8888、线性（tiling 0）。步长 0x78×64 = 7680 字节，正好是 1920×4。这符合 NMIntelFB 的接管条件。
+- 表面在 GGTT 偏移 0，页表项 0x7c800001 指向物理地址 0x7c800000，也就是 BDSM（stolen 内存起点）。固件画面就在 stolen 内存最前面。BAR2 显存窗口是 0x4000000000，大小 256 MiB。
+- i915 接管后：
+  - pipe A 仍然启用，尺寸、步长、表面地址和时序都没变，vblank 也照常计数。
+  - 但有几处寄存器被改过：pipe A 的 TRANSCONF 低位 0x24 被清掉，PLANE_CTL 的 bit 3 被清掉；pipe D 的 TRANSCONF 从 0 变成 0x24。所以接管之后，i915 并不是完全没写显示寄存器。用户确认整个测试过程中屏幕没有闪烁或短暂黑屏。
+- 诊断本身的局限：没点亮的 pipe 的 SURF 也是 0，所以它们打出的页表项其实是 pipe A 的，没有意义。
+- 对 D 步的意义：固件画面占着 stolen 内存的开头，i915 的 stolen 分配器有可能把这块再分出去，参考项目 1.0.13 的 panic 就是这个原因。下一步应确认 i915 有没有把这块预留下来，并在测试前后读画面内容的校验值，确认没被覆盖。
+
 ## 4. 已确认的决定（2026-10-28）
 1. 可以像 Meteor Lake 项目那样降低 SIP 和 AMFI 的安全设置，用于 F 步及之后。具体值到那一步再定，改动只写进测试配置，安全配置保持不变，保证 `-nvoff` 恢复路径始终可用。
 2. NMIntelFB 的 PolyForm-Noncommercial 许可证可以接受，可以基于它移植帧缓冲 kext。

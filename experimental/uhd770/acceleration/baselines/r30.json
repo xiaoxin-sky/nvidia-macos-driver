@@ -1,0 +1,99 @@
+{
+  "report": "UHD770MVP-session-reports.eflQsz",
+  "boot": "8909A795-011E-46CB-99E9-785462100B9C",
+  "boot_args": "-v debug=0x100 keepsyms=1 -igfxvesa alcid=11 amfi=0x80 ipc_control_port_options=0 nmxintel=1 nmxdiagdelay=60",
+  "manual_exit": "0",
+  "phases": {
+    "vulkan": {
+      "ran": true,
+      "directory": "20261029T024955Z-vulkan.bnw7EU",
+      "state": "verified-readback",
+      "runner_exit": "0",
+      "marker": "COMPUTE_READBACK_VERIFIED",
+      "round_ms": [
+        1.246,
+        0.273,
+        0.26
+      ],
+      "failure": null
+    },
+    "metal": {
+      "ran": true,
+      "directory": "20261029T025003Z-metal.Y5v2kG",
+      "state": "verified-readback",
+      "runner_exit": "0",
+      "marker": "METAL_COMPUTE_READBACK_VERIFIED",
+      "round_ms": [
+        11.614,
+        12.617,
+        10.501
+      ],
+      "failure": null
+    },
+    "metal-render": {
+      "ran": true,
+      "directory": "20261029T025012Z-metal-render.QOfAjZ",
+      "state": "verified-readback",
+      "runner_exit": "0",
+      "marker": "METAL_RENDER_READBACK_VERIFIED",
+      "round_ms": [
+        12.628,
+        12.6
+      ],
+      "failure": null
+    },
+    "metal-suite": {
+      "ran": true,
+      "directory": "20261029T025020Z-metal-suite.dqeDKc",
+      "state": "verified-readback",
+      "runner_exit": "0",
+      "marker": "METAL_RENDER_SUITE_VERIFIED",
+      "round_ms": [],
+      "failure": null,
+      "subtests": {
+        "texture": {
+          "result": "PASS",
+          "ms": 375.619,
+          "detail": null
+        },
+        "blend": {
+          "result": "PASS",
+          "ms": 18.987,
+          "detail": null
+        },
+        "depth": {
+          "result": "PASS",
+          "ms": 30.018,
+          "detail": null
+        },
+        "large": {
+          "result": "PASS",
+          "ms": 84.388,
+          "detail": null
+        },
+        "iosurface": {
+          "result": "PASS",
+          "ms": 11.704,
+          "detail": null
+        }
+      }
+    }
+  },
+  "loaded_uuids": {
+    "com.nullmoth.NMXAccel": "7a0242da34653f888ecccdabb1d7c345",
+    "com.nullmoth.NMXGPU": "5238a8e22f1135f78a42466dd0998293"
+  },
+  "observation": {
+    "observation_limit_s": "180",
+    "observation_end": "duration_complete"
+  },
+  "display_snapshot": {
+    "firmware": "pipe A ctl=0x84000008 size=0x0437077f surf=0x00000000 pte=0x7c800001",
+    "attached": "pipe A ctl=0x84000000 size=0x0437077f surf=0x00000000 pte=0x7c800001",
+    "state": "awaiting-native-open"
+  },
+  "kernel_logs": 3,
+  "panic_lines": 0,
+  "mmap_refusal_lines": 0,
+  "package": "UHD770-MVP-manual-20261029-r30"
+}
