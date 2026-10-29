@@ -404,10 +404,17 @@ usb_config() {
     printf '%s\n' "$mount/EFI/OC/config.plist"
 }
 
+# $1=flushed: this boot already restored and flushed the opt-out. If the config
+# still reads safe, nothing new needs flushing; a global sync on the slow USB
+# outlasted 30 s in r33 and refused a test whose recovery was already in place.
 restore_optout() {
-    local cfg actual safe test
+    local cfg actual safe test flushed=${1:-}
     cfg=$(usb_config) || return 1
     safe=$(property safe_hash); test=$(property test_hash); actual=$(hash "$cfg")
+    if [ "$actual" = "$safe" ] && [ "$flushed" = flushed ]; then
+        printf 'already flushed this boot; config still safe\n' > "$PRIVATE/optout-sync.txt"
+        return 0
+    fi
     if [ "$actual" = "$test" ]; then
         [ "$(hash "$ROOT/incoming/session-target/config.safe.plist")" = "$safe" ] || return 1
         [ ! -e "$cfg.uhd770-pending" ] && [ ! -L "$cfg.uhd770-pending" ] || return 1
@@ -763,7 +770,9 @@ run_manual_test() {
     args=$(sysctl -n kern.bootargs)
     case " $args " in *' -nvoff '*) die 'This is an opt-out recovery boot; compute was not started.' ;; esac
     case " $args " in *' nmxintel=1 '*) ;; *) die 'The prepared Intel opt-in is not active in this boot.' ;; esac
-    restore_optout || die 'Next-boot recovery cannot be verified; compute was not started.'
+    local flushed=''
+    if grep -qx 'next_boot_optout=verified' "$PUBLIC/recovery-$current.txt" 2>/dev/null; then flushed=flushed; fi
+    restore_optout $flushed || die 'Next-boot recovery cannot be verified; compute was not started.'
     printf 'next_boot_optout=verified\nboot=%s\n' "$current" > "$PUBLIC/recovery-$current.txt"
     chmod 644 "$PUBLIC/recovery-$current.txt"
     mkdir -m 700 "$PRIVATE/manual-$current" || die 'A manual test was already started in this boot; preserved.'

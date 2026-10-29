@@ -7312,11 +7312,11 @@ new file mode 100644
 new file mode 100644
 --- /dev/null
 +++ b/xnu/nmx_intelfb.cpp
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,596 @@
 +/*
 + * UHD 770 plan step E (experimental/uhd770/DESKTOP-PLAN.zh.md 3.4): upstream kexts/NMIntelFB/intelfb.cpp, unchanged
 + * except the opt-in, the owner flag and summary NMXGPU reads, a NullMoth log prefix (the session keeps only
-+ * NullMoth kernel lines) and the step guard below; compiled into NMXGPU.kext as a second personality in the IOFramebuffer match category. It takes
++ * NullMoth kernel lines), the step guard below, and no NVIDIA head or built-in panel (r34); compiled into NMXGPU.kext as a second personality in the IOFramebuffer match category. It takes
 + * the IGPU from the firmware framebuffer at boot and publishes the scan-out the firmware lit, which i915 later adopts
 + * in place (r31), so WindowServer opens a framebuffer of this driver from the start. Same license as the original.
 + */
@@ -7405,8 +7405,27 @@ new file mode 100644
 +    n->release();
 +}
 +
++// After publication the step guard follows IOFramebuffer's callbacks: the first of each kind is noted, so a boot that
++// stops after start() still names the last interaction (r33 stopped the system about 16 s after "published"). The
++// NVRAM write happens on a thread call; a callback never waits on it.
++static volatile UInt32 g_intelfb_noted;
++static volatile bool g_intelfb_boot_done;
++static const char *volatile g_intelfb_note;
++static thread_call_t g_intelfb_note_call;
++static void nmx_intelfb_note_fire(thread_call_param_t, thread_call_param_t)
++{
++    const char *name = g_intelfb_note;
++    if (name && !g_intelfb_boot_done) nmx_intelfb_step(name);
++}
++static void nmx_intelfb_note(UInt32 bit, const char *name)
++{
++    if (g_intelfb_boot_done || (OSBitOrAtomic(bit, &g_intelfb_noted) & bit)) return;
++    g_intelfb_note = name;
++    if (g_intelfb_note_call) thread_call_enter(g_intelfb_note_call);
++}
++
 +// NMXGPU's attach completed on this boot: whatever NMIntelFB did, it did not stop the boot
-+void nmx_intelfb_boot_completed() { nmx_intelfb_step(nullptr); }
++void nmx_intelfb_boot_completed() { g_intelfb_boot_done = true; nmx_intelfb_step(nullptr); }
 +
 +namespace {
 +// display version by PCI device ID, from Linux include/drm/intel/pciids.h (MIT); 0 = not ours
@@ -7464,7 +7483,7 @@ new file mode 100644
 +    static void vblFire(thread_call_param_t p0, thread_call_param_t) {
 +        NMIntelFB *me = (NMIntelFB *)p0;
 +        if (me->fStopping) return;
-+        if (me->fVbl.proc) { me->fVbl.proc(me->fVbl.target, me->fVbl.ref); me->fVblCalls++; }
++        if (me->fVbl.proc) { nmx_intelfb_note(1u << 0, "cb-vbl"); me->fVbl.proc(me->fVbl.target, me->fVbl.ref); me->fVblCalls++; }
 +        uint64_t period; nanoseconds_to_absolutetime(me->fFrameNs, &period);
 +        uint64_t now = mach_absolute_time();
 +        me->fVblNext = (me->fVblNext && me->fVblNext + period > now) ? me->fVblNext + period : now + period;
@@ -7514,7 +7533,7 @@ new file mode 100644
 +    bool start(IOService *provider) override;
 +    void stop(IOService *provider) override;
 +
-+    IOReturn enableController() override { return kIOReturnSuccess; }
++    IOReturn enableController() override { nmx_intelfb_note(1u << 1, "cb-enable"); return kIOReturnSuccess; }
 +    bool isConsoleDevice() override { return true; }
 +    IODeviceMemory *getApertureRange(IOPixelAperture aperture) override;
 +    const char *getPixelFormats() override { return IO32BitDirectPixels "\0"; }
@@ -7540,10 +7559,11 @@ new file mode 100644
 +        info->flags = kIODetailedTimingValid;
 +        return kIOReturnSuccess;
 +    }
-+    IOReturn setDisplayMode(IODisplayModeID mode, IOIndex depth) override { return (mode == 1 && depth == 0) ? kIOReturnSuccess : kIOReturnUnsupported; }
++    IOReturn setDisplayMode(IODisplayModeID mode, IOIndex depth) override { nmx_intelfb_note(1u << 2, "cb-mode"); return (mode == 1 && depth == 0) ? kIOReturnSuccess : kIOReturnUnsupported; }
 +    IOItemCount getConnectionCount() override { return 1; }
 +    IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) override;
 +    IOReturn registerForInterruptType(IOSelect type, IOFBInterruptProc proc, OSObject *target, void *ref, void **iref) override {
++        nmx_intelfb_note(1u << 3, "cb-irq");
 +        if (type == kIOFBVBLInterruptType) { fVbl = { proc, target, ref }; if (iref) *iref = &fVbl; return kIOReturnSuccess; }
 +        if (type == kIOFBConnectInterruptType) { fConnect = { proc, target, ref }; if (iref) *iref = &fConnect; return kIOReturnSuccess; }
 +        return kIOReturnUnsupported;
@@ -7561,12 +7581,14 @@ new file mode 100644
 +    // NVRMFB acknowledges at once and answers the power attributes itself. With NMIntelFB under NVRM the
 +    // first WindowServer restart froze every display.
 +    IOReturn setPowerState(unsigned long ordinal, IOService *) override {
++        nmx_intelfb_note(ordinal ? 1u << 4 : 1u << 5, ordinal ? "cb-power-on" : "cb-power-off");
 +        handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
 +        return kIOPMAckImplied;
 +    }
 +    IOReturn setAttribute(IOSelect attribute, uintptr_t value) override {
 +        if (attribute == kIOWindowServerActiveAttribute) return kIOReturnSuccess;
 +        if (attribute == kIOPowerAttribute) {
++            nmx_intelfb_note(1u << 6, "cb-power-attr");
 +            if (value) { IOReturn r = IOFramebuffer::setAttribute(attribute, value); handleEvent(kIOFBNotifyDidPowerOn);
 +                         return r == kIOReturnUnsupported ? kIOReturnSuccess : r; }
 +            handleEvent(kIOFBNotifyWillPowerOff);
@@ -7576,6 +7598,7 @@ new file mode 100644
 +        return IOFramebuffer::setAttribute(attribute, value);
 +    }
 +    IOReturn setAttributeForConnection(IOIndex idx, IOSelect attribute, uintptr_t value) override {
++        nmx_intelfb_note(1u << 7, "cb-conn-set");
 +        switch (attribute) {
 +        case kConnectionPower: case kConnectionColorModesSupported: case kConnectionColorDepthsSupported:
 +        case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported: case kConnectionColorMode:
@@ -7718,6 +7741,14 @@ new file mode 100644
 +    fApertureBase = ap->getPhysicalAddress(); fApertureLen = ap->getLength();
 +    nmx_intelfb_step("adopt");
 +    if (!adoptFirmwareMode()) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; nmx_intelfb_step(nullptr); return false; }
++    // IOFramebuffer::start builds its controller from the dependent group before joining the power tree; without the
++    // keys, power callbacks can reach a null controller (NMXGPUFB, r9). Upstream set NVIDIA's group (head 4 of NVRM)
++    // after start(): this GPU has no NVIDIA framebuffer to share a controller with, so the group is the IGPU alone.
++    if (!setProperty(kIOFBDependentIDKey, provider->getRegistryEntryID(), 64) ||
++        !setProperty(kIOFBDependentIndexKey, 0ULL, 32)) {
++        OSSafeReleaseNULL(fMMIO); fRegs = nullptr; nmx_intelfb_step(nullptr); return false;
++    }
++    if (!g_intelfb_note_call) g_intelfb_note_call = thread_call_allocate(nmx_intelfb_note_fire, nullptr);
 +    nmx_intelfb_step("iofb-start");
 +    if (!IOFramebuffer::start(provider)) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; nmx_intelfb_step(nullptr); return false; }
 +    nmx_intelfb_step("surface-map");
@@ -7726,13 +7757,9 @@ new file mode 100644
 +    if (IODeviceMemory *sm = IODeviceMemory::withRange(fApertureBase + fSurf, (IOPhysicalLength)fRowBytes * fHeight)) {
 +        fSurfMap = sm->map(kIOMapWriteCombineCache); sm->release();
 +    }
-+    if (fSurfMap) {
-+        setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
-+        setProperty("IOFBDependentIndex", 4ull, 32);
-+    } else IFBLOG("the surface would not map write-combined: NVIDIA rendering stays off for this panel");
++    if (!fSurfMap) IFBLOG("the surface would not map write-combined");
 +    setProperty("NMIntelFBPipe", fPipe, 32);
 +    setProperty("NMIntelFBDisplayVersion", fVer, 32);
-+    setProperty("built-in", kOSBooleanTrue);   // the panel is the laptop's own (kConnectionFlags says so too)
 +    nmx_intelfb_step("vbl");
 +    armVbl();
 +    nmx_intelfb_step("power");
@@ -7762,6 +7789,7 @@ new file mode 100644
 +
 +IODeviceMemory *NMIntelFB::getApertureRange(IOPixelAperture aperture)
 +{
++    nmx_intelfb_note(1u << 8, "cb-aperture");
 +    if (aperture != kIOFBSystemAperture) return nullptr;
 +    return IODeviceMemory::withRange(fApertureBase + fSurf, (IOPhysicalLength)fRowBytes * fHeight);
 +}
@@ -7793,7 +7821,7 @@ new file mode 100644
 +    switch (attr) {
 +    case kConnectionEnable: *value = 1; return kIOReturnSuccess;
 +    case kConnectionCheckEnable: *value = 1; return kIOReturnSuccess;
-+    case kConnectionFlags: *value = kIOConnectionBuiltIn; return kIOReturnSuccess;
++    case kConnectionFlags: *value = 0; return kIOReturnSuccess;   // an external monitor on this desktop
 +    // the colour answers NVRMFB gives (RGB, 8 bits per component), which WindowServer asks before compositing
 +    case kConnectionColorModesSupported: case kConnectionColorMode: *value = 0x00000001; return kIOReturnSuccess;
 +    case kConnectionColorDepthsSupported: case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported:

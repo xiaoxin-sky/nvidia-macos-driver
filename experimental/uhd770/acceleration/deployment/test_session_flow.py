@@ -564,6 +564,8 @@ class SessionFlowTests(unittest.TestCase):
         self.assertTrue((reports[0] / "preparation/final-dmesg-TEST.txt").is_file())
         observation = (reports[0] / "preparation/post-test-observation-TEST.txt").read_text()
         self.assertIn("compute=stopped", observation)
+        # Boot recovery already flushed the opt-out; the test gate does not sync the slow USB again.
+        self.assertIn("already flushed this boot", (reports[0] / "preparation/optout-sync.txt").read_text())
         self.assertIn("observation_elapsed_s=2", observation)
         for when in ("before", "after"):
             loaded = reports[0] / f"preparation/manual-loaded-{when}-TEST.txt"

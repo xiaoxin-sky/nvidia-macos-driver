@@ -113,6 +113,20 @@
 
 **r33 的应对。** 在 NMIntelFB 里加了"步骤记号"：探测和 start() 的每一步，都先打印到屏幕（`NullMoth NMIntelFB: step …`），再写进 NVRAM 变量 `nullmoth-intelfb-step`。start() 放弃接管时清掉这个变量；NMXGPU 接管完成时也清掉它。如果某次开机卡在这些步骤里，下次开机就会读到这个变量还在：NMIntelFB 这次不接管，把停在哪一步记进 `nmxdiag-display-intelfb`（`parked: the previous boot stopped at step …`），并清掉变量，下一轮测试会重新尝试。系统按 r31 的方式启动，会话照常恢复 U 盘配置，不需要再回 Windows。前提是这台机器的 NVRAM 写入能跨重启保留。
 
+**r33 结果（2026-10-29）。** 测试启动又卡住了，屏幕最后一行停在 `step probe`。强制重启后，第二次开机 NMIntelFB 读到 NVRAM 记录 `parked: the previous boot stopped at step published`，自动放弃接管，系统进入桌面，会话也把 U 盘恢复成了安全配置：保护机制生效了。由此可知：
+- NMIntelFB 的 start() 其实走完了（停在 published），屏幕在那之前就不再刷新了；
+- 卡住那次开机，日志采集器在第 15 秒开始记录、第 16 秒有一次心跳，之后再无任何记录，内核日志也是空的。所以是整个系统在接管后十几秒内卡死，不只是屏幕；
+- 那时 i915 还在 60 秒延迟里，没有碰显示。
+
+最可疑的原因：NMIntelFB 是在 IOFramebuffer::start **之后**才设显示组编号（`IOFBDependentID`），设的还是 NVIDIA 显示组（`0x4E56524D00000001`，第 4 号）；它的电源处理也是按"和 NVRMFB 共用控制器"写的。NMXGPUFB 在 r9 之后已经确认：这个编号必须在 start **之前**设好，否则电源回调会访问空的控制器。
+
+另外，第二次开机运行测试时被拒绝了，提示 `Next-boot recovery cannot be verified`。原因是开测前那次全局 `sync` 超过了 30 秒（这块 U 盘写得很慢），而 U 盘配置其实在开机时已经恢复并刷盘过了。
+
+**r34 的改动。**
+- NMIntelFB 在 IOFramebuffer::start 之前，把显示组设成 IGPU 自己（`kIOFBDependentIDKey` 设为 provider 的注册表 ID，编号 0），和 NMXGPUFB 一样；不再加入 NVIDIA 显示组，也不再声明自己是笔记本内置屏。
+- 步骤记号延伸到发布之后：IOFramebuffer 的每类回调第一次发生时，都在线程里写一次 NVRAM（`cb-vbl`、`cb-enable`、`cb-mode`、`cb-irq`、`cb-power-on/off`、`cb-power-attr`、`cb-conn-set`、`cb-aperture`）。万一还卡，下次开机就能看到最后一次交互是什么。NMXGPU 接管完成后，就不再记录。
+- 开测前：如果本次开机的恢复记录已经是 `verified`，而 U 盘上现在就是安全配置，就不再执行全局 `sync`。
+
 **风险。** 中等。这是第一次在开机阶段换掉 WindowServer 的帧缓冲。NMIntelFB 原本只在笔记本内屏上验证过，台式机外接显示器上没试过。合成仍然在 CPU 上，桌面性能和现在相同；这一步的价值是让屏幕归我们的驱动所有，为 F 步（WindowServer 走 GPU）打基础。
 
 ## 4. 已确认的决定（2026-10-28）
