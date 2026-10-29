@@ -1,5 +1,5 @@
-run 40818998694 attempt 1
-commit bf61736036c5965417c45e3618db2f2b93b1790f
+run 40821766533 attempt 1
+commit fcfe32ad4740cdae89d6431cc89289b14b98a454
 freebsd-src 7668705cb9837d4c3a6db9b3434b3a522220c8ea
 
 ===== /tmp/genflags.log
@@ -12,14 +12,11 @@ sources: 900  compiled: 900  failed: 0
 sources: 274  compiled: 274  failed: 0
 
 ===== /tmp/rt.log
-XNU FAIL nmx_intelfb
-runtime sources: 77  failed: 1
+runtime sources: 77  failed: 0
 
 ===== /tmp/link.log
-NMXGPU 11f50839 13552752 B
+NMXGPU 77fc2b8b 13571704 B
 
 ===== first failing sources
---- /Volumes/MiniData/build/gpu-src/xkpi/xlog_nmx_intelfb.txt
-xnu/nmx_intelfb.cpp:43:10: fatal error: 'display_ids.inc' file not found
 ===== kext
--rwxr-xr-x  1 runner  staff  13552752 Oct 29 04:49 /Users/runner/work/nvidia-macos-driver/nvidia-macos-driver/out/NMXGPU.kext/Contents/MacOS/NMXGPU
+-rwxr-xr-x  1 runner  staff  13571704 Oct 29 05:19 /Users/runner/work/nvidia-macos-driver/nvidia-macos-driver/out/NMXGPU.kext/Contents/MacOS/NMXGPU
