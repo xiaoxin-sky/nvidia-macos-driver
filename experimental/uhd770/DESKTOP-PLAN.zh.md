@@ -79,6 +79,17 @@
 - 参考项目 1.0.15 补的那一步，在我们这里可能已经由上游代码完成。所以先做只读确认（r31），确认之后再决定是否需要移植。
 - r31 的诊断：i915 接管完成后，记录每个活动 pipe 主平面的 framebuffer、GGTT 偏移、它在 stolen 里的范围、是否带 PREALLOC 标记，以及 stolen 里一共有多少个分配、其中多少个和画面那块重叠（正常应该只有画面自己，也就是 1 个）。结果写进内核日志（`NullMoth display-i915`）和注册表属性 `nmxdiag-display-i915`。全程只读，不写任何寄存器。
 
+### D 步结果（r31，2026-10-29）
+- 四个测试阶段全部通过，没有 panic，和 r30 比没有回归。固件快照和接管后的快照都和 r30 一致。
+- `nmxdiag-display-i915`：
+  `dsm=0x7c800000+0x4000000 usable=0x3e00000; pipe A fb=1920x1080 pitch=7680 ggtt=0x0 stolen=0x0+0x7e9000; stolen-nodes=2 overlapping-fb=1`
+  - stolen 内存共 64 MiB，可用 62 MiB。
+  - i915 把固件画面原地接管成了 pipe A 主平面的 framebuffer：位于 stolen 偏移 0，大小 0x7e9000，正好等于 1920×1080×4；GGTT 偏移仍是 0。
+  - stolen 里另外只有一个分配，而且和画面不重叠（overlapping-fb=1，只有画面自己）。
+  - 报告里没有 `prealloc`，这是诊断代码判断条件写错了，不说明预留失败：stolen 对象创建时会把标记覆盖成只剩 `I915_BO_ALLOC_CONTIGUOUS`（`gem/i915_gem_stolen.c` 的 `__i915_gem_object_create_stolen`）。原地预留走的是 `drm_mm_reserve_node`，上面的偏移和大小已经证明了这一点。
+- 结论：固件画面已经由上游 i915 保护好了，D 步**不需要移植**参考项目 1.0.15 的补丁。可以进入 E 步。
+- 对 E 步的意义：i915 的主平面已经持有一个指向固件画面的 framebuffer 对象。比起另外写一个读寄存器的帧缓冲 kext（NMIntelFB 的做法），E 步可以让我们现有的 NMXGPUFB 直接发布这个已有的 framebuffer（通过 BAR2 显存窗口加 GGTT 偏移 0 访问），不分配新缓冲，也不做模式设置。
+
 ## 4. 已确认的决定（2026-10-28）
 1. 可以像 Meteor Lake 项目那样降低 SIP 和 AMFI 的安全设置，用于 F 步及之后。具体值到那一步再定，改动只写进测试配置，安全配置保持不变，保证 `-nvoff` 恢复路径始终可用。
 2. NMIntelFB 的 PolyForm-Noncommercial 许可证可以接受，可以基于它移植帧缓冲 kext。
