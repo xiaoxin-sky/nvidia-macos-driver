@@ -69,6 +69,8 @@ nullmoth-gpu-attaching，它会先保存原值，再只删除这一个旧标记�
    终端每 30 秒提示一次“Logs only”，这段时间不再启动计算；记录器已结束时会明确记录。
    随后收尾采集、打印完整报告位置：
    /Users/Shared/UHD770MVP-session-reports.XXXXXX。
+   同一份报告会再拷一份到 1401 U 盘的 UHD770-session-reports/ 下（终端打印 USB copy:）；
+   拷贝不成功时终端会说明，这时再手动拷 /Users/Shared 下的原件。
    10 分钟只限制这次手动命令的最长运行时间，不从开机或登录开始倒计时。
    不必卡着登录时间运行；即使开机采集已经结束，手动入口也会重新启动有界采集。
    一次启动只允许执行一轮计算，重复点击会明确拒绝；保留现有日志，不要反复重跑。
@@ -92,7 +94,8 @@ bootstrap 原件是 root 专用的 700 权限目录，Finder 普通用户直接�
 并留下空文件夹。不要修改原件权限；复制自动导出的 session-reports 或 U 盘
 UHD770-prepare-logs 副本即可。
 
-把最新的 /Users/Shared/UHD770MVP-session-reports.* 整个文件夹带回 Windows。
+1401 U 盘的 UHD770-session-reports/ 下已有本次报告时，直接把 U 盘带回 Windows 即可；
+否则把最新的 /Users/Shared/UHD770MVP-session-reports.* 整个文件夹带回 Windows。
 如果没有自动导出的文件夹，在正常桌面执行本包 tools/session.sh export：
 
   sudo /bin/bash -p "/实际包路径/tools/session.sh" export

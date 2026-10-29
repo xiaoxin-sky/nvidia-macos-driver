@@ -37,7 +37,9 @@ UHD 770 手动实测操作步骤（i7-12700 / UHD 770 / macOS 15）
 
 三、取回报告（无论成败）
 
-  1. /Users/Shared 下最新的 UHD770MVP-session-reports.* 整个文件夹；
+  1. 测试报告：结束时会自动拷到 U 盘 UHD770-session-reports/ 下（终端打印 USB copy:），
+     不用再手动拷；只有终端提示 USB copy: not made 时，才手动拷
+     /Users/Shared 下最新的 UHD770MVP-session-reports.* 整个文件夹；
   2. U 盘根目录最新的 panic-*.txt（若有）与最近两三个 opencore-*.txt；
   3. U 盘 UHD770-prepare-logs 下最新的文件夹。
 

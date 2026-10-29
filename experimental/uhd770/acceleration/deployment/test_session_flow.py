@@ -549,6 +549,12 @@ class SessionFlowTests(unittest.TestCase):
                          ["vulkan", "metal", "metal-render", "metal-suite"])
         reports = self.automatic_reports()
         self.assertEqual(len(reports), 1)
+        # The finished report is also copied, whole, next to the EFI on the prepared USB.
+        usb_copy = self.mac / "Volumes/1401/UHD770-session-reports" / reports[0].name
+        self.assertIn(f"USB copy: {usb_copy}".encode(), manual.stdout)
+        self.assertEqual(sorted(p.relative_to(usb_copy).as_posix() for p in usb_copy.rglob("*")),
+                         sorted(p.relative_to(reports[0]).as_posix() for p in reports[0].rglob("*")))
+        self.assertEqual(self.usb.read_bytes(), self.safe)
         exported_stages = reports[0] / "system/boot-capture/session-manual-test/stages.txt"
         self.assertIn("collector_end", exported_stages.read_text())
         self.assertIn("capture_finalization=closed", (self.installed / "session-private/capture-finalization-TEST.txt").read_text())
@@ -728,6 +734,8 @@ class SessionFlowTests(unittest.TestCase):
             boot = self.run_session("boot", SESSION_BOOT="TEST", SESSION_FAIL="usb-recovery")
             self.assertNotEqual(boot.returncode, 0)
         self.assertEqual(len(self.automatic_reports()), 1)
+        # A USB that cannot be resolved gets no copy; the local report still stands.
+        self.assertFalse((self.mac / "Volumes/1401/UHD770-session-reports").exists())
         self.assertFalse((self.root / "probe-calls").exists())
 
     def test_manual_entrypoint_refuses_failed_recovery_before_gpu(self):

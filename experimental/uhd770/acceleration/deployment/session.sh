@@ -311,6 +311,28 @@ export_all() {
         chown -hR "$SUDO_UID:$SUDO_GID" "$output"
     fi
     printf 'Report: %s\n' "$output"
+    copy_report_to_usb "$output" || printf 'USB copy: not made; bring the report above back by hand.\n'
+}
+
+# A second copy of the finished report on the prepared 1401 USB, so it reaches
+# Windows without a manual copy. Only the USB selected during preparation is
+# used, and only while its config is still this session's safe or test bytes;
+# the copy goes into a new directory and never touches the EFI.
+copy_report_to_usb() {
+    local output=$1 cfg mount actual destination
+    [ -f "$PLAN" ] && [ ! -L "$PLAN" ] || return 1
+    cfg=$(usb_config) || return 1
+    actual=$(hash "$cfg")
+    [ "$actual" = "$(property safe_hash)" ] || [ "$actual" = "$(property test_hash)" ] || return 1
+    mount=${cfg%/EFI/OC/config.plist}
+    destination="$mount/UHD770-session-reports"
+    [ -e "$destination" ] || [ -L "$destination" ] || mkdir "$destination" || return 1
+    [ -d "$destination" ] && [ ! -L "$destination" ] || return 1
+    destination="$destination/${output##*/}"
+    [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
+    mkdir "$destination" && ditto "$output" "$destination" || return 1
+    session_bounded 30 "$PRIVATE/usb-report-sync.txt" sync || return 1
+    printf 'USB copy: %s\n' "$destination"
 }
 
 # Resolve only the USB UUID selected during preparation, then recheck both its
