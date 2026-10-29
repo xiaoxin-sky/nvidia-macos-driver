@@ -419,13 +419,13 @@ jobs:
           BIN="$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU"
           xcrun nm -arch x86_64 "$BIN" > /tmp/nmxgpu-symbols.txt \
             || { echo "::error::cannot read NMXGPU symbols"; exit 1; }
-          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set _nmx_fb_display_state _nmx_fb_set_mode _nmx_fb_reprobe; do
+          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set _nmx_fb_display_state _nmx_fb_set_mode _nmx_fb_reprobe _nmx_i915_display_report _nmx_fb_display_report; do
             grep -Eq "[[:space:]][TtDdSsBbRr][[:space:]]$sym$" /tmp/nmxgpu-symbols.txt \
               || { echo "::error::missing defined symbol $sym (undefined imports do not count)"; exit 1; }
           done
           strings -a "$BIN" > /tmp/nmxgpu-strings.txt \
             || { echo "::error::cannot read NMXGPU diagnostic strings"; exit 1; }
-          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete' 'NullMoth PCI enum v1' 'pch_detect type=' 'hpd_tables pch=' 'pch_hpd missing' 'igtt.pin.before' 'igtt.iomap.after' 'boot guard retained for recovery' 'ADL-S CPU scanout, FBC disabled' 'failed: port attach; guard retained' 'display-snapshot %s: pipe %c'; do
+          for marker in 'stage display_noirq' 'stage irq_install' 'stage gem_init' 'stage display_probe' 'optional opregion_setup' 'ASLS_present=' 'tunnel_config i915=' 'nogem tunnel_mgr_init' 'memstage-v2' 'framebuffer.before' 'gem_init.before' 'pm.callback.before' 'fb.commit.before' 'attach.complete' 'NullMoth PCI enum v1' 'pch_detect type=' 'hpd_tables pch=' 'pch_hpd missing' 'igtt.pin.before' 'igtt.iomap.after' 'boot guard retained for recovery' 'ADL-S CPU scanout, FBC disabled' 'failed: port attach; guard retained' 'display-snapshot %s: pipe %c' 'display-i915: ret=%d' 'stolen-nodes=%u overlapping-fb=%u'; do
             grep -Fq "$marker" /tmp/nmxgpu-strings.txt \
               || { echo "::error::missing diagnostic marker $marker"; exit 1; }
           done

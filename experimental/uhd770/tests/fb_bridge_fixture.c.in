@@ -269,6 +269,9 @@ void nmx_i915_scanout_unmap(void *cookie) {
     struct drm_client_buffer *b = cookie;
     assert(b->pinned); b->pinned = 0; assert(maps > 0); --maps;
 }
+int nmx_i915_display_report(struct drm_device *drm, char *buf, uint32_t len) {
+    (void)drm; (void)buf; (void)len; return EOPNOTSUPP;
+}
 static uint64_t nmx_xnu_kva_to_phys(const void *p) {
     return (uint64_t)(uintptr_t)p + (noncontiguous ? PAGE_SIZE : 0);
 }

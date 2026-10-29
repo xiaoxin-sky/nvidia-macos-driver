@@ -73,6 +73,12 @@
 - 诊断本身的局限：没点亮的 pipe 的 SURF 也是 0，所以它们打出的页表项其实是 pipe A 的，没有意义。
 - 对 D 步的意义：固件画面占着 stolen 内存的开头，i915 的 stolen 分配器有可能把这块再分出去，参考项目 1.0.13 的 panic 就是这个原因。下一步应确认 i915 有没有把这块预留下来，并在测试前后读画面内容的校验值，确认没被覆盖。
 
+## 3.3 D 步：先确认，再决定要不要移植（2026-10-29）
+- 上游 i915 本身就会原地接管固件画面：`intel_display_driver_probe_nogem` 之后调用 `intel_initial_plane_config`（`display/intel_plane_initial.c`），用 `i915_gem_object_create_region_at(stolen, phys_base, size, I915_BO_PREALLOC)` 把那块 stolen 内存预留成一个 GEM 对象，固定在 GGTT 偏移 0，再挂到主平面上。注释里写明了目的：防止 ring 等其他 stolen 分配压到上面。
+  - 如果预留失败，它会调用 `intel_plane_disable_noatomic` 关掉主平面。r30 接管后主平面仍然开着，这间接说明预留成功了，但日志里没有直接证据，因为 drm 调试输出是关的。
+- 参考项目 1.0.15 补的那一步，在我们这里可能已经由上游代码完成。所以先做只读确认（r31），确认之后再决定是否需要移植。
+- r31 的诊断：i915 接管完成后，记录每个活动 pipe 主平面的 framebuffer、GGTT 偏移、它在 stolen 里的范围、是否带 PREALLOC 标记，以及 stolen 里一共有多少个分配、其中多少个和画面那块重叠（正常应该只有画面自己，也就是 1 个）。结果写进内核日志（`NullMoth display-i915`）和注册表属性 `nmxdiag-display-i915`。全程只读，不写任何寄存器。
+
 ## 4. 已确认的决定（2026-10-28）
 1. 可以像 Meteor Lake 项目那样降低 SIP 和 AMFI 的安全设置，用于 F 步及之后。具体值到那一步再定，改动只写进测试配置，安全配置保持不变，保证 `-nvoff` 恢复路径始终可用。
 2. NMIntelFB 的 PolyForm-Noncommercial 许可证可以接受，可以基于它移植帧缓冲 kext。

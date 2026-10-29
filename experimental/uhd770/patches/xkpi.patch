@@ -7052,3 +7052,150 @@
  }
  
  void NMXGPU::stop(IOService *provider)
+--- a/bsdcompat/include/nmx_port.h
++++ b/bsdcompat/include/nmx_port.h
+@@ -46,6 +46,11 @@ struct drm_framebuffer;
+ int nmx_i915_scanout_map(struct drm_framebuffer *fb, struct nmx_fb_info *info, void **cookie);
+ void nmx_i915_scanout_unmap(void *cookie);
+ 
++/* Read-only, Alder Lake-S: what i915 made of the firmware scan-out at load, as one text line; positive errno. */
++struct drm_device;
++int nmx_i915_display_report(struct drm_device *drm, char *buf, uint32_t len);
++int nmx_fb_display_report(void *dev, char *buf, uint32_t len);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsdcompat/include/nmxxnu/nmx_port.h
++++ b/bsdcompat/include/nmxxnu/nmx_port.h
+@@ -46,6 +46,11 @@ struct drm_framebuffer;
+ int nmx_i915_scanout_map(struct drm_framebuffer *fb, struct nmx_fb_info *info, void **cookie);
+ void nmx_i915_scanout_unmap(void *cookie);
+ 
++/* Read-only, Alder Lake-S: what i915 made of the firmware scan-out at load, as one text line; positive errno. */
++struct drm_device;
++int nmx_i915_display_report(struct drm_device *drm, char *buf, uint32_t len);
++int nmx_fb_display_report(void *dev, char *buf, uint32_t len);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/override/i915/nmx_i915_scanout.c
++++ b/override/i915/nmx_i915_scanout.c
+@@ -10,6 +10,8 @@
+ #include <linux/err.h>
+ #include <linux/slab.h>
+ #include <drm/drm_framebuffer.h>
++#include <drm/drm_mm.h>
++#include <drm/drm_modeset_lock.h>
+ #include "gem/i915_gem_object.h"
+ #include "gt/intel_gt.h"
+ #include "i915_drv.h"
+@@ -120,3 +122,73 @@ fail:
+     nmx_i915_scanout_unmap(ctx);
+     return -ret;
+ }
++
++/* Read-only record of how i915 took over the firmware's scan-out (intel_plane_initial.c): for each active pipe, the
++ * primary plane's framebuffer, its GGTT offset and, when it lives in stolen memory, its range there and whether it
++ * was adopted in place (I915_BO_PREALLOC). Then the stolen range and how many stolen allocations overlap the first
++ * such buffer; only the buffer itself may, or a later allocation can overwrite the firmware image. */
++int nmx_i915_display_report(struct drm_device *drm, char *buf, uint32_t len)
++{
++    struct drm_i915_private *i915;
++    struct intel_crtc *crtc;
++    struct drm_mm_node *node;
++    u64 fb_start = 0, fb_end = 0;
++    unsigned int nodes = 0, overlapping = 0;
++    size_t used = 0;
++    int n;
++
++    if (!drm || !buf || !len)
++        return EINVAL;
++    buf[0] = '\0';
++    i915 = to_i915(drm);
++    if (!IS_ALDERLAKE_S(i915))
++        return EOPNOTSUPP;
++#define NMX_PUT(...) do { \
++        n = snprintf(buf + used, len - used, __VA_ARGS__); \
++        if (n > 0) used = min_t(size_t, len - 1, used + n); \
++    } while (0)
++    NMX_PUT("dsm=0x%llx+0x%llx usable=0x%llx", (u64)i915->dsm.stolen.start,
++            (u64)resource_size(&i915->dsm.stolen), (u64)i915->dsm.usable_size);
++    drm_modeset_lock_all(drm);
++    for_each_intel_crtc(drm, crtc) {
++        struct intel_plane *plane = to_intel_plane(crtc->base.primary);
++        struct intel_plane_state *state = to_intel_plane_state(plane->base.state);
++        struct drm_framebuffer *fb = state->hw.fb;
++        struct drm_i915_gem_object *obj;
++
++        if (!to_intel_crtc_state(crtc->base.state)->hw.active)
++            continue;
++        if (!fb) {
++            NMX_PUT("; pipe %c no-fb", pipe_name(crtc->pipe));
++            continue;
++        }
++        obj = to_intel_bo(intel_fb_bo(fb));
++        NMX_PUT("; pipe %c fb=%ux%u pitch=%u ggtt=0x%x", pipe_name(crtc->pipe), fb->width, fb->height,
++                fb->pitches[0], state->ggtt_vma ? i915_ggtt_offset(state->ggtt_vma) : ~0u);
++        if (obj && obj->stolen) {
++            NMX_PUT(" stolen=0x%llx+0x%llx%s", (u64)obj->stolen->start, (u64)obj->stolen->size,
++                    obj->flags & I915_BO_PREALLOC ? " prealloc" : "");
++            if (!fb_end) {
++                fb_start = obj->stolen->start;
++                fb_end = fb_start + obj->stolen->size;
++            }
++        } else {
++            NMX_PUT(" not-stolen");
++        }
++    }
++    drm_modeset_unlock_all(drm);
++    if (i915->mm.stolen_region && drm_mm_initialized(&i915->mm.stolen)) {
++        mutex_lock(&i915->mm.stolen_lock);
++        drm_mm_for_each_node(node, &i915->mm.stolen) {
++            nodes++;
++            if (fb_end && node->start < fb_end && node->start + node->size > fb_start)
++                overlapping++;
++        }
++        mutex_unlock(&i915->mm.stolen_lock);
++        NMX_PUT("; stolen-nodes=%u overlapping-fb=%u", nodes, overlapping);
++    } else {
++        NMX_PUT("; stolen-region=none");
++    }
++#undef NMX_PUT
++    return 0;
++}
+--- a/override/src/nmx_fb_bridge.c
++++ b/override/src/nmx_fb_bridge.c
+@@ -768,3 +768,10 @@ done:
+     mutex_unlock(&fbs_mutex);
+     return -ret;
+ }
++
++/* the driver's own account of the firmware scan-out (Intel only; read-only) */
++int nmx_fb_display_report(void *dev, char *buf, uint32_t len)
++{
++    struct drm_device *drm = drm_of(dev);
++    return drm != NULL ? nmx_i915_display_report(drm, buf, len) : ENODEV;
++}
+--- a/xnu/nmx_kext.cpp
++++ b/xnu/nmx_kext.cpp
+@@ -31,6 +31,7 @@
+ 
+ /* the display bridge (nmx_fb.cpp) */
+ IOService *nmx_fb_publish(IOService *gpu, void *dev);
++extern "C" int nmx_fb_display_report(void *dev, char *buf, uint32_t len);
+ void nmx_fb_unpublish(IOService *fb, IOService *gpu, void *dev);
+ 
+ class NMXGPU : public IOService {
+@@ -397,6 +398,10 @@ void NMXGPU::attachNow()
+     lifecycle_.complete(1);
+     setProperty("nmxdiag-attach-complete", kOSBooleanTrue);
+     nmx_display_snapshot(pci_, this, "attached");
++    char report[384];
++    const int report_ret = nmx_fb_display_report(dev_, report, sizeof report);
++    IOLog("NullMoth display-i915: ret=%d %s\n", report_ret, report_ret == 0 ? report : "");
++    setProperty("nmxdiag-display-i915", report_ret == 0 ? report : "unavailable");
+ }
+ 
+ void NMXGPU::stop(IOService *provider)
