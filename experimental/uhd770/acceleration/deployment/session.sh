@@ -27,6 +27,8 @@ ROOT_JOB_OWNED=0
 AUTO_EXPORT_ATTEMPTED=0
 MANUAL_ACTIVE=0
 MANUAL_CAPTURE=''
+# restore only: a USB already on the running package's own safe config counts as opted out
+ACCEPT_KIT_SAFE=0
 SESSION_GROUP_PID=''
 FOLLOWER=''
 KEY='NVRAM.Add.7C436110-AB2A-4BBB-A880-FE41995C9F82.boot-args'
@@ -409,6 +411,13 @@ usb_config() {
 # $1=flushed: this boot already restored and flushed the opt-out. If the config
 # still reads safe, nothing new needs flushing; a global sync on the slow USB
 # outlasted 30 s in r33 and refused a test whose recovery was already in place.
+# kit_safe_matches <hash>: the running package's own safe config, never the staged copy of the session being retired
+kit_safe_matches() {
+    local identity="$KIT/session-target/identity.plist" config="$KIT/session-target/config.safe.plist"
+    [ -f "$identity" ] && [ ! -L "$identity" ] && [ -f "$config" ] && [ ! -L "$config" ] || return 1
+    [ "$(plutil -extract safe_hash raw -o - "$identity" 2>/dev/null)" = "$1" ] && [ "$(hash "$config")" = "$1" ]
+}
+
 restore_optout() {
     local cfg actual safe test flushed=${1:-}
     cfg=$(usb_config) || return 1
@@ -424,8 +433,14 @@ restore_optout() {
         [ "$(hash "$cfg.uhd770-pending")" = "$safe" ] || return 1
         mv -f "$cfg.uhd770-pending" "$cfg" || return 1
     elif [ "$actual" != "$safe" ]; then
-        printf 'USB config changed independently; preserved.\n' >&2
-        return 1
+        # Only while retiring an earlier session for a new package: the USB may already carry that package's own
+        # safe config (prepare_kit verified it is an opt-out one), as when r41 sped up the OpenCore settings
+        if [ "$ACCEPT_KIT_SAFE" -ne 1 ] || ! kit_safe_matches "$actual"; then
+            printf 'USB config changed independently; preserved.\n' >&2
+            return 1
+        fi
+        printf 'USB carries the safe config of the package in %s\n' "$KIT" > "$PRIVATE/optout-kit-safe.txt"
+        safe=$actual
     fi
     [ "$(hash "$cfg")" = "$safe" ] || return 1
     # A global sync on the target routinely outlasts 5 s; the config is already
@@ -889,6 +904,7 @@ case "$MODE" in
     export) export_all ;;
     restore)
         safe_directory "$ROOT"; safe_directory "$PRIVATE"
+        ACCEPT_KIT_SAFE=1
         restore_optout
         restore_report=$(mktemp -d "$PRIVATE/restore-job-stop.XXXXXX")
         printf 'Restore job-stop diagnostics: %s\n' "$restore_report"

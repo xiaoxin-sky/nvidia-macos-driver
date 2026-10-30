@@ -240,7 +240,13 @@ for path in /Volumes "$mount" "$mount/EFI" "$mount/EFI/OC" "$mount/EFI/OC/config
     [ -e "$path" ] && [ ! -L "$path" ] || stop 'Missing/linked USB path.'
 done
 actual=$(shasum -a 256 "$mount/EFI/OC/config.plist" | awk '{print $1}')
-[ "$actual" = "$safe" ] || stop 'USB is not the exact safe opt-out configuration.'
+if [ "$actual" != "$safe" ]; then
+    # The package retiring this session may bring its own safe config, already on the USB (r41 OpenCore speedup)
+    kit_safe=$(plutil -extract safe_hash raw -o - "$current_kit/session-target/identity.plist" 2>/dev/null || :)
+    [ -n "$kit_safe" ] && [ "$actual" = "$kit_safe" ] &&
+        [ "$(shasum -a 256 "$current_kit/session-target/config.safe.plist" | awk '{print $1}')" = "$kit_safe" ] ||
+        stop 'USB is not the exact safe opt-out configuration.'
+fi
 
 if [ "$REVIEWED_FBFIX" -eq 1 ]; then
     review_report=$(mktemp -d "$ROOT/session-private/reviewed-fbfix.XXXXXX")

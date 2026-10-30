@@ -621,6 +621,42 @@ class SessionFlowTests(unittest.TestCase):
         self.assertEqual(sorted((self.mac / "Volumes/1401/UHD770-session-reports").iterdir()), usb_reports)
         self.assertEqual((self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").read_bytes(), b"original KC")
 
+    def test_restore_accepts_only_the_new_packages_own_safe_config(self):
+        """Retiring a session for a package that changed the safe config (r41).
+
+        The USB already carries the new package's verified opt-out bytes, not the
+        retired session's. Restore accepts exactly those, and still refuses any
+        other config without touching it or the installed files.
+        """
+        for usb in ("new-package-safe", "unrelated"):
+            with self.subTest(usb=usb):
+                if usb != "new-package-safe":
+                    self.temporary.cleanup()
+                    self.setUp()
+                prepared = self.run_session("prepare")
+                self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
+                self.assertEqual(self.run_session("boot", SESSION_BOOT="TEST").returncode, 0)
+                self.assertEqual(self.usb.read_bytes(), self.safe)
+                quick = plistlib.dumps({"NVRAM": {"Add": {self.guid: {"boot-args": "-nvoff"}},
+                                                  "Delete": {self.guid: ["boot-args"]}}})
+                for name, data in prepare_kit.session_payload(quick, "1401").items():
+                    (self.kit / name).write_bytes(data)
+                other = plistlib.dumps({"NVRAM": {"Add": {self.guid: {"boot-args": "-nvoff other"}}}})
+                self.usb.write_bytes(quick if usb == "new-package-safe" else other)
+                restored = self.run_session("restore", UHD770_USB_COPY="0")
+                if usb == "new-package-safe":
+                    self.assertEqual(restored.returncode, 0, restored.stderr.decode())
+                    self.assertEqual(self.usb.read_bytes(), quick)
+                    self.assertTrue((self.installed / "session-private/optout-kit-safe.txt").is_file())
+                    self.assertEqual((self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").read_bytes(),
+                                     b"original KC")
+                else:
+                    self.assertNotEqual(restored.returncode, 0)
+                    self.assertIn(b"USB config changed independently", restored.stderr)
+                    self.assertEqual(self.usb.read_bytes(), other)
+                    self.assertNotEqual((self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").read_bytes(),
+                                        b"original KC")
+
     def test_usb_copy_keeps_only_the_newest_boot_captures(self):
         self.prepare_test_boot()
         captures = self.mac / "private/var/log/UHD770MVP"
