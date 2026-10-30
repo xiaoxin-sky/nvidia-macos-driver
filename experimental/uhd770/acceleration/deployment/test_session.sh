@@ -105,6 +105,15 @@ for name in dmesg-0 ioreg-NMXGPU-0 ioreg-NMXAccel-0; do
 done
 session_recorder_valid "$TASK_TMP/report" CURRENT
 if session_recorder_valid "$TASK_TMP/report" OLD; then exit 1; fi
+# A flush that timed out before the stream was alive (r36) does not fail the recorder; one after it does.
+printf '%s\n' 'elapsed_s=6 sync_failed status=124' 'elapsed_s=12 heartbeat stream_alive=1' \
+    'elapsed_s=120 heartbeat stream_alive=1' 'elapsed_s=121 collector_end reason=deadline_or_termination' \
+    > "$TASK_TMP/report/stages.txt"
+session_recorder_valid "$TASK_TMP/report" CURRENT
+printf 'elapsed_s=121 sync_failed status=124\n' >> "$TASK_TMP/report/stages.txt"
+if session_recorder_valid "$TASK_TMP/report" CURRENT; then exit 1; fi
+printf '%s\n' 'elapsed_s=1 heartbeat stream_alive=1' 'elapsed_s=115 heartbeat stream_alive=1' \
+    'elapsed_s=120 collector_end reason=duration_complete' > "$TASK_TMP/report/stages.txt"
 printf 'stage=kernel-stream startup_failed status=42\n' >> "$TASK_TMP/report/stages.txt"
 if session_recorder_valid "$TASK_TMP/report" CURRENT; then exit 1; fi
 
