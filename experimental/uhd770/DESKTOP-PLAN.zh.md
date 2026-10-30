@@ -184,6 +184,43 @@
 - 诊断：插件在找不到 GPU 时，记录打开 `/dev/dri`、`renderD128`、`card0` 的读写和只读结果（errno）；Desktop 脚本另外采集沙盒拦截记录（`sandbox.txt`），以及 WindowServer 的 display pipe 和 IOPresentment 日志。
 - 参考项目其余补丁的取舍：沙盒访问（0045、libdrm 0002/0004）、IOSurface（0025）、commitAndWaitUntilSubmitted（0016）、To_Accelerated（0042）、帧提交顺序（0019–0021）可能很快需要；0024/0026/0027/0043/0046 留到性能阶段；virtio-gpu、NMXVGAFB、NMXAGDC、QEMU、xe/SR-IOV 相关的用不上。每轮只移植当下卡住的那一块。
 
+**r38 结果（2026-10-30）。** 四个测试阶段照常通过。Desktop 脚本重启 WindowServer 后，新的 WindowServer（pid 8918）2 秒后崩溃（SIGSEGV），再次启动的又卡住，约 5 分钟后看门狗报 `no successful checkins from WindowServer ... in 120 seconds` 并 panic（`panic-2026-10-30-055119.txt`）。崩溃报告（用户从 Mac 拷出的 `windowservererror.rtf`）：
+- 崩溃线程和主线程都在 QuartzCore 的 CPU 软件渲染器里（`CA::OGL::SW::image_sampler` 等），访问地址 `0x1010`，即读一个像素指针为空的图像。
+- WindowServer 已经加载了 NVMTLDriver 和 libvulkan_intel。但插件在它里面找不到 GPU（第 1 个障碍），没有 Metal 设备，于是退回软件渲染。
+- 软件渲染去合成挂在 NMXAccel 上的表面，这些表面没有 CPU 映射，就崩溃了。
+
+结论：第 2、3 个障碍修好后，WindowServer 走得更远，但只要第 1 个障碍还在，它就只能用软件渲染，而软件渲染碰不了加速器的表面。所以 F 步接下来的重点就是第 1 个障碍：让 WindowServer 里的 ANV 能打开 GPU。r38 Desktop 记录里的插件诊断（打开 `/dev/dri` 的 errno）和 `sandbox.txt` 这次没有拷进 U 盘，要从 Mac 的 `/Users/Shared/UHD770MVP-desktop.*` 或系统日志里取。
+
+**第 1 个障碍查清了（r38 诊断，用户从 Mac 系统日志取出 `r38.txt`）。** WindowServer 每次启动时：
+- 沙盒拒绝它以读写方式打开 `/dev/dri/renderD128` 和 `card0`（`Sandbox: WindowServer deny(1) file-write-data /dev/dri/renderD128`，open 返回 errno 1）；
+- 以只读方式打开 `/dev/dri` 目录和 `renderD128` 都成功（errno 0）；`card0` 只读也失败（errno 13，节点权限 0600）。
+
+我们的 libdrm 在枚举设备时（`drm_darwin_query_node`）用 `O_RDWR` 打开节点，失败后就当作没有这个设备，于是 ANV 报"枚举成功但没有设备"。Mesa 的 ANV 打开渲染节点时也用 `O_RDWR`。内核这边不需要改：`nmx_mmap` 和 DRM ioctl 都不检查 fd 的写权限，只读 fd 一样能提交命令、映射显存。参考项目 libdrm 补丁 0004 的说明也是"失败时退回只读（WindowServer）"。
+
+所以第 1 个障碍只需要 userland 两处改动，不需要 IOKit DRM 客户端（那是给 App Sandbox 里的应用用的，比如 Safari；它们连只读都打不开）：libdrm 的枚举和 ANV 的打开在读写被拒（EPERM/EACCES）时都退回只读。
+
+**参考项目补丁评审（2026-10-30，为 r39 一次性筛选）。** 用户希望少重启几次，所以在动手前把 NullMoth-Xe 的 60 个补丁（驱动 47、libdrm 5、Mesa 8）逐个对照我们的代码，判断"WindowServer 第一次用 GPU 合成并显示出来"需要哪些：
+
+| 补丁 | 作用 | 结论 |
+|---|---|---|
+| libdrm 0004、Mesa 0002/0008 | 沙盒下以只读方式打开节点 | 需要；自己写精简版：`libdrm-nmx-readonly.patch`、`mesa-anv-readonly.patch` |
+| 0005 前半 | 帧缓冲用物理连续系统内存响应 `nvAllocVram`/`nvFreeVram` | 需要；没有它，显示表面没有内存，这正是 r38 崩溃的原因 |
+| 0005 后半 | 以 60 Hz 重复拷贝最后呈现的一帧 | 需要；我们也走 CPU 拷贝，同样会遇到"呈现早于画面写回"的竞争 |
+| 0024 | 缓冲纹理按缓冲自身的内存类型判断 | 需要；ANV 的线性图像只接受部分内存类型，CoreAnimation 的缓冲纹理会得到 nil |
+| 0021 | 用 CAS 创建 `gNVSVPendLock` | 顺手修，一行 |
+| 0003、0004 | 真实扫描地址、假 GPU 地址、补发上电 | r38 已移植 |
+| 0011、0015、0016、0019、0020、0025、0026、0043、0042、0046 | 零拷贝、帧提交排序、IOSurface 直接映射、描述符复用、To_Accelerated、预留显存 | 都是性能或长时间运行用的，留到 G 步 |
+| 0007 | 开机自动上膛 | 留到 F4 |
+| 0027、0031、0032 | OpenGL 应用和着色器翻译 | 与 WindowServer 无关 |
+| 0045、libdrm 0002/0005 | App Sandbox 进程走 IOKit 的 DRM 通道 | 暂不需要：WindowServer 只读打开节点是允许的。但如果它的沙盒还拦截只读 fd 上的 ioctl，就需要了；r39 的沙盒日志会给出答案 |
+| 其余 NMXVGAFB、NMXAGDC、virtio、QEMU、xe/SR-IOV | 虚拟机专用 | 不需要 |
+
+**r39 的改动。**
+- userland：libdrm 枚举和 ANV 打开渲染节点时，读写被拒（EPERM/EACCES）就退回只读。userland 组件从 r16 起第一次重新编译。
+- 内核（NMIntelFB）：`nvAllocVram`/`nvFreeVram` 用物理连续的系统内存，预算 512 MiB。
+- 前端（NMXAccel）：显示管线以 `debug.nmxaccel_front_hz`（默认 60）重复拷贝最后一帧，计数 `debug.nmxaccel_front_copies`；`gNVSVPendLock` 改用 CAS 创建。
+- 前端（插件）：缓冲纹理按缓冲自身的内存类型判断（`nvk_buffer.memtype1`）。
+
 **主要未知数。**
 - 拷贝路径原本是"NVIDIA 显存 → Intel 内屏"。现在源和目的都在 Intel 这边（ANV 的系统内存表面 → BAR2 扫描缓冲），`performTransaction` 怎么读取源表面，要在 F1 里读代码确认，可能还要改。
 - IOAccelerator 显示机对帧缓冲和加速器的配对规则（显示组编号、`IOAccelIndex` 等）还没有逐行确认。

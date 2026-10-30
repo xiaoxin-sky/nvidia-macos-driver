@@ -7312,12 +7312,12 @@ new file mode 100644
 new file mode 100644
 --- /dev/null
 +++ b/xnu/nmx_intelfb.cpp
-@@ -0,0 +1,605 @@
+@@ -0,0 +1,660 @@
 +/*
 + * UHD 770 plan step E (experimental/uhd770/DESKTOP-PLAN.zh.md 3.4): upstream kexts/NMIntelFB/intelfb.cpp, unchanged
 + * except the opt-in, the owner flag and summary NMXGPU reads, a NullMoth log prefix (the session keeps only
 + * NullMoth kernel lines), the step guard below, no NVIDIA head or built-in panel (r34), and its real scan-out
-+ * address for NMXAccel (r38); compiled into NMXGPU.kext as a second personality in the IOFramebuffer match category. It takes
++ * address and system memory as VRAM for NMXAccel (r38, r39); compiled into NMXGPU.kext as a second personality in the IOFramebuffer match category. It takes
 + * the IGPU from the firmware framebuffer at boot and publishes the scan-out the firmware lit, which i915 later adopts
 + * in place (r31), so WindowServer opens a framebuffer of this driver from the start. Same license as the original.
 + */
@@ -7834,11 +7834,66 @@ new file mode 100644
 +    }
 +}
 +
++/*
++ * "VRAM" for NMXAccel's video resources (WindowServer's display surfaces), UHD 770 plan step F (r39). IOAccelerator-
++ * Family2 wires each one into video memory before a display-pipe transaction may present it, and NMXAccel asks its
++ * head's framebuffer for that memory, as NVRMFB grants BAR1 VRAM. Refused here (r38), the surfaces had no memory:
++ * WindowServer's software compositor read a null pixel pointer and crashed. This integrated GPU has no VRAM, so
++ * physically contiguous system memory stands in, as in the reference Meteor Lake port (NullMoth-Xe 0005).
++ */
++static constexpr unsigned long long kNmxVramBudget = 512ull << 20;
++static volatile SInt64 gNmxVramUsed = 0;
++static volatile SInt64 gNmxVramCookie = 0;
++static volatile SInt32 gNmxVramLogs = 0;
++
++static IOReturn nmxVramAlloc(NVRMVramRequest *r)
++{
++    const unsigned long long want = (r->size + 4095) & ~4095ull;
++    if (!want) return kIOReturnBadArgument;
++    if ((unsigned long long)OSAddAtomic64((SInt64)want, &gNmxVramUsed) + want > kNmxVramBudget) {
++        OSAddAtomic64(-(SInt64)want, &gNmxVramUsed);
++        IFBLOG("nvAllocVram(%llu): refused, the %llu-byte budget is spent", want, kNmxVramBudget);
++        return kIOReturnNoSpace;
++    }
++    IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
++        kIODirectionInOut | kIOMemoryPhysicallyContiguous, want, 0x0000FFFFFFFFF000ull);
++    if (!b) {
++        OSAddAtomic64(-(SInt64)want, &gNmxVramUsed);
++        IFBLOG("nvAllocVram(%llu): no contiguous system memory", want);
++        return kIOReturnNoMemory;
++    }
++    bzero(b->getBytesNoCopy(), want);
++    r->handle = b; r->kva = b->getBytesNoCopy();
++    r->phys = b->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone);
++    r->actualSize = want;
++    r->mappedTotal = (unsigned long long)gNmxVramUsed;
++    r->allocationCookie = (unsigned long long)OSAddAtomic64(1, &gNmxVramCookie) + 1;
++    if (OSIncrementAtomic(&gNmxVramLogs) < 16)
++        IFBLOG("nvAllocVram(%llu): system memory phys 0x%llx [%llu of %llu]", want, (unsigned long long)r->phys,
++               r->mappedTotal, kNmxVramBudget);
++    return kIOReturnSuccess;
++}
++
++static IOReturn nmxVramFree(NVRMVramRequest *r)
++{
++    IOBufferMemoryDescriptor *b = OSDynamicCast(IOBufferMemoryDescriptor, (OSObject *)r->handle);
++    if (!b) return kIOReturnBadArgument;
++    OSAddAtomic64(-(SInt64)b->getLength(), &gNmxVramUsed);
++    b->release();
++    r->handle = nullptr; r->kva = nullptr; r->phys = 0; r->actualSize = 0; r->allocationCookie = 0;
++    return kIOReturnSuccess;
++}
++
 +// NVAccel's display pipe asks every head for its scan-out (NVRM_VRAM_FN_SCANOUT). This head answers with a CPU mapping and
 +// no VRAM address: phys 0 keeps NVAccel from treating Intel memory as NVIDIA VRAM (it is not in the NVIDIA card's BAR1),
 +// so frames reach the panel only through the copy into kva.
 +IOReturn NMIntelFB::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
 +{
++    if (fn && (fn->isEqualTo(NVRM_VRAM_FN_ALLOC) || fn->isEqualTo(NVRM_VRAM_FN_FREE))) {
++        NVRMVramRequest *r = (NVRMVramRequest *)p1;
++        if (!r || r->version != NVRM_VRAM_ABI_VERSION) return kIOReturnBadArgument;
++        return fn->isEqualTo(NVRM_VRAM_FN_ALLOC) ? nmxVramAlloc(r) : nmxVramFree(r);
++    }
 +    if (fn && fn->isEqualTo(NVRM_VRAM_FN_SCANOUT)) {
 +        NVRMVramRequest *r = (NVRMVramRequest *)p1;
 +        if (!r || r->version != NVRM_VRAM_ABI_VERSION) return kIOReturnBadArgument;

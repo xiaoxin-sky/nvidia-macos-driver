@@ -40,7 +40,7 @@ snapshot() {
         sysctl debug.nmxaccel_headless debug.nmxaccelfb debug.nmxaccel_iop debug.nmxaccel_iop_ok \
             debug.nmxaccel_iop_ok_h0 debug.nmxaccel_iop_fail debug.nmxaccel_iop_empty debug.nmxaccel_iop_src_surf \
             debug.nmxaccel_iop_blank debug.nmxaccel_heads_published debug.nmxaccel_heads_registered \
-            debug.nmxaccel_heads_piped 2>&1 || :
+            debug.nmxaccel_heads_piped debug.nmxaccel_front_copies debug.nmxaccel_front_hz 2>&1 || :
         pgrep -lx WindowServer || printf 'WindowServer: not running\n'
     } > "$report/$name-sysctl.txt"
     bounded 5 "$report/$name-NMXAccel.txt" ioreg -r -c NMXAccel -l -w0

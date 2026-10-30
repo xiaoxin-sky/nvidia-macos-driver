@@ -1,5 +1,17 @@
+diff --git a/kexts/NVRM/accel/nvaccel_stubs.h b/kexts/NVRM/accel/nvaccel_stubs.h
+index b5be732..7c6e519 100644
+--- a/kexts/NVRM/accel/nvaccel_stubs.h
++++ b/kexts/NVRM/accel/nvaccel_stubs.h
+@@ -146,6 +146,7 @@ public:
+     IOAccelMemory *initFramebufferResource(unsigned int index, IOAccelResource2 *res) APPLE_KEXT_OVERRIDE;
+     IOReturn validateTransaction(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
+     IOReturn performTransaction(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
++    IOReturn performTransactionCopy(IOAccelDisplayPipeTransaction2 *txn);
+     bool     isTransactionComplete(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
+     void     free() APPLE_KEXT_OVERRIDE;
+     enum { kIopSrcSlots = 4 };
 diff --git a/kexts/NVRM/accel/nvrm-accel.cpp b/kexts/NVRM/accel/nvrm-accel.cpp
-index 2eb9c21..334ce5e 100644
+index 2eb9c21..a8b0da2 100644
 --- a/kexts/NVRM/accel/nvrm-accel.cpp
 +++ b/kexts/NVRM/accel/nvrm-accel.cpp
 @@ -417,6 +417,11 @@ public:
@@ -60,7 +72,124 @@ index 2eb9c21..334ce5e 100644
              } else ALOG("serviceMatching(NVRMFramebuffer) returned NULL -- cannot watch for the framebuffer");
          }
          return r;
-@@ -1237,13 +1258,37 @@ static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS;
+@@ -914,8 +935,92 @@ void NVDisplayPipe::iopDropSources()
+     }
+ }
+ 
++#ifdef NMX_ACCEL
++/*
++ * Front buffer (UHD 770 plan step F, r39; reference Meteor Lake port, NullMoth-Xe 0005). NMIntelFB's scan-out takes
++ * frames only through this pipe's CPU copy, and a transaction can arrive before the frame is in the surface's memory:
++ * the Metal plugin renders into a private image and copies it out to the IOSurface after the GPU signals, while
++ * WindowServer presents on that signal. A static screen sends no further transaction, so the panel would keep an empty
++ * frame. Like a display engine scanning out its front buffer, the last presented surface is copied again at
++ * debug.nmxaccel_front_hz (60; 0 = only on transactions). Its mapping stays valid while it is the front: it sits in
++ * one of the pipe's source slots, which only performTransaction recycles, under gNmxFrontLock.
++ */
++static IOLock *gNmxFrontLock = nullptr;
++static thread_call_t gNmxFrontTimer = nullptr;
++static struct { const NVDisplayPipe *pipe; const volatile unsigned *src; unsigned w, h, pitch;
++                volatile unsigned *dst; unsigned dpitch; } gNmxFront;
++static SInt64 gCntNmxFrontCopies;
++static int gNmxFrontHz = 60;
++static constexpr unsigned kNmxFrontMaxHz = 240;
++
++static void nmxFrontCopyLocked()
++{
++    if (!gNmxFront.src || !gNmxFront.dst) return;
++    const unsigned words = (((gNmxFront.pitch < gNmxFront.dpitch) ? gNmxFront.pitch : gNmxFront.dpitch) & ~3u) / 4;
++    const unsigned spr = gNmxFront.pitch / 4, dpr = gNmxFront.dpitch / 4;
++    for (unsigned y = 0; y < gNmxFront.h; y++) {
++        const volatile unsigned *sp = gNmxFront.src + (unsigned long)y * spr;
++        volatile unsigned *dp = gNmxFront.dst + (unsigned long)y * dpr;
++        for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
++    }
++    OSAddAtomic64(1, &gCntNmxFrontCopies);
++}
++
++static void nmxFrontArm()
++{
++    const int hz = gNmxFrontHz;
++    if (!gNmxFrontTimer || hz <= 0) return;
++    uint64_t d;
++    clock_interval_to_deadline(1000000u / (unsigned)(hz < (int)kNmxFrontMaxHz ? hz : kNmxFrontMaxHz), kMicrosecondScale, &d);
++    thread_call_enter_delayed(gNmxFrontTimer, d);
++}
++
++static void nmxFrontTick(thread_call_param_t, thread_call_param_t)
++{
++    if (!gNmxFrontLock) return;
++    IOLockLock(gNmxFrontLock);
++    nmxFrontCopyLocked();
++    const bool live = gNmxFront.src != nullptr;
++    IOLockUnlock(gNmxFrontLock);
++    if (live) nmxFrontArm();
++}
++
++static void nmxFrontInit()
++{
++    if (!gNmxFrontLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gNmxFrontLock)) IOLockFree(l); }
++    if (!gNmxFrontTimer) { thread_call_t t = thread_call_allocate(nmxFrontTick, nullptr);
++                           if (t && !OSCompareAndSwapPtr(nullptr, t, (void *volatile *)&gNmxFrontTimer)) thread_call_free(t); }
++}
++#endif
++
++IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
++{
++#ifdef NMX_ACCEL
++    if (gNvIop) {
++        nmxFrontInit();
++        if (gNmxFrontLock) {
++            IOLockLock(gNmxFrontLock);
++            const bool wasLive = gNmxFront.src != nullptr;
++            IOReturn r = performTransactionCopy(txn);
++            const bool live = gNmxFront.src != nullptr;
++            IOLockUnlock(gNmxFrontLock);
++            if (live && !wasLive) nmxFrontArm();
++            return r;
++        }
++    }
++#endif
++    return performTransactionCopy(txn);
++}
++
+ void NVDisplayPipe::free()
+ {
++#ifdef NMX_ACCEL
++    if (gNmxFrontLock) {
++        IOLockLock(gNmxFrontLock);
++        if (gNmxFront.pipe == this) gNmxFront.src = nullptr;
++        IOLockUnlock(gNmxFrontLock);
++    }
++#endif
+     iopDropSources();
+     IOAccelLegacyDisplayPipe::free();
+ }
+@@ -954,7 +1059,7 @@ static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head);
+ static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
+ static bool nvSurfWaitReady(unsigned int id);
+ static void nvAccelIopHome(IOService *fb, unsigned head);
+-IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
++IOReturn NVDisplayPipe::performTransactionCopy(IOAccelDisplayPipeTransaction2 *txn)
+ {
+     if (!gNvIop) return (IOReturn)0xe00002c7;
+     if (!txn) NVIOP_FAIL(kIOReturnBadArgument, "performTransaction(NULL)");
+@@ -1032,6 +1137,14 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
+         for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
+     }
+     OSAddAtomic64(1, fromRes ? &gCntIopSrcRes : &gCntIopSrcSurf);
++#ifdef NMX_ACCEL
++    // the copied surface becomes the front buffer (a resource's memory can go away under us: not those)
++    if (gNmxFrontLock) {
++        if (fromRes) gNmxFront.src = nullptr;
++        else { gNmxFront.pipe = this; gNmxFront.src = src; gNmxFront.w = w; gNmxFront.h = h; gNmxFront.pitch = pitch;
++               gNmxFront.dst = (volatile unsigned *)q.kva; gNmxFront.dpitch = q.pitch; }
++    }
++#endif
+     const SInt64 n = OSAddAtomic64(1, &gCntIopOk);
+     const SInt64 nh = OSAddAtomic64(1, &gCntIopOkHead[head]);
+     unsigned nz = 0, varied = 0; const unsigned first = src[0] & 0xffffffu;
+@@ -1237,13 +1350,41 @@ static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS;
  SYSCTL_PROC(_debug, OID_AUTO, nvaccel_crc, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, nvaccel_crc_sysctl, "I",
              "b85k-crc: display CRC32 of what head nvaccel_crc_head is showing (0 = unavailable)");
  static bool gSysctlInstalled = false;
@@ -79,6 +208,9 @@ index 2eb9c21..334ce5e 100644
 +SYSCTL_UINT(_debug, OID_AUTO, nmxaccel_heads_published, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvHeadsPublished, 0, "bit i = head i published");
 +SYSCTL_UINT(_debug, OID_AUTO, nmxaccel_heads_registered, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvHeadsRegistered, 0, "bit i = head i registered");
 +SYSCTL_UINT(_debug, OID_AUTO, nmxaccel_heads_piped, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvHeadsPiped, 0, "bit i = head i has a display pipe");
++NVACCEL_CNT(nmxaccel_front_copies,    gCntNmxFrontCopies, "front-buffer copies of the last presented frame onto the screen");
++SYSCTL_INT(_debug, OID_AUTO, nmxaccel_front_hz, CTLFLAG_RW | CTLFLAG_LOCKED, &gNmxFrontHz, 0,
++           "front-buffer copies per second (0 = only on display-pipe transactions)");
 +#endif
  static void nvaccelInstallSysctl(void)
  {
@@ -94,12 +226,22 @@ index 2eb9c21..334ce5e 100644
 +    sysctl_register_oid(&sysctl__debug_nmxaccel_heads_published);
 +    sysctl_register_oid(&sysctl__debug_nmxaccel_heads_registered);
 +    sysctl_register_oid(&sysctl__debug_nmxaccel_heads_piped);
++    sysctl_register_oid(&sysctl__debug_nmxaccel_front_copies); sysctl_register_oid(&sysctl__debug_nmxaccel_front_hz);
      gSysctlInstalled = true;
 +    ALOG("sysctl debug.nmxaccelfb / debug.nmxaccel_iop installed (UHD 770 plan step F)");
  #else
      sysctl_register_oid(&sysctl__debug_nvaccelfb);
      sysctl_register_oid(&sysctl__debug_nvaccel_headless);
-@@ -1921,6 +1966,21 @@ static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
+@@ -1438,7 +1579,7 @@ static unsigned nvAccelSurfDirty(void *cache, NVResource *res, unsigned plane)
+     unsigned int fl = *(volatile unsigned int *)(r + 0xc);
+     volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
+     if (type != 0xc0 || (fl & 0x8000) || !valid || plane > 15) return NVRM_SS_NO_CACHE;
+-    if (!gNVSVPendLock) gNVSVPendLock = IOSimpleLockAlloc();
++    if (!gNVSVPendLock) { IOSimpleLock *l = IOSimpleLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gNVSVPendLock)) IOSimpleLockFree(l); }
+     if (!nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1, res)) return NVRM_SS_NO_CACHE;
+     _ZN20IOSurfaceDeviceCache10setCurrentEv(cache);
+     valid[6] |= (unsigned short)(1u << plane);
+@@ -1921,6 +2062,21 @@ static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
      NVMemoryMap *mm = OSDynamicCast(NVMemoryMap, map);
      if (!mm || !len) return 0;
      if (mm->fGpuVa) return mm->fGpuVa;
@@ -151,7 +293,7 @@ index cf161db..3416efe 100644
      if (!strcmp(me, "mtlprobe") || !strcmp(me, "nvmtltest") || !strcmp(me, "nvmtlrender")) return true;
      FILE *f = fopen("/Library/GPUBundles/nvmtl-allow.txt", "r");
 diff --git a/plugin/nvmtl_vk.c b/plugin/nvmtl_vk.c
-index f0c9c58..23df074 100644
+index f0c9c58..f2568b7 100644
 --- a/plugin/nvmtl_vk.c
 +++ b/plugin/nvmtl_vk.c
 @@ -12,6 +12,7 @@
@@ -203,6 +345,33 @@ index f0c9c58..23df074 100644
          return -1; }
      nvlog("vk: pdev %u physical device(s) through this ICD (VkResult %d)", n, (int)er);
      VkPhysicalDevice pds[8]; if (n > 8) n = 8; pvkEnumeratePhysicalDevices(g_inst, &n, pds); g_pdev = pds[0];
+@@ -1288,7 +1316,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
+         VkResult r2 = r1 == VK_SUCCESS ? pvkMapMemory(g_dev, bm, 0, VK_WHOLE_SIZE, 0, &bp) : r1;
+         VkResult r3 = r2 == VK_SUCCESS ? pvkBindBufferMemory(g_dev, out->buf, bm, 0) : r2;
+         if (r3 == VK_SUCCESS) {
+-            out->mem = bm; out->map = bp; out->alloc = mr.size; out->bar1 = 1; g_alloc_bytes += mr.size; g_bar1_bytes += mr.size; g_buf_made++;
++            out->mem = bm; out->map = bp; out->alloc = mr.size; out->bar1 = 1; out->memtype1 = (uint32_t)bt + 1; g_alloc_bytes += mr.size; g_bar1_bytes += mr.size; g_buf_made++;
+             { static int said; if (!said++) nvlog("vk: shared buffer of %zu bytes placed in VRAM through BAR1 (type %d)", size, bt); }
+             return 0; }
+         if (bp) pvkUnmapMemory(g_dev, bm);
+@@ -1318,7 +1346,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
+             return -1;
+         }
+     } else VKCK(nvmtl_opaque_AllocateMemory(g_dev, &mai, NULL, &out->mem), "vkAllocateMemory(buffer)");
+-    out->alloc = mr.size;
++    out->alloc = mr.size; out->memtype1 = (uint32_t)mt + 1;
+     if (!host_visible) nvmtl_vk_budget_charge(mr.size);
+     VKCK(pvkBindBufferMemory(g_dev, out->buf, out->mem, 0), "vkBindBufferMemory");
+     if (host_visible) { VkResult mr_ = pvkMapMemory(g_dev, out->mem, 0, VK_WHOLE_SIZE, 0, &out->map); if (mr_ != VK_SUCCESS) {
+@@ -1398,7 +1426,7 @@ int nvmtl_vk_buffer_import_host(void *ptr, size_t size, nvk_buffer *out)
+         nvlog("vk: vkBindBufferMemory refused the imported allocation");
+         pvkFreeMemory(g_dev, (VkDeviceMemory)out->mem, NULL); pvkDestroyBuffer(g_dev, (VkBuffer)out->buf, NULL);
+         out->buf = NULL; out->mem = NULL; return -1; }
+-    out->map = ptr; out->alloc = size; out->imported = 1;
++    out->map = ptr; out->alloc = size; out->imported = 1; out->memtype1 = (uint32_t)mt + 1;
+     g_alloc_bytes += size; g_buf_made++;
+     { static int said; if (!said++) nvlog("vk: imported the caller's pages as device memory — %zu bytes at %p, memory type %d", size, ptr, mt); }
+     return 0;
 @@ -1834,8 +1862,12 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
  static int nvmtl_gpu_headless(void)
  {
@@ -218,3 +387,46 @@ index f0c9c58..23df074 100644
      if (h < 0) { int v = 0; size_t n = sizeof v; h = sysctlbyname("debug.nvaccel_headless", &v, &n, NULL, 0) == 0 && v;
                   if (h) nvlog("headless GPU: the display belongs to another GPU - IOSurfaces are copied out to system memory"); }
      return h;
+@@ -1904,7 +1936,7 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
+         nvlog("item 7: surface %u: a buffer over the imported VRAM was refused - private", surfaceID);
+         return -1;
+     }
+-    out->buf = b; out->mem = m; out->size = need; out->alloc = 0; out->imported = 1;
++    out->buf = b; out->mem = m; out->size = need; out->alloc = 0; out->imported = 1; out->memtype1 = (uint32_t)mt + 1;
+     g_buf_made++;
+     return 0;
+ }
+@@ -7200,7 +7232,10 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
+     VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, (VkImage)out->img, &mr);
+     uint32_t all = g_memp.memoryTypeCount >= 32 ? 0xffffffffu : ((1u << g_memp.memoryTypeCount) - 1u);
+     size_t at = b->moff + offset;
+-    const char *why = (mr.memoryTypeBits & all) != all ? "memory types" : (mr.alignment && at % mr.alignment) ? "alignment" : NULL;
++    // UHD 770 F (r39; reference 0024): the buffer's own memory type must suit the image - ANV's linear images take
++    // only some types, so CoreAnimation's buffer textures were refused (nil) - and with it unknown, every type must
++    const int typeOk = b->memtype1 ? ((mr.memoryTypeBits >> (b->memtype1 - 1)) & 1) != 0 : (mr.memoryTypeBits & all) == all;
++    const char *why = !typeOk ? "memory types" : (mr.alignment && at % mr.alignment) ? "alignment" : NULL;
+     if (why) {
+         nvlog("buffer texture: refused on %s - image types 0x%x of 0x%x, bind at %zu (buffer %zu + %zu) vs alignment %llu",
+               why, mr.memoryTypeBits, all, at, b->moff, offset, (unsigned long long)mr.alignment);
+@@ -7336,7 +7371,7 @@ static int pool_buffer_create_in(int vram, size_t size, nvk_buffer *out)
+         pthread_mutex_lock(&g_pool_lock); blk->nlive--; g_pool_live--; g_pool_bytes -= len; pool_block_give(blk, off, len); pthread_mutex_unlock(&g_pool_lock);
+         return -1;
+     }
+-    *out = pb; out->pool = blk; out->poff = off; out->alloc = len; out->size = size;
++    *out = pb; out->pool = blk; out->poff = off; out->alloc = len; out->size = size; out->memtype1 = blk->heap.memtype + 1;
+     if (!out->map && blk->heap.map) out->map = (uint8_t *)blk->heap.map + off;
+     if ((g_buf_made & 0xFFF) == 0) nvlog("buffer census: %llu made, %llu gone, %llu live, %zu bytes allocated; pool %llu blocks, %llu pooled live, %llu bytes in ranges",
+         (unsigned long long)g_buf_made, (unsigned long long)g_buf_gone, (unsigned long long)(g_buf_made - g_buf_gone), g_alloc_bytes,
+diff --git a/plugin/nvmtl_vk.h b/plugin/nvmtl_vk.h
+index c4beb6e..c982fe1 100644
+--- a/plugin/nvmtl_vk.h
++++ b/plugin/nvmtl_vk.h
+@@ -8,7 +8,7 @@
+ #include <stdint.h>
+ #include <stddef.h>
+ const char *nvmtl_image_ident(const void *addr, char *out, size_t n);
+-typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; } nvk_buffer;
++typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; uint32_t memtype1; /* memory type + 1, 0 unknown */ } nvk_buffer;
+ #include "nvmtl_sample_positions.h"
+ typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vpair;  uint64_t up_token; } nvk_image;
+ #define NVMTL_NVAR 16

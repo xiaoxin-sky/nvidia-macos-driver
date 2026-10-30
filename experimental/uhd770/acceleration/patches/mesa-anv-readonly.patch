@@ -1,0 +1,19 @@
+diff --git a/src/intel/vulkan/anv_physical_device.c b/src/intel/vulkan/anv_physical_device.c
+index bc23769..b6f7fea 100644
+--- a/src/intel/vulkan/anv_physical_device.c
++++ b/src/intel/vulkan/anv_physical_device.c
+@@ -3015,6 +3015,14 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
+    int ret;
+ 
+    fd = open(path, O_RDWR | O_CLOEXEC);
++#ifdef __APPLE__
++   /* WindowServer's sandbox denies opening the render node for writing but
++    * allows reading, and NMX's ioctls and mmap need no write access
++    * (UHD 770 plan step F, r38): open it read-only there.
++    */
++   if (fd < 0 && (errno == EPERM || errno == EACCES))
++      fd = open(path, O_RDONLY | O_CLOEXEC);
++#endif
+    if (fd < 0) {
+       if (errno == ENOMEM) {
+          return vk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,

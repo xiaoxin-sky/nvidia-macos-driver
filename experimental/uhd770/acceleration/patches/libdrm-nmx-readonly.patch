@@ -1,0 +1,15 @@
+diff --git a/xf86drm.c b/xf86drm.c
+index 29e9e8b..364a965 100644
+--- a/xf86drm.c
++++ b/xf86drm.c
+@@ -4598,6 +4598,10 @@ static int drm_darwin_query_node(const char *path, struct nmx_drm_node_info *inf
+     bool trace = getenv("NMX_DRM_DEBUG") != NULL;
+     if (trace) fprintf(stderr, "NMX DRM discovery path=%s phase=open.begin\n", path);
+     int fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
++    /* WindowServer's sandbox denies opening a DRM node for writing but allows reading, and NMX's ioctls and mmap
++     * need no write access (UHD 770 plan step F, r38): describe the node through a read-only open there. */
++    if (fd < 0 && (errno == EPERM || errno == EACCES))
++        fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+     int open_error = fd < 0 ? errno : 0;
+     if (trace) fprintf(stderr, "NMX DRM discovery path=%s phase=open.end error=%d\n", path, open_error);
+     memset(info, 0, sizeof(*info));
