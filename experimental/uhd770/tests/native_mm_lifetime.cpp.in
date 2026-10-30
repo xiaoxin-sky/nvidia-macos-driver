@@ -36,6 +36,8 @@ template<class T>static void fixture_delete(T *p){assert(p&&objects.fetch_sub(1)
 #define IONew(T,n) fixture_new<T>()
 #define IODelete(p,T,n) fixture_delete(p)
 using IOByteCount=size_t;
+using IOReturn=int;
+static void IOLog(const char *,...){}
 using mach_vm_address_t=uint64_t;
 using user_addr_t=uint64_t;
 using addr64_t=uint64_t;
