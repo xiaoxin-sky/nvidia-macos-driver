@@ -419,7 +419,7 @@ jobs:
           BIN="$GITHUB_WORKSPACE/out/NMXGPU.kext/Contents/MacOS/NMXGPU"
           xcrun nm -arch x86_64 "$BIN" > /tmp/nmxgpu-symbols.txt \
             || { echo "::error::cannot read NMXGPU symbols"; exit 1; }
-          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set _nmx_fb_display_state _nmx_fb_set_mode _nmx_fb_reprobe _nmx_i915_display_report _nmx_fb_display_report __ZN9NMIntelFB10gMetaClassE __Z18nmx_intel_opted_inP11IOPCIDevice; do
+          for sym in _i915_pci_driver _i915_driver_probe _adl_s_info _nmx_port_attach _nmx_gpu_stage_record _nmx_xnu_pci_find_class _nmx_i915_scanout_map _nmx_i915_scanout_unmap _nmx_intel_fb_pin_mappable _nmx_fb_gamma _nmx_drm_gamma_set _nmx_fb_display_state _nmx_fb_set_mode _nmx_fb_reprobe _nmx_i915_display_report _nmx_fb_display_report __ZN9NMIntelFB10gMetaClassE __Z18nmx_intel_opted_inP11IOPCIDevice __ZN19IOAccelNMXDRMClient10gMetaClassE _nmx_xnu_uc_open _nmx_xnu_uc_ioctl; do
             grep -Eq "[[:space:]][TtDdSsBbRr][[:space:]]$sym$" /tmp/nmxgpu-symbols.txt \
               || { echo "::error::missing defined symbol $sym (undefined imports do not count)"; exit 1; }
           done

@@ -59,7 +59,7 @@ def fixtures(root, missing_clock=False, missing_changing_lookup=False):
     kernel = {
         "logs/all.log": "sources: 900  compiled: 900  failed: 0\n",
         "logs/i915.log": "sources: 274  compiled: 274  failed: 0\n",
-        "logs/rt.log": "runtime sources: 77  failed: 0\n",
+        "logs/rt.log": "runtime sources: 78  failed: 0\n",
         "logs/nmx-i915-mmap-test.log": "CPU scope, persistent pins, failure cleanup and fd-close PASS\n",
         "logs/nmx-taskqueue-test.log": "concurrency, requeue, cancel, drain and worker free passed\n",
         "logs/kernel-collection-preflight.txt": "Native KC symbol/dependency preflight passed\n",
@@ -77,7 +77,7 @@ def fixtures(root, missing_clock=False, missing_changing_lookup=False):
         "NMXGPU.kext/Contents/MacOS/NMXGPU": b"synthetic Mach-O placeholder" * 100,
         "NMXGPU.kext/Contents/Info.plist": plistlib.dumps({"CFBundleExecutable": "NMXGPU", "CFBundleIdentifier": "com.nullmoth.NMXGPU"}),
     }
-    for prefix, count in [("logs/logs/", 900), ("logs/logs-i915/", 274), ("logs/lklogs/", 77)]:
+    for prefix, count in [("logs/logs/", 900), ("logs/logs-i915/", 274), ("logs/lklogs/", 78)]:
         kernel.update({f"{prefix}unit-{index}.log": "synthetic compile log\n" for index in range(count)})
     userland = {
         "logs/probe-diagnostics-test.txt": "Vulkan diagnostic callback/optional extension/lifetime checks passed; no GPU executed.\n",
@@ -149,7 +149,7 @@ class AssemblerTests(unittest.TestCase):
             evidence = assemble.assemble(manifest, root / "kit", pathlib.Path(__file__).resolve().parents[4])
             self.assertFalse(evidence["hardware_ready"])
             self.assertFalse(evidence["gpu_executed"])
-            self.assertEqual(len(evidence["components"]["kernel"]["compiled_units"]), 1251)
+            self.assertEqual(len(evidence["components"]["kernel"]["compiled_units"]), 1252)
             for component in ["userland", "metal"]:
                 name = f"uhd770-acceleration-{component}.tar.gz"
                 with zipfile.ZipFile(root / f"{component}.zip") as archive:

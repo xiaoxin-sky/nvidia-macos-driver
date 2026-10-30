@@ -45,6 +45,8 @@ snapshot() {
     } > "$report/$name-sysctl.txt"
     bounded 5 "$report/$name-NMXAccel.txt" ioreg -r -c NMXAccel -l -w0
     bounded 5 "$report/$name-NMIntelFB.txt" ioreg -r -c NMIntelFB -l -w0
+    # r40: the DRM user clients WindowServer opens on NMXGPU when its sandbox denies ioctls on /dev/dri
+    bounded 5 "$report/$name-DRMClient.txt" ioreg -r -c IOAccelNMXDRMClient -l -w0
 }
 
 # r35: a plain killall (SIGTERM) left WindowServer running. SIGHUP is the usual way to
@@ -90,7 +92,8 @@ worker() {
     printf 'done %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$report/done.txt"
     for usb in /Volumes/*; do
         [ -d "$usb" ] && [ ! -L "$usb" ] && [ -f "$usb/EFI/OC/config.plist" ] || continue
-        [ "${usb##*/}" = 1401 ] || continue
+        # macOS mounts a second volume of the same name as "1401 2" (r39)
+        case "${usb##*/}" in 1401|'1401 '[0-9]) ;; *) continue ;; esac
         mkdir -p "$usb/UHD770-desktop-reports" && ditto "$report" "$usb/UHD770-desktop-reports/${report##*/}" &&
             bounded 60 "$report/usb-sync.txt" sync && printf 'USB copy: %s\n' "$usb/UHD770-desktop-reports/${report##*/}"
     done

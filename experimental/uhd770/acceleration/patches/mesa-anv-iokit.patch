@@ -1,0 +1,99 @@
+diff --git a/src/intel/common/intel_gem.h b/src/intel/common/intel_gem.h
+--- a/src/intel/common/intel_gem.h
++++ b/src/intel/common/intel_gem.h
+@@ -75,6 +75,24 @@ intel_48b_address(uint64_t v)
+ extern int intel_virtio_ioctl(int fd, unsigned long request, void *arg);
+ #endif
+ 
++#ifdef __APPLE__
++#include <dlfcn.h>
++/* WindowServer's sandbox denies ioctls on /dev/dri; libdrm's drmNmxIoctl then reaches the node through NMXGPU's IOKit
++ * user client (UHD 770 plan step F, r40). Looked up at run time: not everything that includes this header links
++ * libdrm. */
++static inline int
++intel_nmx_ioctl(int fd, unsigned long request, void *arg)
++{
++   static int (*volatile fn)(int, unsigned long, void *);
++   static volatile int looked;
++   if (!looked) {
++      fn = (int (*)(int, unsigned long, void *))dlsym(RTLD_DEFAULT, "drmNmxIoctl");
++      looked = 1;
++   }
++   return fn ? fn(fd, request, arg) : ioctl(fd, request, arg);
++}
++#endif
++
+ /**
+  * Call ioctl, restarting if it is interrupted
+  */
+@@ -86,6 +104,8 @@ intel_ioctl(int fd, unsigned long request, void *arg)
+     do {
+ #ifdef HAVE_INTEL_VIRTIO
+       ret = intel_virtio_ioctl(fd, request, arg);
++#elif defined(__APPLE__)
++      ret = intel_nmx_ioctl(fd, request, arg);
+ #else
+       ret = ioctl(fd, request, arg);
+ #endif
+diff --git a/src/intel/vulkan/anv_device.c b/src/intel/vulkan/anv_device.c
+--- a/src/intel/vulkan/anv_device.c
++++ b/src/intel/vulkan/anv_device.c
+@@ -24,6 +24,7 @@
+ #include <assert.h>
+ #include <inttypes.h>
+ #include <stdbool.h>
++#include <errno.h>
+ #include <fcntl.h>
+ #include "drm-uapi/drm_fourcc.h"
+ #include "drm-uapi/drm.h"
+@@ -930,6 +931,11 @@ VkResult anv_CreateDevice(
+ 
+    /* XXX(chadv): Can we dup() physicalDevice->fd here? */
+    device->fd = open(physical_device->path, O_RDWR | O_CLOEXEC);
++#ifdef __APPLE__
++   /* the same read-only open as anv_physical_device_try_create where a sandbox denies writing the node */
++   if (device->fd == -1 && (errno == EPERM || errno == EACCES))
++      device->fd = open(physical_device->path, O_RDONLY | O_CLOEXEC);
++#endif
+    if (device->fd == -1) {
+       result = vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
+       goto fail_device;
+diff --git a/src/util/os_drm.h b/src/util/os_drm.h
+--- a/src/util/os_drm.h
++++ b/src/util/os_drm.h
+@@ -18,13 +18,35 @@
+ #include <errno.h>
+ #include <xf86drm.h>
+ 
++#ifdef __APPLE__
++#include <dlfcn.h>
++/* WindowServer's sandbox denies ioctls on /dev/dri; libdrm's drmNmxIoctl then reaches the node through NMXGPU's IOKit
++ * user client (UHD 770 plan step F, r40). Looked up at run time: not everything that includes this header links
++ * libdrm. */
++static inline int
++os_drm_nmx_ioctl(int fd, unsigned long request, void *arg)
++{
++   static int (*volatile fn)(int, unsigned long, void *);
++   static volatile int looked;
++   if (!looked) {
++      fn = (int (*)(int, unsigned long, void *))dlsym(RTLD_DEFAULT, "drmNmxIoctl");
++      looked = 1;
++   }
++   return fn ? fn(fd, request, arg) : ioctl(fd, request, arg);
++}
++#endif
++
+ static inline int
+ drm_ioctl(int fd, uint32_t request, void *arg)
+ {
+    int ret;
+ 
+    do {
++#ifdef __APPLE__
++      ret = os_drm_nmx_ioctl(fd, request, arg);
++#else
+       ret = ioctl(fd, request, arg);
++#endif
+    } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+ 
+    return ret ? -errno : 0;

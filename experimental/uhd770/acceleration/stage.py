@@ -77,13 +77,15 @@ def stage(repository, root, cache, group):
             patch.write_bytes(git_bytes(repository, pins["historical_revision"], "gpu-port/patches/" + name + "-macos.patch"))
             subprocess.run(["git", "-C", str(sources / name), "apply", "--check", str(patch)], check=True)
             subprocess.run(["git", "-C", str(sources / name), "apply", str(patch)], check=True)
-        for name in ("mesa-anv-nmx.patch", "mesa-nmx-clock.patch", "mesa-anv-readonly.patch"):
+        # mesa-anv-iokit: ANV's ioctls go through libdrm's drmNmxIoctl, which WindowServer's sandbox needs (r40)
+        for name in ("mesa-anv-nmx.patch", "mesa-nmx-clock.patch", "mesa-anv-readonly.patch", "mesa-anv-iokit.patch"):
             patch = package / "patches" / name
             assert patch.is_file(), f"required Darwin ANV repair is missing: {name}"
             subprocess.run(["git", "-C", str(sources / "mesa"), "apply", "--check", str(patch)], check=True)
             subprocess.run(["git", "-C", str(sources / "mesa"), "apply", str(patch)], check=True)
-        # libdrm-nmx-readonly: WindowServer's sandbox lets it open the render node only read-only (UHD 770 F, r38)
-        for name in ("libdrm-nmx-node.patch", "libdrm-nmx-readonly.patch"):
+        # libdrm-nmx-readonly: WindowServer's sandbox lets it open the render node only read-only (UHD 770 F, r38);
+        # libdrm-nmx-iokit: and denies its ioctls, which then go through NMXGPU's IOKit user client (r40)
+        for name in ("libdrm-nmx-node.patch", "libdrm-nmx-readonly.patch", "libdrm-nmx-iokit.patch"):
             patch = package / "patches" / name
             subprocess.run(["git", "-C", str(sources / "libdrm"), "apply", "--check", str(patch)], check=True)
             subprocess.run(["git", "-C", str(sources / "libdrm"), "apply", str(patch)], check=True)

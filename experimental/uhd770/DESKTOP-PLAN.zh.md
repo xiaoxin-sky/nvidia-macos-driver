@@ -221,6 +221,20 @@
 - 前端（NMXAccel）：显示管线以 `debug.nmxaccel_front_hz`（默认 60）重复拷贝最后一帧，计数 `debug.nmxaccel_front_copies`；`gNVSVPendLock` 改用 CAS 创建。
 - 前端（插件）：缓冲纹理按缓冲自身的内存类型判断（`nvk_buffer.memtype1`）。
 
+**r39 结果（2026-10-30）。** 四个测试阶段通过；Desktop 后没有回到登录界面，约 5 分钟后看门狗 panic。日志（报告 `UHD770MVP-desktop.p8uIfe`，从 Mac 取回）：
+- WindowServer 加载了 r39 的插件、libvulkan_intel 和 libdrm（UUID 与 r39 编译产物一致）。只读打开 `/dev/dri/renderD128` 成功（errno 0），但沙盒随即拦下这个 fd 上的 ioctl：`deny file-ioctl path:/dev/dri/renderD128 ioctl-command:(_IO "N" 68)`（`NMX_DRM_IOCTL_NODE_INFO`）。ANV 因此枚举到 0 个设备。
+- 没有 GPU，WindowServer 退回 CPU 软件渲染，在 SkyLight 的 `layer_blit_byte_ANY` 里写一个基址为空的显示表面（地址 0xdf0）崩溃；它被反复重启、反复崩溃，最终看门狗 panic。r38 是读空纹理（0x1010），r39 变成写，说明 `nvAllocVram` 的系统内存显存起了作用（日志里有多次 8294400 字节的分配）。
+- `debug.nmxaccel_iop_empty` 涨到 30，`front_copies` 为 0：IOPresent 来了，但没有可拷贝的帧。
+- Desktop 报告没有写进 U 盘：同名卷被 macOS 挂成了 `/Volumes/1401 2`，脚本只认 `1401`。
+
+**r40 的改动（DRM over IOKit，参考 xkpi 0032/0036/0037、libdrm 0002/0003、Mesa 0002）。**
+- 内核：新增 `IOAccelNMXDRMClient`（`xnu/nmx_drmuc.cpp`）。NMXGPU 的 `newUserClient` 类型 `'NMXD'` 在内核里打开一次渲染节点，唯一的外部方法在调用者线程上执行一个 ioctl，所以参数里的用户指针和 `NMX_DRM_IOCTL_MMAP` 的映射都属于调用者。WindowServer 的沙盒允许名字以 `IOAccel` 开头的用户客户端。
+- 内核：`nmx_xnu_user_wire` 在区间不能为写入锁定时退回只读锁定（WindowServer 只能读别的进程画的 IOSurface）。
+- libdrm：`drmIoctl` 改走 `drmNmxIoctl`，ioctl 得到 EPERM 时把这个 fd 切换到 IOKit 客户端，此后它的所有 ioctl 都走那边；客户端按 fd 的 clone minor 配对。
+- Mesa：`intel_ioctl` 和 `drm_ioctl` 经运行时查到的 `drmNmxIoctl` 发出；`anv_CreateDevice` 打开设备时也退回只读（r39 只改了物理设备枚举那一处）。
+- 部署：Desktop 脚本也认 `1401 N` 卷；快照多记录 `IOAccelNMXDRMClient`。
+- 不做：普通沙盒应用需要的 libdrm 0004/0005、NMXAccel 0045（WindowServer 用不到），留到桌面跑通以后。
+
 **主要未知数。**
 - 拷贝路径原本是"NVIDIA 显存 → Intel 内屏"。现在源和目的都在 Intel 这边（ANV 的系统内存表面 → BAR2 扫描缓冲），`performTransaction` 怎么读取源表面，要在 F1 里读代码确认，可能还要改。
 - IOAccelerator 显示机对帧缓冲和加速器的配对规则（显示组编号、`IOAccelIndex` 等）还没有逐行确认。
