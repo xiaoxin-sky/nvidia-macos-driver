@@ -47,17 +47,37 @@ snapshot() {
     bounded 5 "$report/$name-NMIntelFB.txt" ioreg -r -c NMIntelFB -l -w0
 }
 
+# r35: a plain killall (SIGTERM) left WindowServer running. SIGHUP is the usual way to
+# end it (loginwindow starts a new one); SIGKILL only if the same process is still there.
+restart_windowserver() {
+    local before
+    before=$(pgrep -x WindowServer || :)
+    printf 'before: %s\n' "${before:-none}"
+    killall -HUP WindowServer || :
+    sleep 5
+    if [ -n "$before" ] && pgrep -x WindowServer | grep -qx "$before"; then
+        printf 'still pid %s after SIGHUP: SIGKILL\n' "$before"
+        killall -KILL WindowServer || :
+        sleep 5
+    fi
+    printf 'after: %s\n' "$(pgrep -x WindowServer | tr '\n' ' ')"
+}
+
 worker() {
     local report=$1 usb
     printf 'worker started %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     snapshot "$report" 1-before
-    sysctl -w debug.nmxaccel_iop=1 > "$report/arm-iop.txt" 2>&1 || :
-    sleep 1
-    sysctl -w debug.nmxaccelfb=3 > "$report/arm-fb.txt" 2>&1 || :
-    sleep 2
+    if [ "$(sysctl -n debug.nmxaccel_headless)" = 0 ]; then
+        printf 'already armed on this boot: only WindowServer restarts\n' > "$report/arm-fb.txt"
+    else
+        sysctl -w debug.nmxaccel_iop=1 > "$report/arm-iop.txt" 2>&1 || :
+        sleep 1
+        sysctl -w debug.nmxaccelfb=3 > "$report/arm-fb.txt" 2>&1 || :
+        sleep 2
+    fi
     snapshot "$report" 2-armed
     printf 'restarting WindowServer %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    killall WindowServer > "$report/windowserver-restart.txt" 2>&1 || :
+    restart_windowserver > "$report/windowserver-restart.txt" 2>&1
     sleep "$OBSERVE_FIRST"
     snapshot "$report" 3-after-${OBSERVE_FIRST}s
     sleep "$OBSERVE_SECOND"
@@ -94,11 +114,14 @@ case " $args " in *' nmxintel=1 '*) ;; *) printf 'REFUSED: the Intel driver is n
     printf 'REFUSED: run Run-UHD770-Test.command first on this boot, so its report is saved before WindowServer restarts.\n' >&2
     exit 65; }
 sysctl -n debug.nmxaccelfb > /dev/null 2>&1 || { printf 'REFUSED: this NMXAccel has no debug.nmxaccelfb switch.\n' >&2; exit 66; }
-[ "$(sysctl -n debug.nmxaccel_headless)" = 1 ] || { printf 'REFUSED: the accelerator is already armed on this boot.\n' >&2; exit 66; }
 ioreg -r -c NMXGPU -l -w0 | grep -q '"nmxdiag-display-state" = "owned-by-NMIntelFB"' ||
     { printf 'REFUSED: the screen does not belong to NMIntelFB on this boot.\n' >&2; exit 66; }
+# An earlier run on this boot may have armed the accelerator but not restarted WindowServer
+# (r35): run again, re-arming nothing. Its finished job is removed first.
 if launchctl print "system/$LABEL" > /dev/null 2>&1; then
-    printf 'REFUSED: a desktop switch already ran on this boot; reboot first.\n' >&2; exit 66
+    pgrep -f -- '--worker /Users/Shared/UHD770MVP-desktop' > /dev/null &&
+        { printf 'REFUSED: a desktop switch is still running; wait for its report.\n' >&2; exit 66; }
+    launchctl bootout "system/$LABEL" 2>/dev/null || :
 fi
 
 report=$(mktemp -d /Users/Shared/UHD770MVP-desktop.XXXXXX)
