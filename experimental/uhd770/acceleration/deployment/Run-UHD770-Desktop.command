@@ -1,6 +1,5 @@
 #!/bin/bash -p
-# Plan step F2 (experimental/uhd770/DESKTOP-PLAN.zh.md 3.5): after Run-UHD770-Test on a
-# test boot, arm NMXAccel with its framebuffer (NMIntelFB) and restart WindowServer once,
+# Plan step F2 (experimental/uhd770/DESKTOP-PLAN.zh.md 3.5): on a test boot (Run-UHD770-Test first is optional), arm NMXAccel with its framebuffer (NMIntelFB) and restart WindowServer once,
 # so the desktop composites on the GPU and the display pipe copies frames to the screen.
 # Everything it switches on is runtime state: a reboot disarms it. A root launchd job does
 # the work, because restarting WindowServer ends this Terminal session; it records the
@@ -17,7 +16,7 @@ OBSERVE_SECOND=40
 
 usage() {
     printf '%s\n' 'Usage: sudo /bin/bash -p Run-UHD770-Desktop.command' \
-        'Run once, on the test boot, after Run-UHD770-Test.command finished.' \
+        'Run once, on the test boot, once logged in (Run-UHD770-Test.command first is optional).' \
         'Arms the Intel accelerator for WindowServer and restarts WindowServer (you are logged out once).' \
         'A reboot undoes it. The report goes to the 1401 USB under UHD770-desktop-reports/.'
 }
@@ -49,6 +48,25 @@ snapshot() {
     bounded 5 "$report/$name-DRMClient.txt" ioreg -r -c IOAccelNMXDRMClient -l -w0
 }
 
+# r41: WindowServer's vkCreateDevice failed (-3) once its ioctls went through NMXGPU's IOKit client. The compute
+# probe runs here with every ioctl on that client (NMX_DRM_IOKIT=1), outside the sandbox, so its output shows
+# whether the transport itself breaks device creation, and Mesa's reason if it does.
+iokit_probe() {
+    local report=$1 rt=/Library/GPUBundles/nvmtl probe="$ROOT/components/probe" binary
+    binary="$probe/uhd770-compute-probe"
+    [ -x "$binary" ] || binary="$ROOT/derived-probes/uhd770-compute-probe"
+    if [ ! -x "$binary" ] || [ ! -f "$probe/verify.comp.spv" ] || [ ! -f "$rt/libvulkan_intel.dylib" ]; then
+        printf 'compute probe or runtime not found (%s, %s)\n' "$binary" "$rt" > "$report/iokit-probe.txt"
+        return
+    fi
+    printf '{"file_format_version":"1.0.0","ICD":{"library_path":"%s/libvulkan_intel.dylib","api_version":"1.3.0"}}\n' \
+        "$rt" > "$report/iokit-icd.json"
+    bounded 60 "$report/iokit-probe.txt" env NMX_DRM_IOKIT=1 "$binary" --loader "$rt/libvulkan.1.dylib" \
+        --icd "$report/iokit-icd.json" --shader "$probe/verify.comp.spv" --device-id 0x4680 --count 4099 \
+        --iterations 3 --deadline 45
+    bounded 5 "$report/iokit-probe-clients.txt" ioreg -r -c IOAccelNMXDRMClient -l -w0
+}
+
 # r35: a plain killall (SIGTERM) left WindowServer running. SIGHUP is the usual way to
 # end it (loginwindow starts a new one); SIGKILL only if the same process is still there.
 restart_windowserver() {
@@ -65,10 +83,42 @@ restart_windowserver() {
     printf 'after: %s\n' "$(pgrep -x WindowServer | tr '\n' ' ')"
 }
 
+# The 1401 USB by the volume UUID that preparation recorded, mounted if macOS has not; never by its mount name,
+# which becomes "1401 2" when another volume has that name and missed the r40 report.
+usb_mount_point() {
+    local uuid info mp=''
+    uuid=$(plutil -extract volume_uuid raw -o - "$PUBLIC/plan.plist" 2>/dev/null) || return 1
+    [ -n "$uuid" ] || return 1
+    info=$(mktemp /private/tmp/uhd770-usb.XXXXXX) || return 1
+    if diskutil info -plist "$uuid" > "$info" 2>/dev/null; then mp=$(plutil -extract MountPoint raw -o - "$info" 2>/dev/null || :); fi
+    if [ -z "$mp" ] && diskutil mount "$uuid" > /dev/null 2>&1 && diskutil info -plist "$uuid" > "$info" 2>/dev/null; then
+        mp=$(plutil -extract MountPoint raw -o - "$info" 2>/dev/null || :)
+    fi
+    rm -f "$info"
+    [ -n "$mp" ] && [ -d "$mp" ] && [ ! -L "$mp" ] && [ -f "$mp/EFI/OC/config.plist" ] || return 1
+    printf '%s\n' "$mp"
+}
+
+# to_usb <report> <stage>: copy the report so far; repeated after every step, so a watchdog panic loses nothing
+# already recorded and no extra macOS boot is needed to fetch it
+to_usb() {
+    local report=$1 stage=$2 usb
+    if ! usb=$(usb_mount_point); then
+        { printf '%s: no 1401 USB\n' "$stage"; ls -la /Volumes; } >> "$report/usb-copy.txt" 2>&1
+        return 0
+    fi
+    printf '%s: %s/UHD770-desktop-reports/%s\n' "$stage" "$usb" "${report##*/}" >> "$report/usb-copy.txt"
+    mkdir -p "$usb/UHD770-desktop-reports/${report##*/}" &&
+        ditto "$report" "$usb/UHD770-desktop-reports/${report##*/}" &&
+        bounded 30 "$report/usb-sync.txt" sync || printf '%s: copy failed\n' "$stage" >> "$report/usb-copy.txt"
+}
+
 worker() {
-    local report=$1 usb
+    local report=$1
     printf 'worker started %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     snapshot "$report" 1-before
+    to_usb "$report" 1-before
+    iokit_probe "$report"
     if [ "$(sysctl -n debug.nmxaccel_headless)" = 0 ]; then
         printf 'already armed on this boot: only WindowServer restarts\n' > "$report/arm-fb.txt"
     else
@@ -78,25 +128,22 @@ worker() {
         sleep 2
     fi
     snapshot "$report" 2-armed
+    to_usb "$report" 2-armed
     printf 'restarting WindowServer %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     restart_windowserver > "$report/windowserver-restart.txt" 2>&1
     sleep "$OBSERVE_FIRST"
     snapshot "$report" 3-after-${OBSERVE_FIRST}s
+    to_usb "$report" 3-after
     sleep "$OBSERVE_SECOND"
     snapshot "$report" 4-after-$((OBSERVE_FIRST + OBSERVE_SECOND))s
+    to_usb "$report" 4-after
     bounded 90 "$report/log.txt" log show --last 5m --info --debug --style compact --predicate \
         '(process == "kernel" AND (eventMessage CONTAINS "NMXAccel" OR eventMessage CONTAINS "NullMoth" OR (eventMessage CONTAINS "Sandbox" AND eventMessage CONTAINS "WindowServer"))) OR (process == "WindowServer" AND (messageType == error OR messageType == fault OR eventMessage CONTAINS "NullMoth" OR eventMessage CONTAINS[c] "metal" OR eventMessage CONTAINS[c] "accelerat" OR eventMessage CONTAINS[c] "display pipe" OR eventMessage CONTAINS "IOPresent"))'
     # r37: WindowServer found no Vulkan device although the render node is 0666; a sandbox denial would show here
     bounded 60 "$report/sandbox.txt" log show --last 5m --style compact --predicate \
         'eventMessage CONTAINS "Sandbox" AND (eventMessage CONTAINS "WindowServer" OR eventMessage CONTAINS "/dev/dri")'
     printf 'done %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$report/done.txt"
-    for usb in /Volumes/*; do
-        [ -d "$usb" ] && [ ! -L "$usb" ] && [ -f "$usb/EFI/OC/config.plist" ] || continue
-        # macOS mounts a second volume of the same name as "1401 2" (r39)
-        case "${usb##*/}" in 1401|'1401 '[0-9]) ;; *) continue ;; esac
-        mkdir -p "$usb/UHD770-desktop-reports" && ditto "$report" "$usb/UHD770-desktop-reports/${report##*/}" &&
-            bounded 60 "$report/usb-sync.txt" sync && printf 'USB copy: %s\n' "$usb/UHD770-desktop-reports/${report##*/}"
-    done
+    to_usb "$report" done
     printf 'worker finished %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 }
 
@@ -116,8 +163,10 @@ case "$boot" in ''|*[!a-zA-Z0-9-]*) printf 'REFUSED: invalid boot identity.\n' >
 args=$(sysctl -n kern.bootargs)
 case " $args " in *' -nvoff '*) printf 'REFUSED: this is the opt-out recovery boot; nothing to arm.\n' >&2; exit 65 ;; esac
 case " $args " in *' nmxintel=1 '*) ;; *) printf 'REFUSED: the Intel driver is not enabled on this boot.\n' >&2; exit 65 ;; esac
-[ -f "$PUBLIC/manual-result-$boot.txt" ] || {
-    printf 'REFUSED: run Run-UHD770-Test.command first on this boot, so its report is saved before WindowServer restarts.\n' >&2
+# The boot job must have put the safe config back on the USB first, so whatever happens next the following boot is
+# the recovery one. Run-UHD770-Test is no longer required (r41 speedup): it does the same check.
+grep -qx 'next_boot_optout=verified' "$PUBLIC/recovery-$boot.txt" 2>/dev/null || {
+    printf 'REFUSED: the next boot is not confirmed safe yet; wait a minute after login and run this again.\n' >&2
     exit 65; }
 sysctl -n debug.nmxaccelfb > /dev/null 2>&1 || { printf 'REFUSED: this NMXAccel has no debug.nmxaccelfb switch.\n' >&2; exit 66; }
 ioreg -r -c NMXGPU -l -w0 | grep -q '"nmxdiag-display-state" = "owned-by-NMIntelFB"' ||
@@ -153,5 +202,5 @@ chmod 644 "$plist"
 launchctl bootstrap system "$plist"
 printf '%s\n' '' "Desktop switch started; report: $report" \
     'In a few seconds the screen goes back to the login window: log in again.' \
-    'About 2 minutes after this line the report is copied to the 1401 USB (UHD770-desktop-reports/).' \
-    'If the screen stays black or frozen: wait 5 minutes, then restart through the 1401 USB; the reboot disarms everything.'
+    'The report is copied to the 1401 USB (UHD770-desktop-reports/) at every step; the last copy about 3 minutes after this line.' \
+    'If the screen stays black or frozen: wait 3 minutes, then restart; Windows can read the report, no macOS boot is needed.'

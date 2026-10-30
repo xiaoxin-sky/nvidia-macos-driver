@@ -21,7 +21,7 @@ fi
 case $- in *p*) ;; *) printf 'STOP: use /bin/bash -p.\n' >&2; exit 64 ;; esac
 REPORT=$(mktemp -d /Users/Shared/UHD770MVP-bootstrap.XXXXXX)
 chmod 700 "$REPORT"
-printf 'UHD770 准备中：通常 5–15 分钟。请保持终端打开，不要重启。\n'
+printf 'UHD770 准备中：只改用户态时约 1–2 分钟，改了内核约 3–5 分钟。请保持终端打开，不要重启。\n'
 
 # Clear whatever an earlier package left, with the same tools a person would
 # otherwise run by hand after a refusal. Each keeps all of its own checks; the
@@ -129,7 +129,7 @@ fi
 logs=$REPORT
 [ "$copied" -eq 0 ] || logs="$destination/${REPORT##*/}"
 if [ "$code" -eq 0 ]; then
-    printf '\nPREPARED：准备完成。\n下一步：用 1401 U 盘重启一次，进入 macOS 后在本目录运行\n  sudo /bin/bash -p ./Run-UHD770-Test.command\n'
+    printf '\nPREPARED：准备完成。\n下一步：用 1401 U 盘重启一次，进入 macOS 后在本目录运行\n  sudo /bin/bash -p ./Run-UHD770-Desktop.command\n（本轮改了计算或 Metal 时，先运行 sudo /bin/bash -p ./Run-UHD770-Test.command）\n'
 else
     reason=$(grep '^STOP:' "$REPORT/prepare.txt" 2>/dev/null | tail -1 || :)
     reason=${reason#STOP: }

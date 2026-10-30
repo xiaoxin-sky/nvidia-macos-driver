@@ -337,4 +337,30 @@ if kill -0 "$follower" 2>/dev/null; then exit 1; fi
 [ "$(session_derived_probe_name uhd770-metal-probe)" = mtlprobe ]
 [ "$(session_derived_probe_name uhd770-compute-probe)" = uhd770-compute-probe ]
 
+# AuxKC cache: the key follows every file and link of the repository and nothing else; a stored KC is reused only
+# while its digest matches, and only the three newest are kept.
+mkdir -p "$TASK_TMP/kc-repo/A.kext/Contents" "$TASK_TMP/kc-system"
+printf one > "$TASK_TMP/kc-repo/A.kext/Contents/Info.plist"
+ln -s Contents/Info.plist "$TASK_TMP/kc-repo/A.kext/link"
+first=$(session_kc_key "$TASK_TMP/kc-repo" "$TASK_TMP/kc-system" "$TASK_TMP/kc-system/kernel")
+[ "${#first}" -eq 64 ]
+[ "$(session_kc_key "$TASK_TMP/kc-repo" "$TASK_TMP/kc-system" "$TASK_TMP/kc-system/kernel")" = "$first" ]
+printf two > "$TASK_TMP/kc-repo/A.kext/Contents/Info.plist"
+[ "$(session_kc_key "$TASK_TMP/kc-repo" "$TASK_TMP/kc-system" "$TASK_TMP/kc-system/kernel")" != "$first" ]
+printf one > "$TASK_TMP/kc-repo/A.kext/Contents/Info.plist"
+rm "$TASK_TMP/kc-repo/A.kext/link"
+ln -s Contents "$TASK_TMP/kc-repo/A.kext/link"
+[ "$(session_kc_key "$TASK_TMP/kc-repo" "$TASK_TMP/kc-system" "$TASK_TMP/kc-system/kernel")" != "$first" ]
+if session_kc_cached "$TASK_TMP/kc-cache" "$first"; then exit 1; fi
+printf collection > "$TASK_TMP/kc-built"
+session_kc_store "$TASK_TMP/kc-cache" "$first" "$TASK_TMP/kc-built"
+session_kc_cached "$TASK_TMP/kc-cache" "$first"
+[ "$(cat "$TASK_TMP/kc-cache/$first.kc")" = collection ]
+printf tampered > "$TASK_TMP/kc-cache/$first.kc"
+if session_kc_cached "$TASK_TMP/kc-cache" "$first"; then exit 1; fi
+for k in k1 k2 k3 k4; do session_kc_store "$TASK_TMP/kc-cache" "$k" "$TASK_TMP/kc-built"; sleep 1; done
+[ "$(ls "$TASK_TMP/kc-cache"/*.kc | wc -l | tr -d ' ')" -eq 3 ]
+[ ! -e "$TASK_TMP/kc-cache/k1.kc" ] && [ ! -e "$TASK_TMP/kc-cache/k1.kc.sha256" ]
+session_kc_cached "$TASK_TMP/kc-cache" k4
+
 printf 'Session transaction, terminal/deadline export, recorder and sequential failure gates passed; no GPU accessed.\n'

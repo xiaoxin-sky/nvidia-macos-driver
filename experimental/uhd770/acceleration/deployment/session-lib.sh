@@ -539,3 +539,35 @@ session_compute_sequence() {
     printf 'phase=metal-suite\nexit=%s\nmetal_started=true\nrender_started=true\nsuite_started=true\n' "$code" > "$output/sequence.txt"
     return "$code"
 }
+
+# AuxKC cache (UHD 770 test-loop speedup, r41). A preparation built the AuxKC up to three times, each a minute or
+# more, although most rounds change only userland. The key covers what kmutil reads: the kernel, the boot and system
+# collections (by size, time and inode; they change only with macOS) and every file and link of the extension
+# repository. Equal keys reuse the bytes an earlier preparation built and inspected.
+# session_kc_key <repository> <kernel collections dir> <kernel>
+session_kc_key() {
+    {
+        uname -v
+        stat -f '%N %z %m %i' "$2/BootKernelExtensions.kc" "$2/SystemKernelExtensions.kc" "$3" 2>/dev/null || :
+        (cd "$1" && find . -type f -exec shasum -a 256 {} + | LC_ALL=C sort &&
+            find . -type l -exec sh -c 'for l do printf "%s -> %s\n" "$l" "$(readlink "$l")"; done' _ {} + | LC_ALL=C sort)
+    } | shasum -a 256 | awk '{print $1}'
+}
+
+# session_kc_cached <cache dir> <key>: the cached KC exists, is a regular file and still has its recorded digest
+session_kc_cached() {
+    local file="$1/$2.kc"
+    [ -d "$1" ] && [ ! -L "$1" ] && [ -f "$file" ] && [ ! -L "$file" ] && [ -f "$file.sha256" ] || return 1
+    [ "$(shasum -a 256 "$file" | awk '{print $1}')" = "$(cat "$file.sha256")" ]
+}
+
+# session_kc_store <cache dir> <key> <kc>: best effort; keeps the three newest
+session_kc_store() {
+    local old
+    [ ! -L "$1" ] || return 0
+    [ -d "$1" ] || mkdir -m 700 "$1" 2>/dev/null || [ -d "$1" ] || return 0
+    cp "$3" "$1/$2.kc" 2>/dev/null || return 0
+    shasum -a 256 "$1/$2.kc" | awk '{print $1}' > "$1/$2.kc.sha256" || return 0
+    ls -t "$1"/*.kc 2>/dev/null | tail -n +4 | while IFS= read -r old; do rm -f "$old" "$old.sha256"; done
+    return 0
+}

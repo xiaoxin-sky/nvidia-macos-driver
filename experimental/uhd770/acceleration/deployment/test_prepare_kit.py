@@ -126,6 +126,11 @@ class PreparationTests(unittest.TestCase):
         identity = json.loads(payload["session-target/identity.json"])
         self.assertEqual(identity["safe_hash"], kit.sha256(raw))
         self.assertEqual(plistlib.loads(payload["session-target/identity.plist"]), identity)
+        quiet = plistlib.dumps({"NVRAM": {"Add": {guid: {"boot-args": "-igfxvesa -nvoff"}},
+                                          "Delete": {guid: ["boot-args"]}}})
+        test = plistlib.loads(kit.session_payload(quiet, "1401")["session-target/config.test.plist"])
+        self.assertEqual(test["NVRAM"]["Add"][guid]["boot-args"],
+                         "-v -igfxvesa nmxintel=1 nmxdiagdelay=60 amfi_get_out_of_my_way=0x1")
 
     def test_single_session_refuses_missing_recovery_and_competing_kexts(self):
         guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"

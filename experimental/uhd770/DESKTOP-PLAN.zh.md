@@ -235,6 +235,21 @@
 - 部署：Desktop 脚本也认 `1401 N` 卷；快照多记录 `IOAccelNMXDRMClient`。
 - 不做：普通沙盒应用需要的 libdrm 0004/0005、NMXAccel 0045（WindowServer 用不到），留到桌面跑通以后。
 
+**r40 结果（2026-10-30）。** 仍未回到登录界面，约 15 分钟后看门狗 panic（报告 `UHD770MVP-desktop.JEkSsB`）：
+- IOKit 通道通了：WindowServer 打开了多个 `IOAccelNMXDRMClient`（`IOUserClientCreator = pid …, WindowServer`），沙盒没有拦截它们。沙盒日志里剩下的 `deny file-ioctl` 是每个 fd 的第一次尝试，之后 libdrm 就切换到客户端。
+- 插件第一次在 WindowServer 里找到了 GPU，走到了 `vkCreateDevice`，但每次都返回 -3（`VK_ERROR_INITIALIZATION_FAILED`），WindowServer 仍然退回 CPU 渲染并反复崩溃。
+- 失败发生在设备 fd 切换到客户端后约 27 ms。在 i915 路径上返回 -3 的只有内核上下文或 VM 的创建（`kernel context creation failed`）和打开设备本身。具体原因 Mesa 只交给 Vulkan 调试回调；插件的回调只写文件，而 WindowServer 的沙盒不让写，所以这次没有留下原因。
+
+**r41 的改动（只加诊断，不改驱动行为）。**
+- 插件：调试回调收到的 Mesa 原因同时写进系统日志（`NullMoth: nvk-reason: …`），WindowServer 里也看得到。
+- libdrm：`NMX_DRM_IOKIT=1` 时每个 ioctl 从第一次起就走 IOKit 客户端。
+- Desktop 脚本：重启 WindowServer 之前，先用 `NMX_DRM_IOKIT=1` 跑一次计算探针（`iokit-probe.txt`）。它不在沙盒里，所以能判断问题出在 IOKit 通道本身，还是 WindowServer 特有的条件（只读 fd、沙盒），并带出 Mesa 的原因。
+
+**r41 同时缩短测试循环（用户计时：拿到新包到测完要 30 分钟以上）。**
+- Start：不再等 120 秒的正常桌面录制验证（录制器照样安装，Run-Test 仍会等新的录制）；AuxKC 按输入（内核、系统 KC、扩展目录里每个文件和链接）缓存，输入相同就复用上次装过的 KC，只改用户态的轮次三次 `kmutil create` 一次都不跑。
+- Desktop：不再要求先跑 Run-Test，只要求开机任务已确认下一次是恢复启动；按 Start 记下的卷 UUID 找 U 盘（没挂就挂上），每一步都把报告拷进 U 盘，panic 后直接回 Windows 读，不再需要多进一次 macOS 抓日志。
+- OpenCore（用户 2026-10-30 同意）：安全配置关掉 `AppleDebug`，`Target` 由 3 改为 1，去掉 `-v`；测试配置仍带 `-v`（`prepare_kit` 自动加）。原配置备份为 U 盘上的 `config.plist.uhd770-before-speedup-20261030`。
+
 **主要未知数。**
 - 拷贝路径原本是"NVIDIA 显存 → Intel 内屏"。现在源和目的都在 Intel 这边（ANV 的系统内存表面 → BAR2 扫描缓冲），`performTransaction` 怎么读取源表面，要在 F1 里读代码确认，可能还要改。
 - IOAccelerator 显示机对帧缓冲和加速器的配对规则（显示组编号、`IOAccelIndex` 等）还没有逐行确认。

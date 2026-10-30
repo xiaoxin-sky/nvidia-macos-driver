@@ -5,6 +5,7 @@ adapters into one temporary tree. Their preparation, EXIT recovery and user
 coordinator bodies are unchanged. No real disk inventory or GPU is accessed.
 """
 
+import hashlib
 import json
 import os
 import pathlib
@@ -424,6 +425,39 @@ class SessionFlowTests(unittest.TestCase):
             "com.nullmoth.NMXGPU": "candidate", "com.nullmoth.NMXAccel": "candidate", "com.fixture.other": "unrelated"})
         self.assertTrue(all(pathlib.Path(entry["path"]).parent == self.mac / "Library/Extensions" for entry in live))
         self.assertEqual((self.installed / "session-private/journal/auxkc.backup").read_bytes(), b"original KC")
+
+    def test_unchanged_kc_inputs_reuse_the_cached_kc_without_kmutil(self):
+        """A userland-only round must not rebuild the AuxKC (r41 test-loop speedup).
+
+        The cache is seeded under the key preparation computes for the same
+        extension repository; preparation then installs those exact bytes,
+        still checks them with kmutil inspect, and never runs kmutil create.
+        """
+        mirror = self.root / "key-repository"
+        shutil.copytree(self.mac / "Library/Extensions", mirror, symlinks=True)
+        for name in ("NMXGPU", "NMXAccel"):
+            shutil.rmtree(mirror / f"{name}.kext")
+            shutil.copytree(self.root / f"seed/kc-preflight/repository/{name}.kext", mirror / f"{name}.kext", symlinks=True)
+        kcs, kernel = self.mac / "System/Library/KernelCollections", self.mac / "System/Library/Kernels/kernel"
+        key = subprocess.run(["/bin/bash", "-c", '. "$1"; session_kc_key "$2" "$3" "$4"', "_",
+                              str(self.kit / "tools/session-lib.sh"), str(mirror), str(kcs), str(kernel)],
+                             env=dict(self.env, PATH=f"{self.root / 'mock-bin'}:/usr/bin:/bin:/usr/sbin:/sbin"),
+                             capture_output=True, check=True).stdout.decode().strip()
+        self.assertRegex(key, "^[0-9a-f]{64}$")
+        entries = [{"id": data["CFBundleIdentifier"], "path": str(self.mac / "Library/Extensions" / bundle.name),
+                    "payload": (bundle / "Contents/MacOS" / bundle.stem).read_text()}
+                   for bundle in sorted(mirror.glob("*.kext"))
+                   for data in [plistlib.loads((bundle / "Contents/Info.plist").read_bytes())]]
+        cache = self.mac / "Library/Application Support/UHD770-kc-cache"
+        cache.mkdir(mode=0o700)
+        cached = json.dumps(entries).encode()
+        (cache / f"{key}.kc").write_bytes(cached)
+        (cache / f"{key}.kc.sha256").write_text(hashlib.sha256(cached).hexdigest() + "\n")
+        prepared = self.run_session("prepare")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
+        self.assertFalse((self.root / "kc-builds.jsonl").exists())
+        self.assertEqual((self.mac / "Library/KernelCollections/AuxiliaryKernelExtensions.kc").read_bytes(), cached)
+        self.assertEqual((self.installed / "session-private/installed-kc-build.txt").read_text(), f"cached={key}\n")
 
     def test_late_permission_failure_occurs_before_any_live_replacement(self):
         """A last-target normalization error must leave originals unjournaled."""

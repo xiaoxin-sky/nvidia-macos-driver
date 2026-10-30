@@ -293,18 +293,29 @@ index cf161db..3416efe 100644
      if (!strcmp(me, "mtlprobe") || !strcmp(me, "nvmtltest") || !strcmp(me, "nvmtlrender")) return true;
      FILE *f = fopen("/Library/GPUBundles/nvmtl-allow.txt", "r");
 diff --git a/plugin/nvmtl_vk.c b/plugin/nvmtl_vk.c
-index f0c9c58..f2568b7 100644
+index f0c9c58..8e42c08 100644
 --- a/plugin/nvmtl_vk.c
 +++ b/plugin/nvmtl_vk.c
-@@ -12,6 +12,7 @@
+@@ -12,6 +12,8 @@
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
 +#include <errno.h>
++#include <syslog.h>
  #include <stdint.h>
  #include <stdatomic.h>
  #include <math.h>
-@@ -697,6 +698,16 @@ static int nvmtl_vk_initialize(void)
+@@ -570,6 +572,9 @@ static VkBool32 VKAPI_PTR nvmtl_vkmsg_cb(VkDebugUtilsMessageSeverityFlagBitsEXT
+         else     fprintf(f, "pid %d NVMTL: %s%s\n", getpid(), t, full ? "   [table full]" : "");
+         fclose(f);
+     }
++    /* WindowServer's sandbox cannot write that file, and its vkCreateDevice failed with no reason anywhere (UHD 770
++     * F, r40): they also go to the system log (Mesa reports driver failures as warnings) */
++    syslog(LOG_ERR, "NullMoth: %s%s", t, full ? "   [table full]" : "");
+     return VK_FALSE;
+ }
+ static int nvmtl_vkmsg_off_by_env(void) { const char *e = getenv("NVMTL_NVK_MESSAGES"); return e && !strcmp(e, "0"); }
+@@ -697,6 +702,16 @@ static int nvmtl_vk_initialize(void)
              }
          }
      }
@@ -321,7 +332,7 @@ index f0c9c58..f2568b7 100644
      g_lib = dlopen(NVMTL_ICD_LIB, RTLD_NOW | RTLD_LOCAL);
      if (g_lib) {
          pvkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(g_lib, "vkGetInstanceProcAddr");
-@@ -742,6 +753,23 @@ static int nvmtl_vk_initialize(void)
+@@ -742,6 +757,23 @@ static int nvmtl_vk_initialize(void)
                (int)er, n, getprogname(), (unsigned)getuid(), (unsigned)geteuid(),
                er != VK_SUCCESS ? "the ENUMERATION failed, so NVK could not reach the device (not an absent GPU)"
                                 : "the enumeration SUCCEEDED and found no device through this ICD");
@@ -345,7 +356,7 @@ index f0c9c58..f2568b7 100644
          return -1; }
      nvlog("vk: pdev %u physical device(s) through this ICD (VkResult %d)", n, (int)er);
      VkPhysicalDevice pds[8]; if (n > 8) n = 8; pvkEnumeratePhysicalDevices(g_inst, &n, pds); g_pdev = pds[0];
-@@ -1288,7 +1316,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
+@@ -1288,7 +1320,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
          VkResult r2 = r1 == VK_SUCCESS ? pvkMapMemory(g_dev, bm, 0, VK_WHOLE_SIZE, 0, &bp) : r1;
          VkResult r3 = r2 == VK_SUCCESS ? pvkBindBufferMemory(g_dev, out->buf, bm, 0) : r2;
          if (r3 == VK_SUCCESS) {
@@ -354,7 +365,7 @@ index f0c9c58..f2568b7 100644
              { static int said; if (!said++) nvlog("vk: shared buffer of %zu bytes placed in VRAM through BAR1 (type %d)", size, bt); }
              return 0; }
          if (bp) pvkUnmapMemory(g_dev, bm);
-@@ -1318,7 +1346,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
+@@ -1318,7 +1350,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
              return -1;
          }
      } else VKCK(nvmtl_opaque_AllocateMemory(g_dev, &mai, NULL, &out->mem), "vkAllocateMemory(buffer)");
@@ -363,7 +374,7 @@ index f0c9c58..f2568b7 100644
      if (!host_visible) nvmtl_vk_budget_charge(mr.size);
      VKCK(pvkBindBufferMemory(g_dev, out->buf, out->mem, 0), "vkBindBufferMemory");
      if (host_visible) { VkResult mr_ = pvkMapMemory(g_dev, out->mem, 0, VK_WHOLE_SIZE, 0, &out->map); if (mr_ != VK_SUCCESS) {
-@@ -1398,7 +1426,7 @@ int nvmtl_vk_buffer_import_host(void *ptr, size_t size, nvk_buffer *out)
+@@ -1398,7 +1430,7 @@ int nvmtl_vk_buffer_import_host(void *ptr, size_t size, nvk_buffer *out)
          nvlog("vk: vkBindBufferMemory refused the imported allocation");
          pvkFreeMemory(g_dev, (VkDeviceMemory)out->mem, NULL); pvkDestroyBuffer(g_dev, (VkBuffer)out->buf, NULL);
          out->buf = NULL; out->mem = NULL; return -1; }
@@ -372,7 +383,7 @@ index f0c9c58..f2568b7 100644
      g_alloc_bytes += size; g_buf_made++;
      { static int said; if (!said++) nvlog("vk: imported the caller's pages as device memory — %zu bytes at %p, memory type %d", size, ptr, mt); }
      return 0;
-@@ -1834,8 +1862,12 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
+@@ -1834,8 +1866,12 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
  static int nvmtl_gpu_headless(void)
  {
      static int h = -1;
@@ -387,7 +398,7 @@ index f0c9c58..f2568b7 100644
      if (h < 0) { int v = 0; size_t n = sizeof v; h = sysctlbyname("debug.nvaccel_headless", &v, &n, NULL, 0) == 0 && v;
                   if (h) nvlog("headless GPU: the display belongs to another GPU - IOSurfaces are copied out to system memory"); }
      return h;
-@@ -1904,7 +1936,7 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
+@@ -1904,7 +1940,7 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
          nvlog("item 7: surface %u: a buffer over the imported VRAM was refused - private", surfaceID);
          return -1;
      }
@@ -396,7 +407,7 @@ index f0c9c58..f2568b7 100644
      g_buf_made++;
      return 0;
  }
-@@ -7200,7 +7232,10 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
+@@ -7200,7 +7236,10 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
      VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, (VkImage)out->img, &mr);
      uint32_t all = g_memp.memoryTypeCount >= 32 ? 0xffffffffu : ((1u << g_memp.memoryTypeCount) - 1u);
      size_t at = b->moff + offset;
@@ -408,7 +419,7 @@ index f0c9c58..f2568b7 100644
      if (why) {
          nvlog("buffer texture: refused on %s - image types 0x%x of 0x%x, bind at %zu (buffer %zu + %zu) vs alignment %llu",
                why, mr.memoryTypeBits, all, at, b->moff, offset, (unsigned long long)mr.alignment);
-@@ -7336,7 +7371,7 @@ static int pool_buffer_create_in(int vram, size_t size, nvk_buffer *out)
+@@ -7336,7 +7375,7 @@ static int pool_buffer_create_in(int vram, size_t size, nvk_buffer *out)
          pthread_mutex_lock(&g_pool_lock); blk->nlive--; g_pool_live--; g_pool_bytes -= len; pool_block_give(blk, off, len); pthread_mutex_unlock(&g_pool_lock);
          return -1;
      }

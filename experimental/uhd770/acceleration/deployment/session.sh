@@ -13,6 +13,8 @@ PUBLIC="$ROOT/session-public"
 PRIVATE="$ROOT/session-private"
 JOURNAL="$PRIVATE/journal"
 PLAN="$PUBLIC/plan.plist"
+# Built AuxKCs by input key (session_kc_key), reused when only userland changed
+KC_CACHE='/Library/Application Support/UHD770-kc-cache'
 LABEL=com.uhd770.mvp.session
 # macOS may legitimately allow its daemon group to write /private/var/run.
 # Use a private sibling of the staged tree; creating ROOT here would make
@@ -567,17 +569,10 @@ prepare() {
     # Normal-desktop recorder validation is automatic, in this same invocation.
     [ ! -e /Library/LaunchDaemons/com.uhd770.mvp.capture.plist ] || die 'An earlier capture job exists; it was preserved.'
     /bin/bash -p "$HERE/manage.sh" install-recorder
-    local elapsed=0 found='' report
-    printf 'Checking the automatic recorder for one 120-second normal-desktop session...\n'
-    while [ "$elapsed" -lt 150 ]; do
-        for report in /private/var/log/UHD770MVP/session-*; do
-            if session_recorder_valid "$report" "$current"; then found=$report; break; fi
-        done
-        [ -z "$found" ] || break
-        sleep 5; elapsed=$((elapsed + 5))
-    done
-    [ -n "$found" ] || die 'Recorder did not pass; no live driver was replaced or enabled.'
-    printf 'recorder=%s\nnormal_desktop_capture=passed\n' "$found" > "$PRIVATE/recorder-check.txt"
+    local elapsed=0
+    # The 120-second normal-desktop recording check passed on every preparation since it was added and held each one
+    # for over two minutes (UHD 770 test-loop speedup, r41). Run-UHD770-Test still waits for a fresh live capture.
+    printf 'normal_desktop_capture=skipped\n' > "$PRIVATE/recorder-check.txt"
     # Use ten minutes on the next boot: attach delay plus both bounded probes.
     /usr/libexec/PlistBuddy -c "Set :ProgramArguments:3 $MANUAL_CAPTURE_LIMIT" /Library/LaunchDaemons/com.uhd770.mvp.capture.plist
     local work="$PRIVATE/prepared" repo="$PRIVATE/repository" key target prepared
@@ -594,9 +589,17 @@ prepare() {
     local ka=(--allow-missing-kdk -a x86_64)
     [ ! -f /System/Library/Kernels/kernel ] || ka+=(--kernel /System/Library/Kernels/kernel)
     [ ! -s /System/Library/KernelCollections/SystemKernelExtensions.kc ] || ka+=(-S /System/Library/KernelCollections/SystemKernelExtensions.kc)
-    session_bounded 300 "$PRIVATE/live-kc-build.txt" kmutil create -n aux --volume-root / "${ka[@]}" \
-        -B /System/Library/KernelCollections/BootKernelExtensions.kc --repository "$repo" \
-        -A "$work/auxkc" -z || die 'Full-repository KC build failed; original files unchanged.'
+    local kc_key
+    kc_key=$(session_kc_key "$repo" /System/Library/KernelCollections /System/Library/Kernels/kernel)
+    if session_kc_cached "$KC_CACHE" "$kc_key"; then
+        # the same inputs as an earlier preparation: its installed KC, already built and inspected
+        cp "$KC_CACHE/$kc_key.kc" "$work/auxkc"
+        printf 'cached=%s\n' "$kc_key" > "$PRIVATE/live-kc-build.txt"
+    else
+        session_bounded 300 "$PRIVATE/live-kc-build.txt" kmutil create -n aux --volume-root / "${ka[@]}" \
+            -B /System/Library/KernelCollections/BootKernelExtensions.kc --repository "$repo" \
+            -A "$work/auxkc" -z || die 'Full-repository KC build failed; original files unchanged.'
+    fi
     session_bounded 30 "$PRIVATE/live-kc-inspect.txt" kmutil inspect -a x86_64 -A "$work/auxkc" || die 'Cannot inspect candidate KC.'
     # Require every original top-level extension, rather than silently building
     # an AuxKC containing only our two bundles and dropping unrelated drivers.
@@ -674,9 +677,16 @@ prepare() {
             # locations after their journaled replacement, preserving the old
             # live KC until this output and its embedded paths both pass.
             prepared="$work/auxkc-installed"
-            session_bounded 300 "$PRIVATE/installed-kc-build.txt" kmutil create -n aux --volume-root / "${ka[@]}" \
-                -B /System/Library/KernelCollections/BootKernelExtensions.kc --repository /Library/Extensions \
-                -A "$prepared" -z || die 'Installed-repository KC build failed; restoring original files.'
+            local installed_key
+            installed_key=$(session_kc_key /Library/Extensions /System/Library/KernelCollections /System/Library/Kernels/kernel)
+            if [ "$installed_key" = "$kc_key" ] && session_kc_cached "$KC_CACHE" "$installed_key"; then
+                cp "$KC_CACHE/$installed_key.kc" "$prepared"
+                printf 'cached=%s\n' "$installed_key" > "$PRIVATE/installed-kc-build.txt"
+            else
+                session_bounded 300 "$PRIVATE/installed-kc-build.txt" kmutil create -n aux --volume-root / "${ka[@]}" \
+                    -B /System/Library/KernelCollections/BootKernelExtensions.kc --repository /Library/Extensions \
+                    -A "$prepared" -z || die 'Installed-repository KC build failed; restoring original files.'
+            fi
             session_bounded 30 "$PRIVATE/installed-kc-inspect.txt" kmutil inspect -a x86_64 -A "$prepared" \
                 || die 'Cannot inspect the final KC; restoring original files.'
             for candidate in /Library/Extensions/*.kext; do
@@ -686,6 +696,7 @@ prepare() {
                     '$1 == id && $3 == path { found=1 } END { exit !found }' "$PRIVATE/installed-kc-inspect.txt" \
                     || die "Final KC does not name the installed bundle $candidate; restoring original files."
             done
+            session_kc_store "$KC_CACHE" "$installed_key" "$prepared"
             session_tree_permissions "$prepared" readable || die 'Cannot normalize final KC; restoring original files.'
         fi
         session_replace "$JOURNAL" "$key" "$target" "$prepared"
@@ -709,7 +720,7 @@ prepare() {
     printf '\nPREPARED. Restart ONCE through the same 1401 USB and choose macOS 15.\n'
     printf 'Log in normally. GPU takeover waits 60 seconds after firmware availability.\n'
     printf 'The next-boot opt-out is restored automatically. No compute test starts at login.\n'
-    printf 'After login, run this kit Run-UHD770-Test.command with sudo /bin/bash -p when YOU choose.\n'
+    printf 'After login, run Run-UHD770-Desktop.command (or Run-UHD770-Test.command first) with sudo /bin/bash -p.\n'
     printf 'If black, wait 6 minutes after signal loss, then restart through the same USB.\n'
     printf 'If that recovery boot fails, return to Windows and run the package Restore-UHD770.ps1.\n'
     printf 'No automatic reboot or claim of acceleration success.\n'

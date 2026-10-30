@@ -200,8 +200,12 @@ def session_payload(source, volume_label):
                      entry.get("BundlePath", "").split("/")[0] in {"NMXGPU.kext", "NMXAccel.kext"}),
                 "session cannot replace a competing EFI-injected NMX bundle")
     require(re.fullmatch(r"[A-Za-z0-9_-]{1,32}", volume_label) is not None, "invalid USB label")
+    # Verbose boot only where it diagnoses something: the safe config may drop -v to boot faster (r41)
+    kept = [w for w in words if w != "-nvoff"]
+    if "-v" not in kept:
+        kept.insert(0, "-v")
     data["NVRAM"]["Add"][guid]["boot-args"] = " ".join(
-        [w for w in words if w != "-nvoff"] + ["nmxintel=1", "nmxdiagdelay=60", "amfi_get_out_of_my_way=0x1"])
+        kept + ["nmxintel=1", "nmxdiagdelay=60", "amfi_get_out_of_my_way=0x1"])
     test = plistlib.dumps(data, sort_keys=False)
     identity = {"safe_hash": sha256(source), "test_hash": sha256(test), "volume_label": volume_label}
     return {"session-target/config.safe.plist": source,

@@ -124,6 +124,15 @@ isolated_kc() {
         args+=(-S /System/Library/KernelCollections/SystemKernelExtensions.kc)
     fi
     if [ -f /System/Library/Kernels/kernel ]; then args+=(--kernel /System/Library/Kernels/kernel); fi
+    # These exact kexts already linked against this macOS in an earlier stage (session_kc_key; r41 speedup)
+    local cache='/Library/Application Support/UHD770-kc-cache' key
+    key=$(session_kc_key "$work/repository" /System/Library/KernelCollections /System/Library/Kernels/kernel)
+    if [ -f "$cache/linkage-$key.ok" ] && [ ! -L "$cache/linkage-$key.ok" ] && [ ! -L "$cache" ]; then
+        printf 'cached=%s\n' "$key" > "$work/kmutil-create.txt"
+        printf 'temporary_KC_linkage=passed\ncached=%s\ninstalled=false\nloaded=false\ntrust_verified=false\ngpu_executed=false\n' \
+            "$key" > "$work/result.txt"
+        return 0
+    fi
     bounded 180 "$work/kmutil-create.txt" kmutil create -n aux --volume-root / "${args[@]}" \
         -B /System/Library/KernelCollections/BootKernelExtensions.kc \
         --repository "$work/repository" \
@@ -133,6 +142,7 @@ isolated_kc() {
     grep -Fq com.nullmoth.NMXGPU "$work/kmutil-inspect.txt" || return 1
     grep -Fq com.nullmoth.NMXAccel "$work/kmutil-inspect.txt" || return 1
     printf 'temporary_KC_linkage=passed\ninstalled=false\nloaded=false\ntrust_verified=false\ngpu_executed=false\n' > "$work/result.txt"
+    if [ ! -L "$cache" ] && mkdir -p -m 700 "$cache" 2>/dev/null; then : > "$cache/linkage-$key.ok" || :; fi
 }
 
 stage() {

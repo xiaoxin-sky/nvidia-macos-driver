@@ -36,7 +36,7 @@ diff --git a/xf86drm.c b/xf86drm.c
      } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
      return ret;
  }
-@@ -5554,6 +5558,98 @@ drmGetFormatName(uint32_t format)
+@@ -5554,6 +5558,110 @@ drmGetFormatName(uint32_t format)
  #ifdef __APPLE__
  #include <pthread.h>
  #include <sys/ioctl.h>
@@ -103,9 +103,21 @@ diff --git a/xf86drm.c b/xf86drm.c
 +    return conn;
 +}
 +
++/* NMX_DRM_IOKIT=1 sends every ioctl through the IOKit client from the first one, so an unsandboxed test exercises
++ * WindowServer's transport (UHD 770 plan step F, r41) */
++static int nmx_uc_forced(void)
++{
++    static int forced = -1;
++    if (forced < 0) {
++        const char *e = getenv("NMX_DRM_IOKIT");
++        forced = e && !strcmp(e, "1");
++    }
++    return forced;
++}
++
 +drm_public int drmNmxIoctl(int fd, unsigned long request, void *arg)
 +{
-+    io_connect_t conn = nmx_uc_get(fd, 0);
++    io_connect_t conn = nmx_uc_get(fd, nmx_uc_forced());
 +    if (!conn) {
 +        int ret = ioctl(fd, request, arg);
 +        if (ret == 0 || errno != EPERM)
