@@ -171,6 +171,19 @@
 - `Run-UHD770-Desktop.command`（F2）：要求本次开机已经跑完 Run-UHD770-Test。它通过 launchd 以 root 身份在后台依次写 `debug.nmxaccel_iop=1` 和 `debug.nmxaccelfb=3`，然后重启 WindowServer，在 20 秒和 60 秒时各记录一次开关、计数器和注册表，再记录内核、插件和 WindowServer 的日志，最后拷到 U 盘的 `UHD770-desktop-reports/`。重启即撤销所有改动。
 - 参考项目的串行提交、独立读回暂存区等 WindowServer 策略，这一轮还没有移植；先看基本路径能不能通。
 
+**r35–r37 结果（2026-10-30）。**
+- r35：上膛成功（NMIntelFB 成为 head 0，CPU 拷贝显示管线，`nmxaccel_headless=0`），但普通 `killall` 发的 SIGTERM 没能让 WindowServer 退出。r36：Start 的采集器自检因为一次启动初期的日志刷新超时而被拒（已修正）。
+- r37：四个测试阶段照常通过；Desktop 脚本用 SIGHUP 让 WindowServer 重启（pid 159 → 7497），新的 WindowServer 一直在运行，但屏幕停在内核文字界面，显示管线一帧也没收到（`nmxaccel_iop_ok/fail/empty` 全为 0）。报告 `UHD770-desktop-reports/UHD770MVP-desktop.Yw77NR` 显示三个障碍：
+  1. WindowServer 里 ANV 找不到 GPU：插件报 `vk: zero physical devices ... in WindowServer (uid 0 euid 88)`，WindowServer 因此报 `Failed to create MetalDevice for accelerator`。设备节点是 0666，怀疑是 WindowServer 的沙盒不让它访问 `/dev/dri`。参考项目为此在 NMXGPU 加了 IOKit DRM 客户端，并改了 libdrm（补丁 0045、libdrm 0002/0004）。我们这边还没有这套东西。
+  2. CoreDisplay 找不到这块帧缓冲的显示管线：`Unable to find display pipe for IOFB service ... 0x10000052c`（即 NMIntelFB）。参考项目补丁 0003 说明：扫描缓冲物理地址报 0（只用 CPU 拷贝）时，CoreDisplay 的 `MPAccessSurfaceForDisplayDevice` 会失败；需要报告真实的物理地址，并设置 `IOFBMemorySize`。
+  3. IOAccelerator 要求的每任务 GPU 地址分配失败（`NVTask::allocate: RM refused 8294400 bytes`，1474 次），这是 NVIDIA RM 专用的路径。参考项目补丁 0004 在 AMD/Intel 上改用一个简单的递增编号分配器。
+
+**r38 的改动（2026-10-30）：修第 2、3 个障碍，查清第 1 个。**
+- NMIntelFB 回答 `nvScanoutInfo` 时报告真实的扫描缓冲物理地址（BAR2 + SURF，页对齐大小），并设置 `IOFBMemorySize = 1 GiB`（参考补丁 0003）。显示管线因此走"live scanout"路径，为这块缓冲建立 framebuffer resource。
+- NMXAccel：Intel/AMD 上的每任务 GPU 地址改用递增分配器；上膛时为每个已登记的 head 补发 `framebuffer_did_power_on`（参考补丁 0004）。
+- 诊断：插件在找不到 GPU 时，记录打开 `/dev/dri`、`renderD128`、`card0` 的读写和只读结果（errno）；Desktop 脚本另外采集沙盒拦截记录（`sandbox.txt`），以及 WindowServer 的 display pipe 和 IOPresentment 日志。
+- 参考项目其余补丁的取舍：沙盒访问（0045、libdrm 0002/0004）、IOSurface（0025）、commitAndWaitUntilSubmitted（0016）、To_Accelerated（0042）、帧提交顺序（0019–0021）可能很快需要；0024/0026/0027/0043/0046 留到性能阶段；virtio-gpu、NMXVGAFB、NMXAGDC、QEMU、xe/SR-IOV 相关的用不上。每轮只移植当下卡住的那一块。
+
 **主要未知数。**
 - 拷贝路径原本是"NVIDIA 显存 → Intel 内屏"。现在源和目的都在 Intel 这边（ANV 的系统内存表面 → BAR2 扫描缓冲），`performTransaction` 怎么读取源表面，要在 F1 里读代码确认，可能还要改。
 - IOAccelerator 显示机对帧缓冲和加速器的配对规则（显示组编号、`IOAccelIndex` 等）还没有逐行确认。

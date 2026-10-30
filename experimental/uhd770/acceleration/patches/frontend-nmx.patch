@@ -1,5 +1,5 @@
 diff --git a/kexts/NVRM/accel/nvrm-accel.cpp b/kexts/NVRM/accel/nvrm-accel.cpp
-index 2eb9c21..7550e3a 100644
+index 2eb9c21..334ce5e 100644
 --- a/kexts/NVRM/accel/nvrm-accel.cpp
 +++ b/kexts/NVRM/accel/nvrm-accel.cpp
 @@ -417,6 +417,11 @@ public:
@@ -14,7 +14,22 @@ index 2eb9c21..7550e3a 100644
          if (fMetalPlugin && !getProperty("MetalPluginName")) {
              setProperty("MetalPluginName", fMetalPlugin);
              ALOG("  MetalPluginName restored -- a NEW process that asks Metal for this accelerator "
-@@ -629,7 +634,9 @@ public:
+@@ -534,6 +539,14 @@ public:
+                 ALOG("sysctl debug.nvaccelfb=%d: scanout-backed display pipe ENABLED, re-delivering the mode change", how);
+                 gAccel->deliverModeChange();
+             }
++#ifdef NMX_ACCEL
++            // NMIntelFB powered on at boot, before this registration: give each registered head the "did power on"
++            // that activates its display pipe, or the family refuses every transaction on it
++            if (gAccel->fDM) {
++                for (unsigned i = 0; i < gAccel->fDM->getFramebufferCount(); i++) gAccel->fDM->framebuffer_did_power_on(i);
++                gAccel->reportPipeGates("after framebuffer_did_power_on");
++            }
++#endif
+             if (gAccel->fRegLock) IOLockUnlock(gAccel->fRegLock);
+             return;
+         }
+@@ -629,7 +642,9 @@ public:
              gNvHeadless = 1;
              setProperty("NMXAccelHeadless", kOSBooleanTrue);
              ALOG("AMD/Intel accelerator up: Metal device for apps, frames copied to the framebuffer WindowServer draws");
@@ -25,7 +40,7 @@ index 2eb9c21..7550e3a 100644
  #else
              OSDictionary *fbm = serviceMatching("NVRMNVDAFramebuffer");
  #endif
-@@ -637,6 +644,7 @@ public:
+@@ -637,6 +652,7 @@ public:
                  fFBNote = addMatchingNotification(gIOFirstPublishNotification, fbm, &NVAccel::fbPublished, this, nullptr, 0);
                  fbm->release();
                  ALOG("watching for NVRMFramebuffer to publish -> notifier %p", fFBNote);
@@ -33,7 +48,7 @@ index 2eb9c21..7550e3a 100644
                  // a laptop whose built-in panel is on the Intel GPU: NMIntelFB publishes as head 4 of this accelerator
                  if (OSDictionary *im = serviceMatching("NMIntelFB")) {
                      fIntelNote = addMatchingNotification(gIOFirstPublishNotification, im, &NVAccel::fbPublished, this, nullptr, 0);
-@@ -652,6 +660,11 @@ public:
+@@ -652,6 +668,11 @@ public:
                           "`sysctl -w debug.nvaccelfb=1` puts it back, and a reboot takes it away again");
                      armHeadlessCheck();
                  }
@@ -45,7 +60,7 @@ index 2eb9c21..7550e3a 100644
              } else ALOG("serviceMatching(NVRMFramebuffer) returned NULL -- cannot watch for the framebuffer");
          }
          return r;
-@@ -1237,13 +1250,37 @@ static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS;
+@@ -1237,13 +1258,37 @@ static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS;
  SYSCTL_PROC(_debug, OID_AUTO, nvaccel_crc, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, nvaccel_crc_sysctl, "I",
              "b85k-crc: display CRC32 of what head nvaccel_crc_head is showing (0 = unavailable)");
  static bool gSysctlInstalled = false;
@@ -84,6 +99,28 @@ index 2eb9c21..7550e3a 100644
  #else
      sysctl_register_oid(&sysctl__debug_nvaccelfb);
      sysctl_register_oid(&sysctl__debug_nvaccel_headless);
+@@ -1921,6 +1966,21 @@ static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
+     NVMemoryMap *mm = OSDynamicCast(NVMemoryMap, map);
+     if (!mm || !len) return 0;
+     if (mm->fGpuVa) return mm->fGpuVa;
++#ifdef NMX_ACCEL
++    {
++        // AMD/Intel: Metal's GPU work runs in Mesa's own GPU VM (ANV/RADV), so the family's per-task GPU address of a
++        // mapping is only a unique number to it, and there is no NVIDIA RM to ask (r37: WindowServer's 1920x1080
++        // mappings were refused 1474 times). A bump allocator in a range no GPU uses, as in the reference Meteor Lake
++        // port (NullMoth-Xe 0004). fHVirt stays 0, so nvAccelGpuVaFree never calls the RM for these.
++        static volatile SInt64 gNmxNextVa = 0x100000000000ll;
++        const unsigned long long a = align > 0x10000 ? align : 0x10000;
++        const unsigned long long sz = (len + a - 1) & ~(a - 1);
++        unsigned long long va = (unsigned long long)OSAddAtomic64((SInt64)(sz + a), &gNmxNextVa);
++        va = (va + a - 1) & ~(a - 1);
++        mm->fGpuVa = va; mm->fVaLen = len; mm->fMapped = true;
++        return va;
++    }
++#endif
+ 
+     struct NVRMRmHandles h;
+     if (!nvAccelRmHandles(&h)) return 0;
 diff --git a/plugin/NVMTLDevice.m b/plugin/NVMTLDevice.m
 index cf161db..3416efe 100644
 --- a/plugin/NVMTLDevice.m
@@ -114,10 +151,18 @@ index cf161db..3416efe 100644
      if (!strcmp(me, "mtlprobe") || !strcmp(me, "nvmtltest") || !strcmp(me, "nvmtlrender")) return true;
      FILE *f = fopen("/Library/GPUBundles/nvmtl-allow.txt", "r");
 diff --git a/plugin/nvmtl_vk.c b/plugin/nvmtl_vk.c
-index f0c9c58..8ee6e9b 100644
+index f0c9c58..23df074 100644
 --- a/plugin/nvmtl_vk.c
 +++ b/plugin/nvmtl_vk.c
-@@ -697,6 +697,16 @@ static int nvmtl_vk_initialize(void)
+@@ -12,6 +12,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <errno.h>
+ #include <stdint.h>
+ #include <stdatomic.h>
+ #include <math.h>
+@@ -697,6 +698,16 @@ static int nvmtl_vk_initialize(void)
              }
          }
      }
@@ -134,7 +179,31 @@ index f0c9c58..8ee6e9b 100644
      g_lib = dlopen(NVMTL_ICD_LIB, RTLD_NOW | RTLD_LOCAL);
      if (g_lib) {
          pvkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(g_lib, "vkGetInstanceProcAddr");
-@@ -1834,8 +1844,12 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
+@@ -742,6 +753,23 @@ static int nvmtl_vk_initialize(void)
+               (int)er, n, getprogname(), (unsigned)getuid(), (unsigned)geteuid(),
+               er != VK_SUCCESS ? "the ENUMERATION failed, so NVK could not reach the device (not an absent GPU)"
+                                : "the enumeration SUCCEEDED and found no device through this ICD");
++        if (nvmtl_vk_vendor() != 0x10de) {
++            /* which step denies it: listing /dev/dri, opening the render node, or opening it read-write (UHD 770 F) */
++            static const char *const nodes[] = { "/dev/dri", "/dev/dri/renderD128", "/dev/dri/card0" };
++            for (unsigned i = 0; i < sizeof nodes / sizeof nodes[0]; i++) {
++                errno = 0;
++                const int rw = open(nodes[i], i ? O_RDWR | O_CLOEXEC : O_RDONLY | O_DIRECTORY | O_CLOEXEC);
++                const int rw_errno = rw < 0 ? errno : 0;
++                if (rw >= 0) close(rw);
++                errno = 0;
++                const int ro = open(nodes[i], (i ? O_RDONLY : O_RDONLY | O_DIRECTORY) | O_CLOEXEC);
++                const int ro_errno = ro < 0 ? errno : 0;
++                if (ro >= 0) close(ro);
++                nvlog("vk: no device diagnosis in %s: open(%s) %s -> errno %d (%s), read-only -> errno %d (%s)",
++                      getprogname(), nodes[i], i ? "read-write" : "directory", rw_errno, strerror(rw_errno),
++                      ro_errno, strerror(ro_errno));
++            }
++        }
+         return -1; }
+     nvlog("vk: pdev %u physical device(s) through this ICD (VkResult %d)", n, (int)er);
+     VkPhysicalDevice pds[8]; if (n > 8) n = 8; pvkEnumeratePhysicalDevices(g_inst, &n, pds); g_pdev = pds[0];
+@@ -1834,8 +1862,12 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
  static int nvmtl_gpu_headless(void)
  {
      static int h = -1;

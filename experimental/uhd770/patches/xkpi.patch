@@ -7312,11 +7312,12 @@ new file mode 100644
 new file mode 100644
 --- /dev/null
 +++ b/xnu/nmx_intelfb.cpp
-@@ -0,0 +1,596 @@
+@@ -0,0 +1,605 @@
 +/*
 + * UHD 770 plan step E (experimental/uhd770/DESKTOP-PLAN.zh.md 3.4): upstream kexts/NMIntelFB/intelfb.cpp, unchanged
 + * except the opt-in, the owner flag and summary NMXGPU reads, a NullMoth log prefix (the session keeps only
-+ * NullMoth kernel lines), the step guard below, and no NVIDIA head or built-in panel (r34); compiled into NMXGPU.kext as a second personality in the IOFramebuffer match category. It takes
++ * NullMoth kernel lines), the step guard below, no NVIDIA head or built-in panel (r34), and its real scan-out
++ * address for NMXAccel (r38); compiled into NMXGPU.kext as a second personality in the IOFramebuffer match category. It takes
 + * the IGPU from the firmware framebuffer at boot and publishes the scan-out the firmware lit, which i915 later adopts
 + * in place (r31), so WindowServer opens a framebuffer of this driver from the start. Same license as the original.
 + */
@@ -7760,6 +7761,9 @@ new file mode 100644
 +    if (!fSurfMap) IFBLOG("the surface would not map write-combined");
 +    setProperty("NMIntelFBPipe", fPipe, 32);
 +    setProperty("NMIntelFBDisplayVersion", fVer, 32);
++    // what WindowServer may place its display surfaces in (a framebuffer reports its VRAM here); system memory backs
++    // them on this integrated GPU, as in the reference Meteor Lake port (NullMoth-Xe 0003)
++    setProperty("IOFBMemorySize", 1ull << 30, 64);
 +    nmx_intelfb_step("vbl");
 +    armVbl();
 +    nmx_intelfb_step("power");
@@ -7840,7 +7844,12 @@ new file mode 100644
 +        if (!r || r->version != NVRM_VRAM_ABI_VERSION) return kIOReturnBadArgument;
 +        if (!fSurfMap) return kIOReturnNotReady;
 +        r->kva = (void *)fSurfMap->getVirtualAddress();
-+        r->phys = 0; r->actualSize = 0;
++        // UHD 770 plan step F (r38): this accelerator is the Intel GPU's own, and the surface is real CPU-physical
++        // memory (BAR2 + the plane's GGTT offset), not another GPU's VRAM. With phys 0 ("CPU-only, frames are copied")
++        // CoreDisplay found no display pipe for this framebuffer (r37) and fails MPAccessSurfaceForDisplayDevice
++        // (reference Meteor Lake port, NullMoth-Xe 0003); reported, the pipe gets a framebuffer resource over it.
++        r->phys = fApertureBase + fSurf;
++        r->actualSize = ((unsigned long long)fRowBytes * fHeight + 4095) & ~4095ull;   // whole 4 KiB pages
 +        r->width = fWidth; r->height = fHeight; r->pitch = fRowBytes;
 +        return kIOReturnSuccess;
 +    }

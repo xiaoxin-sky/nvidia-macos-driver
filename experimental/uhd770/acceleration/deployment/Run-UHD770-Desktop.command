@@ -83,7 +83,10 @@ worker() {
     sleep "$OBSERVE_SECOND"
     snapshot "$report" 4-after-$((OBSERVE_FIRST + OBSERVE_SECOND))s
     bounded 90 "$report/log.txt" log show --last 5m --info --debug --style compact --predicate \
-        '(process == "kernel" AND (eventMessage CONTAINS "NMXAccel" OR eventMessage CONTAINS "NullMoth")) OR (process == "WindowServer" AND (messageType == error OR messageType == fault OR eventMessage CONTAINS "NullMoth" OR eventMessage CONTAINS[c] "metal" OR eventMessage CONTAINS[c] "accelerat"))'
+        '(process == "kernel" AND (eventMessage CONTAINS "NMXAccel" OR eventMessage CONTAINS "NullMoth" OR (eventMessage CONTAINS "Sandbox" AND eventMessage CONTAINS "WindowServer"))) OR (process == "WindowServer" AND (messageType == error OR messageType == fault OR eventMessage CONTAINS "NullMoth" OR eventMessage CONTAINS[c] "metal" OR eventMessage CONTAINS[c] "accelerat" OR eventMessage CONTAINS[c] "display pipe" OR eventMessage CONTAINS "IOPresent"))'
+    # r37: WindowServer found no Vulkan device although the render node is 0666; a sandbox denial would show here
+    bounded 60 "$report/sandbox.txt" log show --last 5m --style compact --predicate \
+        'eventMessage CONTAINS "Sandbox" AND (eventMessage CONTAINS "WindowServer" OR eventMessage CONTAINS "/dev/dri")'
     printf 'done %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$report/done.txt"
     for usb in /Volumes/*; do
         [ -d "$usb" ] && [ ! -L "$usb" ] && [ -f "$usb/EFI/OC/config.plist" ] || continue
